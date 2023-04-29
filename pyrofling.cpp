@@ -799,8 +799,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 					encoder->process_rgb(*cmd, *ycbcr_pipeline, *view);
 			}
 
-			ycbcr_pipeline->fence.reset();
-			encoder_device->submit(cmd, &ycbcr_pipeline->fence);
+			encoder->submit_process_rgb(cmd, *ycbcr_pipeline);
 
 			// Need one binary semaphore for every composited surface.
 			// Relying on external timelines would be nice though,
@@ -982,6 +981,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
+		std::string encoder = "libx264";
 	} video_encode;
 
 	unsigned client_rate_multiplier = 1;
@@ -1034,6 +1034,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 			options.height = video_encode.height;
 			options.frame_timebase.num = 1;
 			options.frame_timebase.den = int(video_encode.fps);
+			options.encoder = video_encode.encoder.c_str();
 			options.realtime = true;
 
 			if (video_encode.path.find("://") != std::string::npos)
@@ -1148,6 +1149,7 @@ static void print_help()
 	     "\t[--max-bitrate-kbits SIZE]\n"
 	     "\t[--vbv-size-kbits SIZE]\n"
 	     "\t[--local-backup PATH]\n"
+	     "\t[--encoder ENCODER]\n"
 		 "\turl\n");
 }
 
@@ -1178,6 +1180,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--max-bitrate-kbits", [&](Util::CLIParser &parser) { opts.max_bitrate_kbits = parser.next_uint(); });
 	cbs.add("--threads", [&](Util::CLIParser &parser) { opts.threads = parser.next_uint(); });
 	cbs.add("--local-backup", [&](Util::CLIParser &parser) { opts.local_backup_path = parser.next_string(); });
+	cbs.add("--encoder", [&](Util::CLIParser &parser) { opts.encoder = parser.next_string(); });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
