@@ -21,13 +21,8 @@
  */
 
 #include "dispatch_helper.hpp"
-#include "client.hpp"
 #include <mutex>
-#include <memory>
-
-#ifndef _WIN32
-#include <unistd.h>
-#endif
+#include <algorithm>
 
 extern "C"
 {
@@ -305,6 +300,60 @@ static VKAPI_ATTR void VKAPI_CALL DestroyInstance(VkInstance instance, const VkA
 	destroyLayerData(key, instanceData);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
+		VkPhysicalDevice                            physicalDevice,
+		const char*                                 pLayerName,
+		uint32_t*                                   pPropertyCount,
+		VkExtensionProperties*                      pProperties)
+{
+	if (pLayerName && strcmp(pLayerName, "VK_LAYER_pyrofling_cross_wsi") == 0)
+	{
+		*pPropertyCount = 0;
+		return VK_SUCCESS;
+	}
+
+	auto *layer = getInstanceLayer(physicalDevice);
+
+	// On the primary GPU, we just punch through anyway.
+	if (!layer->sinkGpu || physicalDevice == layer->sinkGpu)
+		return layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+	// These won't be meaningfully implemented on non-sink GPU, so don't expose them.
+	static const char *blockedExtensions[] = {
+		VK_KHR_PRESENT_ID_EXTENSION_NAME,
+		VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+		VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+	};
+
+	// The surface and display queries are all instance extensions,
+	// and thus the loader is responsible for dealing with it.
+	uint32_t count = 0;
+	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, nullptr);
+	std::vector<VkExtensionProperties> props(count);
+	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, props.data());
+
+	auto itr = std::remove_if(props.begin(), props.end(), [](const VkExtensionProperties &prop) -> bool {
+		for (auto *blocked : blockedExtensions)
+			if (strcmp(prop.extensionName, blocked) == 0)
+				return true;
+		return false;
+	});
+	props.erase(itr, props.end());
+
+	if (pProperties)
+	{
+		VkResult res = *pPropertyCount >= props.size() ? VK_SUCCESS : VK_INCOMPLETE;
+		*pPropertyCount = std::min<uint32_t>(*pPropertyCount, props.size());
+		memcpy(pProperties, props.data(), *pPropertyCount * sizeof(*pProperties));
+		return res;
+	}
+	else
+	{
+		*pPropertyCount = uint32_t(props.size());
+		return VK_SUCCESS;
+	}
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo *pCreateInfo,
                                                    const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
@@ -417,6 +466,7 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	return result;
 }
 
+// Always redirect any physical device surface query.
 #define WRAPPED_SURFACE_TRIVIAL(sym, ...) \
 	auto *layer = getInstanceLayer(physicalDevice); \
 	if (layer->sinkGpu) \
@@ -645,6 +695,7 @@ static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 		{ "vkDestroyInstance", reinterpret_cast<PFN_vkVoidFunction>(DestroyInstance) },
 		{ "vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CROSS_WSI_vkGetInstanceProcAddr) },
 		{ "vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(CreateDevice) },
+		{ "vkEnumerateDeviceExtensionProperties", reinterpret_cast<PFN_vkVoidFunction>(EnumerateDeviceExtensionProperties) },
 	};
 
 	for (auto &cmd : coreInstanceCommands)
