@@ -1,0 +1,17 @@
+{
+    "file_format_version" : "1.1.2",
+    "layer" : {
+        "name": "VK_LAYER_pyrofling_cross_wsi",
+        "type": "GLOBAL",
+        "library_path": "@PYROFLING_LAYER_PATH@",
+        "api_version": "1.3.207",
+        "implementation_version": "1",
+        "description": "PyroFling cross WSI layer",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion" : "VK_LAYER_PYROFLING_CROSS_WSI_vkNegotiateLoaderLayerInterfaceVersion"
+        },
+        "disable_environment": {
+            "DISABLE_CROSS_WSI": "1"
+        }
+    }
+}

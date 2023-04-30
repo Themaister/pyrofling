@@ -32,7 +32,13 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(CreateSwapchainKHR);
 	F(DestroySwapchainKHR);
 	F(GetSwapchainImagesKHR);
+	F(AcquireNextImageKHR);
+	F(AcquireNextImage2KHR);
+	F(ReleaseSwapchainImagesEXT);
 	F(QueueSubmit);
+	F(QueueSubmit2);
+	F(QueueSubmit2KHR);
+	F(QueueWaitIdle);
 	F(QueuePresentKHR);
 	F(CreateCommandPool);
 	F(DestroyCommandPool);
@@ -42,22 +48,32 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(AllocateCommandBuffers);
 	F(CmdPipelineBarrier);
 	F(CmdCopyImage);
+	F(CmdCopyImageToBuffer);
+	F(CmdCopyBufferToImage);
 	F(CreateFence);
 	F(WaitForFences);
 	F(ResetFences);
 	F(DestroyFence);
 	F(CreateImage);
+	F(CreateBuffer);
 	F(GetImageMemoryRequirements);
+	F(GetBufferMemoryRequirements);
+	F(GetMemoryHostPointerPropertiesEXT);
 	F(AllocateMemory);
 	F(FreeMemory);
 	F(BindImageMemory);
+	F(BindBufferMemory);
 	F(DestroyImage);
+	F(DestroyBuffer);
 	F(CreateSemaphore);
 	F(DestroySemaphore);
+	F(WaitForPresentKHR);
 #ifndef _WIN32
 	F(GetSemaphoreFdKHR);
 	F(ImportSemaphoreFdKHR);
+	F(ImportFenceFdKHR);
 	F(GetMemoryFdKHR);
+	F(GetFenceFdKHR);
 #endif
 #undef F
 }
@@ -68,12 +84,81 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 #define F(fun) table->fun = (PFN_vk##fun)gpa(instance, "vk"#fun)
 	*table = {};
 	F(DestroyInstance);
-	F(GetPhysicalDeviceMemoryProperties);
-	F(GetPhysicalDeviceSurfaceFormatsKHR);
-	F(GetPhysicalDeviceSurfaceFormats2KHR);
-	F(GetPhysicalDeviceExternalSemaphorePropertiesKHR);
-	F(GetPhysicalDeviceExternalBufferPropertiesKHR);
 	F(DestroySurfaceKHR);
+	F(EnumerateDeviceExtensionProperties);
+	F(GetPhysicalDeviceQueueFamilyProperties);
+	F(GetPhysicalDeviceMemoryProperties);
+	F(GetPhysicalDeviceExternalSemaphorePropertiesKHR);
+	F(GetPhysicalDeviceExternalFencePropertiesKHR);
+	F(GetPhysicalDeviceExternalBufferPropertiesKHR);
 	F(GetPhysicalDeviceProperties2KHR);
+	F(EnumeratePhysicalDevices);
+
+	F(GetPhysicalDeviceSurfaceFormatsKHR);
+	F(GetPhysicalDeviceSurfaceSupportKHR);
+	F(GetPhysicalDeviceSurfaceCapabilitiesKHR);
+	F(GetPhysicalDeviceSurfacePresentModesKHR);
+	F(GetPhysicalDeviceSurfaceFormats2KHR);
+	F(GetPhysicalDeviceSurfaceCapabilities2KHR);
+	F(CreateDisplayModeKHR);
+	F(GetDisplayModePropertiesKHR);
+	F(GetDisplayPlaneCapabilitiesKHR);
+	F(GetDisplayPlaneSupportedDisplaysKHR);
+	F(GetPhysicalDeviceDisplayPlanePropertiesKHR);
+	F(GetPhysicalDeviceDisplayPropertiesKHR);
+	F(GetDisplayModeProperties2KHR);
+	F(GetDisplayPlaneCapabilities2KHR);
+	F(GetPhysicalDeviceDisplayPlaneProperties2KHR);
+	F(GetPhysicalDeviceDisplayProperties2KHR);
+
+	F(GetPhysicalDeviceSurfaceCapabilities2EXT);
+	F(GetPhysicalDevicePresentRectanglesKHR);
+	F(ReleaseDisplayEXT);
+	F(AcquireDrmDisplayEXT);
+	F(GetDrmDisplayEXT);
 #undef F
+}
+
+void addUniqueExtension(std::vector<const char *> &extensions, const char *name)
+{
+	for (auto *ext : extensions)
+		if (strcmp(ext, name) == 0)
+			return;
+	extensions.push_back(name);
+}
+
+void addUniqueExtension(std::vector<const char *> &extensions,
+                        const std::vector<VkExtensionProperties> &allowed,
+                        const char *name)
+{
+	for (auto *ext : extensions)
+		if (strcmp(ext, name) == 0)
+			return;
+
+	for (auto &ext : allowed)
+	{
+		if (strcmp(ext.extensionName, name) == 0)
+		{
+			extensions.push_back(name);
+			break;
+		}
+	}
+}
+
+bool findExtension(const std::vector<VkExtensionProperties> &props, const char *ext)
+{
+	for (auto &prop : props)
+		if (strcmp(prop.extensionName, ext) == 0)
+			return true;
+
+	return false;
+}
+
+bool findExtension(const char * const *ppExtensions, uint32_t count, const char *ext)
+{
+	for (uint32_t i = 0; i < count; i++)
+		if (strcmp(ppExtensions[i], ext) == 0)
+			return true;
+
+	return false;
 }

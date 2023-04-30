@@ -33,6 +33,7 @@
 #include <string.h>
 #include <unordered_map>
 #include <algorithm>
+#include <vector>
 
 // Isolate to just what we need. Should improve layer init time.
 
@@ -40,18 +41,48 @@
 struct VkLayerInstanceDispatchTable
 {
 	PFN_vkDestroyInstance DestroyInstance;
+	PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
+	PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
+	PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
 	PFN_vkGetPhysicalDeviceProperties2KHR GetPhysicalDeviceProperties2KHR;
 	PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
+	PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
 
-	// Queries
+	// Queries. We have to wrap these and forward to either sink device or passthrough.
+	// VK_KHR_surface
 	PFN_vkGetPhysicalDeviceSurfaceFormatsKHR GetPhysicalDeviceSurfaceFormatsKHR;
+	PFN_vkGetPhysicalDeviceSurfaceSupportKHR GetPhysicalDeviceSurfaceSupportKHR;
+	PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR;
+	PFN_vkGetPhysicalDeviceSurfacePresentModesKHR GetPhysicalDeviceSurfacePresentModesKHR;
+
+	// VK_KHR_get_surface_capabilities2
 	PFN_vkGetPhysicalDeviceSurfaceFormats2KHR GetPhysicalDeviceSurfaceFormats2KHR;
+	PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR GetPhysicalDeviceSurfaceCapabilities2KHR;
+
+	// VK_KHR_display
+	PFN_vkCreateDisplayModeKHR CreateDisplayModeKHR;
+	PFN_vkGetDisplayModePropertiesKHR GetDisplayModePropertiesKHR;
+	PFN_vkGetDisplayPlaneCapabilitiesKHR GetDisplayPlaneCapabilitiesKHR;
+	PFN_vkGetDisplayPlaneSupportedDisplaysKHR GetDisplayPlaneSupportedDisplaysKHR;
+	PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR GetPhysicalDeviceDisplayPlanePropertiesKHR;
+	PFN_vkGetPhysicalDeviceDisplayPropertiesKHR GetPhysicalDeviceDisplayPropertiesKHR;
+
+	// VK_KHR_get_display_properties2
+	PFN_vkGetDisplayModeProperties2KHR GetDisplayModeProperties2KHR;
+	PFN_vkGetDisplayPlaneCapabilities2KHR GetDisplayPlaneCapabilities2KHR;
+	PFN_vkGetPhysicalDeviceDisplayPlaneProperties2KHR GetPhysicalDeviceDisplayPlaneProperties2KHR;
+	PFN_vkGetPhysicalDeviceDisplayProperties2KHR GetPhysicalDeviceDisplayProperties2KHR;
 
 	// External memory
 	PFN_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR GetPhysicalDeviceExternalSemaphorePropertiesKHR;
+	PFN_vkGetPhysicalDeviceExternalFencePropertiesKHR GetPhysicalDeviceExternalFencePropertiesKHR;
 	PFN_vkGetPhysicalDeviceExternalBufferPropertiesKHR GetPhysicalDeviceExternalBufferPropertiesKHR;
 
-	PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
+	PFN_vkGetPhysicalDeviceSurfaceCapabilities2EXT GetPhysicalDeviceSurfaceCapabilities2EXT;
+	PFN_vkGetPhysicalDevicePresentRectanglesKHR GetPhysicalDevicePresentRectanglesKHR;
+	PFN_vkReleaseDisplayEXT ReleaseDisplayEXT;
+	PFN_vkAcquireDrmDisplayEXT AcquireDrmDisplayEXT;
+	PFN_vkGetDrmDisplayEXT GetDrmDisplayEXT;
 };
 
 // Device function pointer dispatch table
@@ -64,8 +95,14 @@ struct VkLayerDispatchTable
 	PFN_vkCreateSwapchainKHR CreateSwapchainKHR;
 	PFN_vkDestroySwapchainKHR DestroySwapchainKHR;
 	PFN_vkGetSwapchainImagesKHR GetSwapchainImagesKHR;
+	PFN_vkAcquireNextImageKHR AcquireNextImageKHR;
+	PFN_vkAcquireNextImage2KHR AcquireNextImage2KHR;
+	PFN_vkReleaseSwapchainImagesEXT ReleaseSwapchainImagesEXT;
 
 	PFN_vkQueueSubmit QueueSubmit;
+	PFN_vkQueueSubmit2 QueueSubmit2;
+	PFN_vkQueueSubmit2KHR QueueSubmit2KHR;
+	PFN_vkQueueWaitIdle QueueWaitIdle;
 	PFN_vkQueuePresentKHR QueuePresentKHR;
 
 	PFN_vkCreateCommandPool CreateCommandPool;
@@ -77,6 +114,8 @@ struct VkLayerDispatchTable
 
 	PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
 	PFN_vkCmdCopyImage CmdCopyImage;
+	PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
+	PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
 
 	PFN_vkCreateFence CreateFence;
 	PFN_vkWaitForFences WaitForFences;
@@ -84,11 +123,17 @@ struct VkLayerDispatchTable
 	PFN_vkDestroyFence DestroyFence;
 
 	PFN_vkCreateImage CreateImage;
+	PFN_vkCreateBuffer CreateBuffer;
 	PFN_vkGetImageMemoryRequirements GetImageMemoryRequirements;
+	PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
 	PFN_vkAllocateMemory AllocateMemory;
 	PFN_vkBindImageMemory BindImageMemory;
+	PFN_vkBindBufferMemory BindBufferMemory;
 	PFN_vkDestroyImage DestroyImage;
+	PFN_vkDestroyBuffer DestroyBuffer;
 	PFN_vkFreeMemory FreeMemory;
+	PFN_vkGetMemoryHostPointerPropertiesEXT GetMemoryHostPointerPropertiesEXT;
+	PFN_vkWaitForPresentKHR WaitForPresentKHR;
 
 	PFN_vkCreateSemaphore CreateSemaphore;
 	PFN_vkDestroySemaphore DestroySemaphore;
@@ -96,17 +141,19 @@ struct VkLayerDispatchTable
 #ifndef _WIN32
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
+	PFN_vkImportFenceFdKHR ImportFenceFdKHR;
 	PFN_vkGetMemoryFdKHR GetMemoryFdKHR;
+	PFN_vkGetFenceFdKHR GetFenceFdKHR;
 #endif
 };
 
-static inline VkLayerDeviceCreateInfo *getChainInfo(const VkInstanceCreateInfo *pCreateInfo, VkLayerFunction func)
+static inline VkLayerInstanceCreateInfo *getChainInfo(const VkInstanceCreateInfo *pCreateInfo, VkLayerFunction func)
 {
-	auto *chain_info = static_cast<const VkLayerDeviceCreateInfo *>(pCreateInfo->pNext);
+	auto *chain_info = static_cast<const VkLayerInstanceCreateInfo *>(pCreateInfo->pNext);
 	while (chain_info &&
 	       !(chain_info->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO && chain_info->function == func))
-		chain_info = static_cast<const VkLayerDeviceCreateInfo *>(chain_info->pNext);
-	return const_cast<VkLayerDeviceCreateInfo *>(chain_info);
+		chain_info = static_cast<const VkLayerInstanceCreateInfo *>(chain_info->pNext);
+	return const_cast<VkLayerInstanceCreateInfo *>(chain_info);
 }
 
 static inline VkLayerDeviceCreateInfo *getChainInfo(const VkDeviceCreateInfo *pCreateInfo, VkLayerFunction func)
@@ -123,36 +170,6 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatchTable *table,
                                     PFN_vkGetInstanceProcAddr gpa);
 
-static inline void *getDispatchKey(void *ptr)
-{
-	return *static_cast<void **>(ptr);
-}
-
-template <typename T>
-static inline T *getLayerData(void *key, const std::unordered_map<void *, std::unique_ptr<T>> &m)
-{
-	auto itr = m.find(key);
-	if (itr != end(m))
-		return itr->second.get();
-	else
-		return nullptr;
-}
-
-template <typename T, typename... TArgs>
-static inline T *createLayerData(void *key, std::unordered_map<void *, std::unique_ptr<T>> &m, TArgs &&... args)
-{
-	auto *ptr = new T(std::forward<TArgs>(args)...);
-	m[key] = std::unique_ptr<T>(ptr);
-	return ptr;
-}
-
-template <typename T>
-static inline void destroyLayerData(void *key, std::unordered_map<void *, std::unique_ptr<T>> &m)
-{
-	auto itr = m.find(key);
-	m.erase(itr);
-}
-
 #if CURRENT_LOADER_LAYER_INTERFACE_VERSION != 2
 #error "Unexpected loader layer interface version."
 #endif
@@ -165,3 +182,32 @@ static inline void destroyLayerData(void *key, std::unordered_map<void *, std::u
 #else
 #define VK_LAYER_EXPORT
 #endif
+
+void addUniqueExtension(std::vector<const char *> &extensions, const char *name);
+void addUniqueExtension(std::vector<const char *> &extensions,
+                        const std::vector<VkExtensionProperties> &allowed,
+                        const char *name);
+
+bool findExtension(const std::vector<VkExtensionProperties> &props, const char *ext);
+bool findExtension(const char * const *ppExtensions, uint32_t count, const char *ext);
+
+template <size_t N>
+static inline bool findExtension(const char * (&exts)[N], const char *ext)
+{
+	return findExtension(exts, N, ext);
+}
+
+template <typename T>
+static inline const T *findChain(const void *pNext, VkStructureType sType)
+{
+	while (pNext)
+	{
+		auto *s = static_cast<const VkBaseInStructure *>(pNext);
+		if (s->sType == sType)
+			return static_cast<const T *>(pNext);
+
+		pNext = s->pNext;
+	}
+
+	return nullptr;
+}

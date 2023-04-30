@@ -50,3 +50,4 @@ endif()
 
 add_subdirectory(layer-util)
 add_subdirectory(capture-layer)
+add_subdirectory(cross-wsi-layer)
