@@ -48,4 +48,5 @@ if (NOT PYROFLING_LAYER_ONLY)
     install(TARGETS pyrofling)
 endif()
 
-add_subdirectory(layer)
+add_subdirectory(layer-util)
+add_subdirectory(capture-layer)

@@ -29,19 +29,6 @@
 #include <unistd.h>
 #endif
 
-#if CURRENT_LOADER_LAYER_INTERFACE_VERSION != 2
-#error "Unexpected loader layer interface version."
-#endif
-
-#undef VK_LAYER_EXPORT
-#ifdef _WIN32
-#define VK_LAYER_EXPORT extern "C" __declspec(dllexport)
-#elif defined(__GNUC__) && __GNUC__ >= 4
-#define VK_LAYER_EXPORT extern "C" __attribute__((visibility("default")))
-#else
-#define VK_LAYER_EXPORT
-#endif
-
 extern "C"
 {
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL

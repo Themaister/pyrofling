@@ -152,3 +152,16 @@ static inline void destroyLayerData(void *key, std::unordered_map<void *, std::u
 	auto itr = m.find(key);
 	m.erase(itr);
 }
+
+#if CURRENT_LOADER_LAYER_INTERFACE_VERSION != 2
+#error "Unexpected loader layer interface version."
+#endif
+
+#undef VK_LAYER_EXPORT
+#ifdef _WIN32
+#define VK_LAYER_EXPORT extern "C" __declspec(dllexport)
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define VK_LAYER_EXPORT extern "C" __attribute__((visibility("default")))
+#else
+#define VK_LAYER_EXPORT
+#endif

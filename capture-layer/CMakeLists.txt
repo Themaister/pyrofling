@@ -1,6 +1,5 @@
-add_library(VkLayer_pyrofling_capture SHARED
-        dispatch.cpp dispatch_helper.cpp dispatch_helper.hpp)
-target_link_libraries(VkLayer_pyrofling_capture PRIVATE pyrofling-ipc granite-volk-headers)
+add_library(VkLayer_pyrofling_capture SHARED capture_layer.cpp)
+target_link_libraries(VkLayer_pyrofling_capture PRIVATE pyrofling-layer-util pyrofling-ipc granite-volk-headers)
 
 target_include_directories(VkLayer_pyrofling_capture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(VkLayer_pyrofling_capture PRIVATE ${PYROFLING_CXX_FLAGS})
