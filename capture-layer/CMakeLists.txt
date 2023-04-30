@@ -23,7 +23,7 @@ else()
     set(PYROFLING_LAYER_PATH "./libVkLayer_pyrofling_capture${PYROFLING_ABI_TAG}.so")
 endif()
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/VkLayer_pyrofling_capture.json.in ${CMAKE_BINARY_DIR}/layer/VkLayer_pyrofling_capture${PYROFLING_ABI_TAG}.json @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/VkLayer_pyrofling_capture.json.in ${CMAKE_BINARY_DIR}/capture-layer/VkLayer_pyrofling_capture${PYROFLING_ABI_TAG}.json @ONLY)
 
 if (WIN32)
     set_target_properties(VkLayer_pyrofling_capture PROPERTIES PREFIX "" LIBRARY_OUTPUT_NAME VkLayer_pyrofling_capture${PYROFLING_ABI_TAG})

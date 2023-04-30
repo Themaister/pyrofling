@@ -33,6 +33,7 @@
 #include <string.h>
 #include <unordered_map>
 #include <algorithm>
+#include <vector>
 
 // Isolate to just what we need. Should improve layer init time.
 
@@ -40,18 +41,45 @@
 struct VkLayerInstanceDispatchTable
 {
 	PFN_vkDestroyInstance DestroyInstance;
+	PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
+	PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
+	PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
 	PFN_vkGetPhysicalDeviceProperties2KHR GetPhysicalDeviceProperties2KHR;
 	PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
 
-	// Queries
+	// Queries. We have to wrap these and forward to either sink device or passthrough.
+	// VK_KHR_surface
 	PFN_vkGetPhysicalDeviceSurfaceFormatsKHR GetPhysicalDeviceSurfaceFormatsKHR;
+	PFN_vkGetPhysicalDeviceSurfaceSupportKHR GetPhysicalDeviceSurfaceSupportKHR;
+	PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilitiesKHR;
+	PFN_vkGetPhysicalDeviceSurfacePresentModesKHR GetPhysicalDeviceSurfacePresentModesKHR;
+
+	// VK_KHR_get_surface_capabilities2
 	PFN_vkGetPhysicalDeviceSurfaceFormats2KHR GetPhysicalDeviceSurfaceFormats2KHR;
+	PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR GetPhysicalDeviceSurfaceCapabilities2KHR;
+
+	// VK_EXT_full_screen_exclusive
+	PFN_vkGetPhysicalDeviceSurfaceCapabilities2EXT GetPhysicalDeviceSurfaceCapabilities2EXT;
+
+	// VK_KHR_display
+	PFN_vkCreateDisplayModeKHR CreateDisplayModeKHR;
+	PFN_vkCreateDisplayPlaneSurfaceKHR CreateDisplayPlaneSurfaceKHR;
+	PFN_vkGetDisplayModePropertiesKHR GetDisplayModePropertiesKHR;
+	PFN_vkGetDisplayPlaneCapabilitiesKHR GetDisplayPlaneCapabilitiesKHR;
+	PFN_vkGetDisplayPlaneSupportedDisplaysKHR GetDisplayPlaneSupportedDisplaysKHR;
+	PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR GetPhysicalDeviceDisplayPlanePropertiesKHR;
+	PFN_vkGetPhysicalDeviceDisplayPropertiesKHR GetPhysicalDeviceDisplayPropertiesKHR;
+
+	// VK_KHR_get_display_properties2
+	PFN_vkGetDisplayModeProperties2KHR GetDisplayModeProperties2KHR;
+	PFN_vkGetDisplayPlaneCapabilities2KHR GetDisplayPlaneCapabilities2KHR;
+	PFN_vkGetPhysicalDeviceDisplayPlaneProperties2KHR GetPhysicalDeviceDisplayPlaneProperties2KHR;
+	PFN_vkGetPhysicalDeviceDisplayProperties2KHR GetPhysicalDeviceDisplayProperties2KHR;
 
 	// External memory
 	PFN_vkGetPhysicalDeviceExternalSemaphorePropertiesKHR GetPhysicalDeviceExternalSemaphorePropertiesKHR;
+	PFN_vkGetPhysicalDeviceExternalFencePropertiesKHR GetPhysicalDeviceExternalFencePropertiesKHR;
 	PFN_vkGetPhysicalDeviceExternalBufferPropertiesKHR GetPhysicalDeviceExternalBufferPropertiesKHR;
-
-	PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
 };
 
 // Device function pointer dispatch table
@@ -100,13 +128,13 @@ struct VkLayerDispatchTable
 #endif
 };
 
-static inline VkLayerDeviceCreateInfo *getChainInfo(const VkInstanceCreateInfo *pCreateInfo, VkLayerFunction func)
+static inline VkLayerInstanceCreateInfo *getChainInfo(const VkInstanceCreateInfo *pCreateInfo, VkLayerFunction func)
 {
-	auto *chain_info = static_cast<const VkLayerDeviceCreateInfo *>(pCreateInfo->pNext);
+	auto *chain_info = static_cast<const VkLayerInstanceCreateInfo *>(pCreateInfo->pNext);
 	while (chain_info &&
 	       !(chain_info->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO && chain_info->function == func))
-		chain_info = static_cast<const VkLayerDeviceCreateInfo *>(chain_info->pNext);
-	return const_cast<VkLayerDeviceCreateInfo *>(chain_info);
+		chain_info = static_cast<const VkLayerInstanceCreateInfo *>(chain_info->pNext);
+	return const_cast<VkLayerInstanceCreateInfo *>(chain_info);
 }
 
 static inline VkLayerDeviceCreateInfo *getChainInfo(const VkDeviceCreateInfo *pCreateInfo, VkLayerFunction func)
@@ -123,36 +151,6 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatchTable *table,
                                     PFN_vkGetInstanceProcAddr gpa);
 
-static inline void *getDispatchKey(void *ptr)
-{
-	return *static_cast<void **>(ptr);
-}
-
-template <typename T>
-static inline T *getLayerData(void *key, const std::unordered_map<void *, std::unique_ptr<T>> &m)
-{
-	auto itr = m.find(key);
-	if (itr != end(m))
-		return itr->second.get();
-	else
-		return nullptr;
-}
-
-template <typename T, typename... TArgs>
-static inline T *createLayerData(void *key, std::unordered_map<void *, std::unique_ptr<T>> &m, TArgs &&... args)
-{
-	auto *ptr = new T(std::forward<TArgs>(args)...);
-	m[key] = std::unique_ptr<T>(ptr);
-	return ptr;
-}
-
-template <typename T>
-static inline void destroyLayerData(void *key, std::unordered_map<void *, std::unique_ptr<T>> &m)
-{
-	auto itr = m.find(key);
-	m.erase(itr);
-}
-
 #if CURRENT_LOADER_LAYER_INTERFACE_VERSION != 2
 #error "Unexpected loader layer interface version."
 #endif
@@ -165,3 +163,8 @@ static inline void destroyLayerData(void *key, std::unordered_map<void *, std::u
 #else
 #define VK_LAYER_EXPORT
 #endif
+
+void addUniqueExtension(std::vector<const char *> &extensions, const char *name);
+void addUniqueExtension(std::vector<const char *> &extensions,
+                        const std::vector<VkExtensionProperties> &allowed,
+                        const char *name);

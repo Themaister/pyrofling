@@ -41,9 +41,6 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 VK_LAYER_PYROFLING_CAPTURE_vkGetInstanceProcAddr(VkInstance instance, const char *pName);
 }
 
-struct Instance;
-struct Device;
-
 struct ExportableImage
 {
 	VkImage image;
@@ -61,6 +58,9 @@ struct ExportableImage
 	bool ready;
 	bool fencePending;
 };
+
+struct Instance;
+struct Device;
 
 // One surface can be associated with one swapchain at a time.
 struct SurfaceState
@@ -248,6 +248,8 @@ struct Device
 	bool presentRequiresWrap(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
 	VkResult present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index);
 };
+
+#include "dispatch_wrapper.hpp"
 
 SurfaceState::SurfaceState(Instance *instance_)
 	: instance(instance_)
@@ -925,73 +927,6 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 			VkQueue queue;
 			table.GetDeviceQueue(device, family, j, &queue);
 			queueToFamily.push_back({ queue, family });
-		}
-	}
-}
-
-// Global data structures to remap VkInstance and VkDevice to internal data structures.
-static std::mutex globalLock;
-static std::unordered_map<void *, std::unique_ptr<Instance>> instanceData;
-static std::unordered_map<void *, std::unique_ptr<Device>> deviceData;
-
-template <typename DeviceDispatchable>
-static inline Device *getDeviceDispachableLayer(DeviceDispatchable d)
-{
-	// Need to hold a lock while querying the global hashmap, but not after it.
-	void *key = getDispatchKey(d);
-	std::lock_guard<std::mutex> holder{ globalLock };
-	return getLayerData(key, deviceData);
-}
-
-static Device *getDeviceLayer(VkDevice device)
-{
-	return getDeviceDispachableLayer(device);
-}
-
-static Device *getDeviceLayer(VkQueue queue)
-{
-	return getDeviceDispachableLayer(queue);
-}
-
-template <typename InstanceDispatchable>
-static inline Instance *getInstanceDispatchableLayer(InstanceDispatchable d)
-{
-	auto *key = getDispatchKey(d);
-	std::lock_guard<std::mutex> holder{ globalLock };
-	return getLayerData(key, instanceData);
-}
-
-static Instance *getInstanceLayer(VkInstance instance)
-{
-	return getInstanceDispatchableLayer(instance);
-}
-
-static Instance *getInstanceLayer(VkPhysicalDevice gpu)
-{
-	return getInstanceDispatchableLayer(gpu);
-}
-
-static void addUniqueExtension(std::vector<const char *> &extensions, const char *name)
-{
-	for (auto *ext : extensions)
-		if (strcmp(ext, name) == 0)
-			return;
-	extensions.push_back(name);
-}
-
-static void addUniqueExtension(std::vector<const char *> &extensions, const std::vector<VkExtensionProperties> &allowed,
-                               const char *name)
-{
-	for (auto *ext : extensions)
-		if (strcmp(ext, name) == 0)
-			return;
-
-	for (auto &ext : allowed)
-	{
-		if (strcmp(ext.extensionName, name) == 0)
-		{
-			extensions.push_back(name);
-			break;
 		}
 	}
 }

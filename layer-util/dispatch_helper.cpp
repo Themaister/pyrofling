@@ -68,12 +68,58 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 #define F(fun) table->fun = (PFN_vk##fun)gpa(instance, "vk"#fun)
 	*table = {};
 	F(DestroyInstance);
+	F(EnumerateDeviceExtensionProperties);
+	F(GetPhysicalDeviceQueueFamilyProperties);
 	F(GetPhysicalDeviceMemoryProperties);
-	F(GetPhysicalDeviceSurfaceFormatsKHR);
-	F(GetPhysicalDeviceSurfaceFormats2KHR);
 	F(GetPhysicalDeviceExternalSemaphorePropertiesKHR);
+	F(GetPhysicalDeviceExternalFencePropertiesKHR);
 	F(GetPhysicalDeviceExternalBufferPropertiesKHR);
-	F(DestroySurfaceKHR);
 	F(GetPhysicalDeviceProperties2KHR);
+	F(EnumeratePhysicalDevices);
+
+	F(GetPhysicalDeviceSurfaceFormatsKHR);
+	F(GetPhysicalDeviceSurfaceSupportKHR);
+	F(GetPhysicalDeviceSurfaceCapabilitiesKHR);
+	F(GetPhysicalDeviceSurfacePresentModesKHR);
+	F(GetPhysicalDeviceSurfaceFormats2KHR);
+	F(GetPhysicalDeviceSurfaceCapabilities2KHR);
+	F(GetPhysicalDeviceSurfaceCapabilities2EXT);
+	F(CreateDisplayModeKHR);
+	F(CreateDisplayPlaneSurfaceKHR);
+	F(GetDisplayModePropertiesKHR);
+	F(GetDisplayPlaneCapabilitiesKHR);
+	F(GetDisplayPlaneSupportedDisplaysKHR);
+	F(GetPhysicalDeviceDisplayPlanePropertiesKHR);
+	F(GetPhysicalDeviceDisplayPropertiesKHR);
+	F(GetDisplayModeProperties2KHR);
+	F(GetDisplayPlaneCapabilities2KHR);
+	F(GetPhysicalDeviceDisplayPlaneProperties2KHR);
+	F(GetPhysicalDeviceDisplayProperties2KHR);
 #undef F
+}
+
+void addUniqueExtension(std::vector<const char *> &extensions, const char *name)
+{
+	for (auto *ext : extensions)
+		if (strcmp(ext, name) == 0)
+			return;
+	extensions.push_back(name);
+}
+
+void addUniqueExtension(std::vector<const char *> &extensions,
+                        const std::vector<VkExtensionProperties> &allowed,
+                        const char *name)
+{
+	for (auto *ext : extensions)
+		if (strcmp(ext, name) == 0)
+			return;
+
+	for (auto &ext : allowed)
+	{
+		if (strcmp(ext.extensionName, name) == 0)
+		{
+			extensions.push_back(name);
+			break;
+		}
+	}
 }
