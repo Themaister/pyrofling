@@ -83,9 +83,7 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 	F(GetPhysicalDeviceSurfacePresentModesKHR);
 	F(GetPhysicalDeviceSurfaceFormats2KHR);
 	F(GetPhysicalDeviceSurfaceCapabilities2KHR);
-	F(GetPhysicalDeviceSurfaceCapabilities2EXT);
 	F(CreateDisplayModeKHR);
-	F(CreateDisplayPlaneSurfaceKHR);
 	F(GetDisplayModePropertiesKHR);
 	F(GetDisplayPlaneCapabilitiesKHR);
 	F(GetDisplayPlaneSupportedDisplaysKHR);
@@ -95,6 +93,12 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 	F(GetDisplayPlaneCapabilities2KHR);
 	F(GetPhysicalDeviceDisplayPlaneProperties2KHR);
 	F(GetPhysicalDeviceDisplayProperties2KHR);
+
+	F(GetPhysicalDeviceSurfaceCapabilities2EXT);
+	F(GetPhysicalDevicePresentRectanglesKHR);
+	F(ReleaseDisplayEXT);
+	F(AcquireDrmDisplayEXT);
+	F(GetDrmDisplayEXT);
 #undef F
 }
 

@@ -476,6 +476,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 		uint32_t*                                   pSurfaceFormatCount,
 		VkSurfaceFormatKHR*                         pSurfaceFormats)
 {
+	// Technically, we might have to filter this against supported formats on source GPU to determine renderable formats, etc, but w/e.
 	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceSurfaceFormatsKHR, physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats);
 }
 
@@ -486,6 +487,151 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfacePresentModesKHR(
 		VkPresentModeKHR*                           pPresentModes)
 {
 	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceSurfacePresentModesKHR, physicalDevice, surface, pPresentModeCount, pPresentModes);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceDisplayPropertiesKHR(
+		VkPhysicalDevice                            physicalDevice,
+		uint32_t*                                   pPropertyCount,
+		VkDisplayPropertiesKHR*                     pProperties)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceDisplayPropertiesKHR, physicalDevice, pPropertyCount, pProperties);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceDisplayPlanePropertiesKHR(
+		VkPhysicalDevice                            physicalDevice,
+		uint32_t*                                   pPropertyCount,
+		VkDisplayPlanePropertiesKHR*                pProperties)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceDisplayPlanePropertiesKHR, physicalDevice, pPropertyCount, pProperties);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetDisplayPlaneSupportedDisplaysKHR(
+		VkPhysicalDevice                            physicalDevice,
+		uint32_t                                    planeIndex,
+		uint32_t*                                   pDisplayCount,
+		VkDisplayKHR*                               pDisplays)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetDisplayPlaneSupportedDisplaysKHR, physicalDevice, planeIndex, pDisplayCount, pDisplays);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetDisplayModePropertiesKHR(
+		VkPhysicalDevice                            physicalDevice,
+		VkDisplayKHR                                display,
+		uint32_t*                                   pPropertyCount,
+		VkDisplayModePropertiesKHR*                 pProperties)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetDisplayModePropertiesKHR, physicalDevice, display, pPropertyCount, pProperties);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL CreateDisplayModeKHR(
+		VkPhysicalDevice                            physicalDevice,
+		VkDisplayKHR                                display,
+		const VkDisplayModeCreateInfoKHR*           pCreateInfo,
+		const VkAllocationCallbacks*                pAllocator,
+		VkDisplayModeKHR*                           pMode)
+{
+	WRAPPED_SURFACE_TRIVIAL(CreateDisplayModeKHR, physicalDevice, display, pCreateInfo, pAllocator, pMode);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetDisplayPlaneCapabilitiesKHR(
+		VkPhysicalDevice                            physicalDevice,
+		VkDisplayModeKHR                            mode,
+		uint32_t                                    planeIndex,
+		VkDisplayPlaneCapabilitiesKHR*              pCapabilities)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetDisplayPlaneCapabilitiesKHR, physicalDevice, mode, planeIndex, pCapabilities);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceCapabilities2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		const VkPhysicalDeviceSurfaceInfo2KHR*      pSurfaceInfo,
+		VkSurfaceCapabilities2KHR*                  pSurfaceCapabilities)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceSurfaceCapabilities2KHR, physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		const VkPhysicalDeviceSurfaceInfo2KHR*      pSurfaceInfo,
+		uint32_t*                                   pSurfaceFormatCount,
+		VkSurfaceFormat2KHR*                        pSurfaceFormats)
+{
+	// Technically, we might have to filter this against supported formats on source GPU to determine renderable formats, etc, but w/e.
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceSurfaceFormats2KHR, physicalDevice, pSurfaceInfo, pSurfaceFormatCount, pSurfaceFormats);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceDisplayProperties2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		uint32_t*                                   pPropertyCount,
+		VkDisplayProperties2KHR*                    pProperties)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceDisplayProperties2KHR, physicalDevice, pPropertyCount, pProperties);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceDisplayPlaneProperties2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		uint32_t*                                   pPropertyCount,
+		VkDisplayPlaneProperties2KHR*               pProperties)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceDisplayPlaneProperties2KHR, physicalDevice, pPropertyCount, pProperties);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetDisplayModeProperties2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		VkDisplayKHR                                display,
+		uint32_t*                                   pPropertyCount,
+		VkDisplayModeProperties2KHR*                pProperties)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetDisplayModeProperties2KHR, physicalDevice, display, pPropertyCount, pProperties);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetDisplayPlaneCapabilities2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		const VkDisplayPlaneInfo2KHR*               pDisplayPlaneInfo,
+		VkDisplayPlaneCapabilities2KHR*             pCapabilities)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetDisplayPlaneCapabilities2KHR, physicalDevice, pDisplayPlaneInfo, pCapabilities);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceCapabilities2EXT(
+		VkPhysicalDevice                            physicalDevice,
+		VkSurfaceKHR                                surface,
+		VkSurfaceCapabilities2EXT*                  pSurfaceCapabilities)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDeviceSurfaceCapabilities2EXT, physicalDevice, surface, pSurfaceCapabilities);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDevicePresentRectanglesKHR(
+		VkPhysicalDevice                            physicalDevice,
+		VkSurfaceKHR                                surface,
+		uint32_t*                                   pRectCount,
+		VkRect2D*                                   pRects)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetPhysicalDevicePresentRectanglesKHR, physicalDevice, surface, pRectCount, pRects);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL ReleaseDisplayEXT(
+		VkPhysicalDevice                            physicalDevice,
+		VkDisplayKHR                                display)
+{
+	WRAPPED_SURFACE_TRIVIAL(ReleaseDisplayEXT, physicalDevice, display);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL AcquireDrmDisplayEXT(
+		VkPhysicalDevice                            physicalDevice,
+		int32_t                                     drmFd,
+		VkDisplayKHR                                display)
+{
+	WRAPPED_SURFACE_TRIVIAL(AcquireDrmDisplayEXT, physicalDevice, drmFd, display);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetDrmDisplayEXT(
+		VkPhysicalDevice                            physicalDevice,
+		int32_t                                     drmFd,
+		uint32_t                                    connectorId,
+		VkDisplayKHR*                               display)
+{
+	WRAPPED_SURFACE_TRIVIAL(GetDrmDisplayEXT, physicalDevice, drmFd, connectorId, display);
 }
 
 static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
@@ -520,6 +666,23 @@ static PFN_vkVoidFunction interceptExtensionInstanceCommand(const char *pName)
 		F(GetPhysicalDeviceSurfaceSupportKHR),
 		F(GetPhysicalDeviceSurfaceCapabilitiesKHR),
 		F(GetPhysicalDeviceSurfacePresentModesKHR),
+		F(CreateDisplayModeKHR),
+		F(GetDisplayModePropertiesKHR),
+		F(GetDisplayPlaneSupportedDisplaysKHR),
+		F(GetDisplayPlaneCapabilitiesKHR),
+		F(GetPhysicalDeviceDisplayPlanePropertiesKHR),
+		F(GetPhysicalDeviceDisplayPropertiesKHR),
+		F(GetPhysicalDeviceSurfaceFormats2KHR),
+		F(GetPhysicalDeviceSurfaceCapabilities2KHR),
+		F(GetPhysicalDeviceDisplayProperties2KHR),
+		F(GetPhysicalDeviceDisplayPlaneProperties2KHR),
+		F(GetDisplayModeProperties2KHR),
+		F(GetDisplayPlaneCapabilities2KHR),
+		F(GetPhysicalDeviceSurfaceCapabilities2EXT),
+		F(GetPhysicalDevicePresentRectanglesKHR),
+		F(ReleaseDisplayEXT),
+		F(AcquireDrmDisplayEXT),
+		F(GetDrmDisplayEXT),
 #undef F
 	};
 
