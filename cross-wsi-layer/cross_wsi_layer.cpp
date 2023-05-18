@@ -2183,6 +2183,15 @@ VK_LAYER_PYROFLING_CROSS_WSI_vkGetInstanceProcAddr(VkInstance instance, const ch
 
 	proc = layer->getProcAddr(pName);
 
+	// If we don't intend to redirect devices, the layer can essentially go dormant.
+	if (layer->sinkGpu == VK_NULL_HANDLE)
+	{
+		if (strcmp(pName, "vkDestroyInstance") == 0)
+			return reinterpret_cast<PFN_vkVoidFunction>(DestroyInstance);
+		else
+			return proc;
+	}
+
 	// If the underlying implementation returns nullptr, we also need to return nullptr.
 	// This means we never expose wrappers which will end up dispatching into nullptr.
 	if (proc)
