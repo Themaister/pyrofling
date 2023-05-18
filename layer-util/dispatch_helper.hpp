@@ -111,6 +111,8 @@ struct VkLayerDispatchTable
 
 	PFN_vkCmdPipelineBarrier CmdPipelineBarrier;
 	PFN_vkCmdCopyImage CmdCopyImage;
+	PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
+	PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
 
 	PFN_vkCreateFence CreateFence;
 	PFN_vkWaitForFences WaitForFences;

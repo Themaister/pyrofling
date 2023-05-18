@@ -159,6 +159,10 @@ struct Swapchain
 	VkResult init(const VkSwapchainCreateInfoKHR *pCreateInfo);
 
 	VkResult releaseSwapchainImages(const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo);
+
+	void setPresentId(uint64_t id);
+	void setPresentMode(VkPresentModeKHR mode);
+
 	VkResult queuePresent(VkQueue queue, uint32_t index, VkFence fence);
 	VkResult acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex);
 	VkResult getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages);
@@ -197,24 +201,30 @@ struct Swapchain
 	std::vector<SwapchainImage> images;
 	std::queue<uint32_t> acquireQueue;
 	VkResult swapchainStatus = VK_SUCCESS;
-	VkPresentModeKHR currentPresentMode = VK_PRESENT_MODE_FIFO_KHR;
 	VkSwapchainKHR sinkSwapchain = VK_NULL_HANDLE;
 
 	std::mutex lock;
 	std::condition_variable cond;
 	std::thread worker;
+	uint64_t submitCount = 0;
+	uint64_t processedSourceCount = 0;
+
+	uint32_t width = 0;
+	uint32_t height = 0;
 
 	struct Work
 	{
 		uint64_t presentId;
 		uint32_t index;
 		VkPresentModeKHR mode;
-		bool overrideMode;
+		bool setsMode;
 	};
+	Work nextWork = {};
 	std::queue<Work> workQueue;
 
 	static VkCommandPool createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family);
-	VkResult submitSourceWork(uint32_t index);
+	VkResult initSourceCommands(uint32_t familyIndex);
+	VkResult submitSourceWork(VkQueue queue, uint32_t index, VkFence fence);
 };
 
 struct Device
@@ -275,6 +285,15 @@ Device::~Device()
 {
 	if (sinkDevice)
 		instance->layerDestroyDevice(sinkDevice, nullptr, sinkTable.DestroyDevice);
+}
+
+uint32_t Device::queueToFamilyIndex(VkQueue queue) const
+{
+	for (auto &q : queueToFamily)
+		if (q.queue == queue)
+			return q.familyIndex;
+
+	return VK_QUEUE_FAMILY_IGNORED;
 }
 
 void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, PFN_vkGetDeviceProcAddr gpa,
@@ -384,15 +403,116 @@ VkCommandPool Swapchain::createCommandPool(VkDevice device, const VkLayerDispatc
 	return pool;
 }
 
-VkResult Swapchain::submitSourceWork(uint32_t index)
+VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 {
+	if (familyIndex != sourceCmdPool.family)
+	{
+		// Wait until all source commands are done processing.
+		std::unique_lock<std::mutex> holder{lock};
+		cond.wait(holder, [this]() {
+			return submitCount == processedSourceCount;
+		});
 
+		device->table.DestroyCommandPool(device->device, sourceCmdPool.pool, nullptr);
+		sourceCmdPool.pool = VK_NULL_HANDLE;
+	}
+
+	if (sourceCmdPool.pool == VK_NULL_HANDLE)
+	{
+		sourceCmdPool.pool = createCommandPool(device->device, device->table, familyIndex);
+		sourceCmdPool.family = familyIndex;
+	}
+
+	// We have messed with sync objects at this point, so we must return DEVICE_LOST on failure here.
+	// Should never happen though ...
+
+	// Just record the commands up front,
+	// they are immutable for a given swapchain anyway.
+	if (sourceCmdPool.pool != VK_NULL_HANDLE)
+	{
+		for (auto &image : images)
+		{
+			VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+			allocInfo.commandBufferCount = 1;
+			allocInfo.commandPool = sourceCmdPool.pool;
+			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+			if (device->table.AllocateCommandBuffers(device->device, &allocInfo, &image.sourceCmd) != VK_SUCCESS)
+				return VK_ERROR_DEVICE_LOST;
+
+			// Dispatchable object.
+			device->setDeviceLoaderData(device->device, image.sourceCmd);
+
+			VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+			device->table.BeginCommandBuffer(image.sourceCmd, &beginInfo);
+			{
+				VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+				barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+				barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+				barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT,
+				                             0, VK_REMAINING_MIP_LEVELS,
+				                             0, VK_REMAINING_ARRAY_LAYERS };
+				barrier.image = image.sourceImage.image;
+				barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+				device->table.CmdPipelineBarrier(image.sourceCmd,
+												 VK_PIPELINE_STAGE_TRANSFER_BIT,
+												 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+												 0, nullptr,
+												 0, nullptr,
+												 1, &barrier);
+
+				VkBufferImageCopy copy = {};
+				copy.imageExtent = { width, height, 1 };
+				copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+				device->table.CmdCopyImageToBuffer(image.sourceCmd,
+				                                   image.sourceImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				                                   image.sourceBuffer.buffer,
+				                                   1, &copy);
+
+				barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+				barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+				barrier.dstAccessMask = 0;
+
+				device->table.CmdPipelineBarrier(image.sourceCmd,
+				                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+				                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+				                                 0, nullptr,
+				                                 0, nullptr,
+				                                 1, &barrier);
+			}
+
+			if (device->table.EndCommandBuffer(image.sourceCmd) != VK_SUCCESS)
+				return VK_ERROR_DEVICE_LOST;
+		}
+
+		return VK_SUCCESS;
+	}
+	else
+	{
+		return VK_ERROR_DEVICE_LOST;
+	}
+}
+
+VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fence)
+{
+	VkResult result = initSourceCommands(device->queueToFamilyIndex(queue));
+	if (result != VK_SUCCESS)
+		return result;
+
+	VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers = &images[index].sourceCmd;
+	device->table.QueueSubmit(queue, 1, &submit, images[index].sourceFence);
+
+	// EXT_swapchain_maintenance1 fence.
+	if (fence != VK_NULL_HANDLE)
+		device->table.QueueSubmit(queue, 0, nullptr, fence);
 }
 
 VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 {
-	currentPresentMode = pCreateInfo->presentMode;
-
 	auto tmpCreateInfo = *pCreateInfo;
 	auto *oldSwap = reinterpret_cast<Swapchain *>(pCreateInfo->oldSwapchain);
 	if (oldSwap)
