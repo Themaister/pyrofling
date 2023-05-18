@@ -42,12 +42,13 @@ VK_LAYER_PYROFLING_CROSS_WSI_vkGetInstanceProcAddr(VkInstance instance, const ch
 
 // These have to be supported by sink GPU rather than source GPU.
 static const char *redirectedExtensions[] = {
+	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 	VK_KHR_PRESENT_ID_EXTENSION_NAME,
 	VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
 	VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
 };
 
-// Block any extension that we don't explicitly wrap yet.
+// Block any extension that we don't explicitly wrap or understand yet.
 // For sinkGpu situation we invent dummy handles for VkSwapchainKHR.
 static const char *blockedExtensions[] = {
 	VK_KHR_DISPLAY_SWAPCHAIN_EXTENSION_NAME,
@@ -57,6 +58,7 @@ static const char *blockedExtensions[] = {
 	VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME,
 	VK_EXT_HDR_METADATA_EXTENSION_NAME,
 	VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME,
+	VK_NV_PRESENT_BARRIER_EXTENSION_NAME,
 	"VK_EXT_full_screen_exclusive",
 };
 
@@ -173,12 +175,14 @@ struct Swapchain
 	{
 		VkBuffer buffer = VK_NULL_HANDLE;
 		VkDeviceMemory memory = VK_NULL_HANDLE;
+		VkDeviceSize size = 0;
 	};
 
 	struct Image
 	{
 		VkImage image = VK_NULL_HANDLE;
 		VkDeviceMemory memory = VK_NULL_HANDLE;
+		VkDeviceSize size = 0;
 	};
 
 	struct SwapchainImage
@@ -187,7 +191,8 @@ struct Swapchain
 		Buffer sinkBuffer, sourceBuffer;
 		Image sinkImage, sourceImage;
 		VkFence sourceFence = VK_NULL_HANDLE;
-		VkSemaphore sinkSemaphore = VK_NULL_HANDLE;
+		VkSemaphore sinkReleaseSemaphore = VK_NULL_HANDLE;
+		VkFence sinkAcquireFence = VK_NULL_HANDLE;
 		VkCommandBuffer sourceCmd = VK_NULL_HANDLE;
 		VkCommandBuffer sinkCmd = VK_NULL_HANDLE;
 	};
@@ -197,6 +202,8 @@ struct Swapchain
 		VkCommandPool pool = VK_NULL_HANDLE;
 		uint32_t family = VK_QUEUE_FAMILY_IGNORED;
 	} sourceCmdPool, sinkCmdPool;
+
+	std::vector<VkFence> sinkFencePool;
 
 	Device *device;
 	std::vector<SwapchainImage> images;
@@ -227,6 +234,14 @@ struct Swapchain
 	VkResult initSourceCommands(uint32_t familyIndex);
 	VkResult submitSourceWork(VkQueue queue, uint32_t index, VkFence fence);
 	VkResult markResult(VkResult err);
+
+	uint32_t getNumForwardProgressImages(const VkSwapchainCreateInfoKHR *pCreateInfo) const;
+	VkResult pumpAcquireSinkImage();
+	VkResult setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateInfo, VkImage image, uint32_t index);
+
+	VkResult allocateImageMemory(Image &img) const;
+
+	void runWorker();
 };
 
 struct Device
@@ -279,6 +294,7 @@ struct Device
 	VkPhysicalDevicePresentWaitFeaturesKHR waitFeatures;
 	VkPhysicalDevicePresentIdFeaturesKHR idFeatures;
 	VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maint1Features;
+	VkPhysicalDeviceMemoryProperties sourceMemoryProps;
 };
 
 #include "dispatch_wrapper.hpp"
@@ -307,6 +323,8 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 	instance = instance_;
 	setDeviceLoaderData = setDeviceLoaderData_;
 	layerInitDeviceDispatchTable(device, &table, gpa);
+
+	instance->getTable()->GetPhysicalDeviceMemoryProperties(gpu, &sourceMemoryProps);
 
 	for (uint32_t i = 0; i < pCreateInfo->queueCreateInfoCount; i++)
 	{
@@ -343,9 +361,10 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 		std::vector<const char *> enabledExtensions = {
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,
+			VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
 		};
 
-		for (uint32_t i = 0; i < pCreateInfo->enabledLayerCount; i++)
+		for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
 		{
 			const char *ext = pCreateInfo->ppEnabledExtensionNames[i];
 			if (findExtension(redirectedExtensions, ext))
@@ -497,6 +516,94 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 	}
 }
 
+VkResult Swapchain::allocateImageMemory(Image &img) const
+{
+	VkMemoryRequirements reqs;
+	device->table.GetImageMemoryRequirements(device->device, img.image, &reqs);
+
+	uint32_t memoryTypeIndex = UINT32_MAX;
+	for (uint32_t i = 0; i < device->sourceMemoryProps.memoryTypeCount; i++)
+	{
+		if ((device->sourceMemoryProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 &&
+		    (reqs.memoryTypeBits & (1u << i)) != 0)
+		{
+			memoryTypeIndex = i;
+			break;
+		}
+	}
+
+	if (memoryTypeIndex == UINT32_MAX)
+		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+	VkMemoryDedicatedAllocateInfo dedicatedInfo = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+	VkMemoryAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	dedicatedInfo.image = img.image;
+	allocInfo.allocationSize = reqs.size;
+	allocInfo.pNext = &dedicatedInfo;
+
+	VkResult res = device->table.AllocateMemory(device->device, &allocInfo, nullptr, &img.memory);
+	if (res != VK_SUCCESS)
+		return res;
+
+	res = device->table.BindImageMemory(device->device, img.image, img.memory, 0);
+	if (res != VK_SUCCESS)
+		return res;
+
+	img.size = reqs.size;
+	return VK_SUCCESS;
+}
+
+VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateInfo, VkImage image, uint32_t index)
+{
+	auto &img = images[index];
+	VkImageFormatListCreateInfo formatList;
+	VkImageCreateInfo imageInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	img.sinkImage.image = image;
+
+	if (const auto *fmt = findChain<VkImageFormatListCreateInfo>(
+			pCreateInfo->pNext, VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO))
+	{
+		formatList = *fmt;
+		formatList.pNext = imageInfo.pNext;
+		imageInfo.pNext = &formatList;
+	}
+
+	imageInfo.imageType = VK_IMAGE_TYPE_2D;
+	imageInfo.extent = { pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height, 1 };
+	imageInfo.format = pCreateInfo->imageFormat;
+	imageInfo.mipLevels = 1;
+	imageInfo.arrayLayers = pCreateInfo->imageArrayLayers;
+	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.sharingMode = pCreateInfo->imageSharingMode;
+	imageInfo.pQueueFamilyIndices = pCreateInfo->pQueueFamilyIndices;
+	imageInfo.queueFamilyIndexCount = pCreateInfo->queueFamilyIndexCount;
+	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	imageInfo.usage = pCreateInfo->imageUsage;
+	if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR)
+		imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
+	VkResult res = device->table.CreateImage(device->device, &imageInfo, nullptr, &img.sourceImage.image);
+	if (res != VK_SUCCESS)
+		return res;
+
+	res = allocateImageMemory(img.sourceImage);
+	if (res != VK_SUCCESS)
+		return res;
+
+	return VK_SUCCESS;
+}
+
+VkResult Swapchain::pumpAcquireSinkImage()
+{
+	return VK_SUCCESS;
+}
+
+void Swapchain::runWorker()
+{
+
+}
+
 VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fence)
 {
 	VkResult result = initSourceCommands(device->queueToFamilyIndex(queue));
@@ -517,6 +624,48 @@ VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fenc
 		return VK_SUCCESS;
 }
 
+uint32_t Swapchain::getNumForwardProgressImages(const VkSwapchainCreateInfoKHR *pCreateInfo) const
+{
+	// Determine how many images we have to acquire to keep forward progress going.
+	// For every present request, the worker thread will acquire another image.
+
+	auto *instanceTable = device->getInstance()->getTable();
+	auto *modes = findChain<VkSwapchainPresentModesCreateInfoEXT>(
+			pCreateInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT);
+	auto count = uint32_t(images.size());
+	uint32_t minImageCount = 0;
+
+	if (modes)
+	{
+		VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR };
+		VkSurfaceCapabilities2KHR caps = { VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR };
+		VkSurfacePresentModeEXT mode = { VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_EXT };
+
+		// Need to consider minImageCount for each present mode individually.
+		surfaceInfo.surface = pCreateInfo->surface;
+		surfaceInfo.pNext = &mode;
+
+		for (uint32_t i = 0; i < modes->presentModeCount; i++)
+		{
+			mode.presentMode = modes->pPresentModes[i];
+			instanceTable->GetPhysicalDeviceSurfaceCapabilities2KHR(device->getPhysicalDevice(), &surfaceInfo, &caps);
+			minImageCount = std::max<uint32_t>(minImageCount, caps.surfaceCapabilities.minImageCount);
+		}
+	}
+	else
+	{
+		VkSurfaceCapabilitiesKHR caps;
+		instanceTable->GetPhysicalDeviceSurfaceCapabilitiesKHR(device->getPhysicalDevice(), pCreateInfo->surface, &caps);
+		minImageCount = caps.minImageCount;
+	}
+
+	// Also considers broken applications that request less than minImageCount.
+	if (count < minImageCount)
+		return 1;
+	else
+		return count - minImageCount + 1;
+}
+
 VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 {
 	auto tmpCreateInfo = *pCreateInfo;
@@ -527,10 +676,33 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 		tmpCreateInfo.oldSwapchain = oldSwap->sinkSwapchain;
 	}
 
+	tmpCreateInfo.pNext = nullptr;
+	tmpCreateInfo.flags = 0;
 	tmpCreateInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	tmpCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	tmpCreateInfo.pQueueFamilyIndices = nullptr;
 	tmpCreateInfo.queueFamilyIndexCount = 0;
+
+	// Only consider pNext structs we care about.
+	VkSwapchainPresentScalingCreateInfoEXT scalingInfo;
+	VkSwapchainPresentModesCreateInfoEXT modesInfo;
+
+	if (const auto *modes = findChain<VkSwapchainPresentModesCreateInfoEXT>(
+			pCreateInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT))
+	{
+		modesInfo = *modes;
+		modesInfo.pNext = tmpCreateInfo.pNext;
+		tmpCreateInfo.pNext = &modesInfo;
+	}
+
+	if (const auto *scaling = findChain<VkSwapchainPresentScalingCreateInfoEXT>(
+			pCreateInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT))
+	{
+		scalingInfo = *scaling;
+		scalingInfo.pNext = tmpCreateInfo.pNext;
+		tmpCreateInfo.pNext = &scalingInfo;
+	}
+
 	VkResult result = device->sinkTable.CreateSwapchainKHR(
 			device->sinkDevice, &tmpCreateInfo, nullptr, &sinkSwapchain);
 
@@ -539,12 +711,25 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 
 	uint32_t count;
 	device->sinkTable.GetSwapchainImagesKHR(device->sinkDevice, sinkSwapchain, &count, nullptr);
-	images.resize(count);
 	std::vector<VkImage> vkImages(count);
 	device->sinkTable.GetSwapchainImagesKHR(device->sinkDevice, sinkSwapchain, &count, vkImages.data());
 
-	sinkCmdPool.pool = createCommandPool(device->sinkDevice, device->sinkTable, device->getInstance()->sinkGpuQueueFamily);
+	images.resize(count);
+	for (uint32_t i = 0; i < count; i++)
+	{
+		VkResult res = setupSwapchainImage(pCreateInfo, vkImages[i], i);
+		if (res != VK_SUCCESS)
+			return res;
+	}
 
+	sinkCmdPool.pool = createCommandPool(device->sinkDevice, device->sinkTable,
+										 device->getInstance()->sinkGpuQueueFamily);
+
+	uint32_t numForwardProgressImages = getNumForwardProgressImages(pCreateInfo);
+	for (uint32_t i = 0; i < numForwardProgressImages; i++)
+		markResult(pumpAcquireSinkImage());
+
+	worker = std::thread(&Swapchain::runWorker, this);
 	return VK_SUCCESS;
 }
 
@@ -742,14 +927,17 @@ Swapchain::~Swapchain()
 
 		device->sinkTable.DestroyBuffer(device->sinkDevice, image.sinkBuffer.buffer, nullptr);
 		device->sinkTable.FreeMemory(device->sinkDevice, image.sinkBuffer.memory, nullptr);
-		device->sinkTable.DestroyImage(device->sinkDevice, image.sinkImage.image, nullptr);
-		device->sinkTable.FreeMemory(device->sinkDevice, image.sinkImage.memory, nullptr);
-		device->sinkTable.DestroySemaphore(device->sinkDevice, image.sinkSemaphore, nullptr);
+		// sinkImage is owned by swapchain.
+		device->sinkTable.DestroySemaphore(device->sinkDevice, image.sinkReleaseSemaphore, nullptr);
+		device->sinkTable.DestroyFence(device->sinkDevice, image.sinkAcquireFence, nullptr);
 
 		// Free this last. This is important to avoid spurious device lost
 		// when submitting something with live VkDeviceMemory that references freed host memory.
 		free(image.externalHostMemory);
 	}
+
+	for (auto &fence : sinkFencePool)
+		device->sinkTable.DestroyFence(device->sinkDevice, fence, nullptr);
 
 	device->table.DestroyCommandPool(device->device, sourceCmdPool.pool, nullptr);
 	device->sinkTable.DestroyCommandPool(device->device, sinkCmdPool.pool, nullptr);
