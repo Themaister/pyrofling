@@ -23,6 +23,9 @@
 #include "dispatch_helper.hpp"
 #include <mutex>
 #include <algorithm>
+#include <thread>
+#include <condition_variable>
+#include <queue>
 
 extern "C"
 {
@@ -35,6 +38,26 @@ VK_LAYER_PYROFLING_CROSS_WSI_vkGetDeviceProcAddr(VkDevice device, const char *pN
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 VK_LAYER_PYROFLING_CROSS_WSI_vkGetInstanceProcAddr(VkInstance instance, const char *pName);
 }
+
+// These have to be supported by sink GPU rather than source GPU.
+static const char *redirectedExtensions[] = {
+	VK_KHR_PRESENT_ID_EXTENSION_NAME,
+	VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+	VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+};
+
+// Block any extension that we don't explicitly wrap yet.
+// For sinkGpu situation we invent dummy handles for VkSwapchainKHR.
+static const char *blockedExtensions[] = {
+	VK_KHR_DISPLAY_SWAPCHAIN_EXTENSION_NAME,
+	VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
+	VK_KHR_SHARED_PRESENTABLE_IMAGE_EXTENSION_NAME,
+	VK_AMD_DISPLAY_NATIVE_HDR_EXTENSION_NAME,
+	VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME,
+	VK_EXT_HDR_METADATA_EXTENSION_NAME,
+	VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME,
+	"VK_EXT_full_screen_exclusive",
+};
 
 struct Instance;
 struct Device;
@@ -61,13 +84,35 @@ struct Instance
 
 	VkInstance instance = VK_NULL_HANDLE;
 	VkPhysicalDevice sinkGpu = VK_NULL_HANDLE;
+	VkPhysicalDevice sourceGpu = VK_NULL_HANDLE;
 	VkLayerInstanceDispatchTable table = {};
 	PFN_vkGetInstanceProcAddr gpa = nullptr;
 	PFN_vkSetInstanceLoaderData setInstanceLoaderData = nullptr;
 	PFN_vkLayerCreateDevice layerCreateDevice = nullptr;
 	PFN_vkLayerDestroyDevice layerDestroyDevice = nullptr;
 	uint32_t sinkGpuQueueFamily = VK_QUEUE_FAMILY_IGNORED;
+
+	VkPhysicalDevice findPhysicalDevice(const char *tag) const;
 };
+
+VkPhysicalDevice Instance::findPhysicalDevice(const char *tag) const
+{
+	uint32_t count = 0;
+	table.EnumeratePhysicalDevices(instance, &count, nullptr);
+	std::vector<VkPhysicalDevice> gpus(count);
+	table.EnumeratePhysicalDevices(instance, &count, gpus.data());
+
+	for (uint32_t i = 0; i < count; i++)
+	{
+		VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+		table.GetPhysicalDeviceProperties2KHR(gpus[i], &props2);
+
+		if (strstr(props2.properties.deviceName, tag) != nullptr)
+			return gpus[i];
+	}
+
+	return VK_NULL_HANDLE;
+}
 
 void Instance::init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vkSetInstanceLoaderData setInstanceLoaderData_,
                     PFN_vkLayerCreateDevice layerCreateDevice_, PFN_vkLayerDestroyDevice layerDestroyDevice_)
@@ -79,26 +124,10 @@ void Instance::init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vk
 	layerDestroyDevice = layerDestroyDevice_;
 	layerInitInstanceDispatchTable(instance, &table, gpa);
 
-	const char *env = getenv("CROSS_WSI_SINK");
-	if (env)
-	{
-		uint32_t count = 0;
-		table.EnumeratePhysicalDevices(instance, &count, nullptr);
-		std::vector<VkPhysicalDevice> gpus(count);
-		table.EnumeratePhysicalDevices(instance, &count, gpus.data());
-
-		for (uint32_t i = 0; i < count; i++)
-		{
-			VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
-			table.GetPhysicalDeviceProperties2KHR(gpus[i], &props2);
-
-			if (strstr(props2.properties.deviceName, env) != nullptr)
-			{
-				sinkGpu = gpus[i];
-				break;
-			}
-		}
-	}
+	if (const char *env = getenv("CROSS_WSI_SINK"))
+		sinkGpu = findPhysicalDevice(env);
+	if (const char *env = getenv("CROSS_WSI_SOURCE"))
+		sourceGpu = findPhysicalDevice(env);
 
 	if (sinkGpu)
 	{
@@ -121,6 +150,72 @@ void Instance::init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vk
 			sinkGpu = VK_NULL_HANDLE;
 	}
 }
+
+struct Swapchain
+{
+	explicit Swapchain(Device *device);
+	~Swapchain();
+
+	VkResult init(const VkSwapchainCreateInfoKHR *pCreateInfo);
+
+	VkResult releaseSwapchainImages(const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo);
+	VkResult queuePresent(VkQueue queue, uint32_t index, VkFence fence);
+	VkResult acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex);
+	VkResult getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages);
+	void retire();
+
+	struct Buffer
+	{
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+	};
+
+	struct Image
+	{
+		VkImage image = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+	};
+
+	struct SwapchainImage
+	{
+		void *externalHostMemory = nullptr;
+		Buffer sinkBuffer, sourceBuffer;
+		Image sinkImage, sourceImage;
+		VkFence sourceFence = VK_NULL_HANDLE;
+		VkSemaphore sinkSemaphore = VK_NULL_HANDLE;
+		VkCommandBuffer sourceCmd = VK_NULL_HANDLE;
+		VkCommandBuffer sinkCmd = VK_NULL_HANDLE;
+	};
+
+	struct
+	{
+		VkCommandPool pool = VK_NULL_HANDLE;
+		uint32_t family = VK_QUEUE_FAMILY_IGNORED;
+	} sourceCmdPool, sinkCmdPool;
+
+	Device *device;
+	std::vector<SwapchainImage> images;
+	std::queue<uint32_t> acquireQueue;
+	VkResult swapchainStatus = VK_SUCCESS;
+	VkPresentModeKHR currentPresentMode = VK_PRESENT_MODE_FIFO_KHR;
+	VkSwapchainKHR sinkSwapchain = VK_NULL_HANDLE;
+
+	std::mutex lock;
+	std::condition_variable cond;
+	std::thread worker;
+
+	struct Work
+	{
+		uint64_t presentId;
+		uint32_t index;
+		VkPresentModeKHR mode;
+		bool overrideMode;
+	};
+	std::queue<Work> workQueue;
+
+	static VkCommandPool createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family);
+	VkResult submitSourceWork(uint32_t index);
+};
 
 struct Device
 {
@@ -167,6 +262,11 @@ struct Device
 	VkDevice sinkDevice = VK_NULL_HANDLE;
 	VkLayerDispatchTable sinkTable = {};
 	VkQueue sinkQueue = VK_NULL_HANDLE;
+	std::mutex sinkQueueLock;
+
+	VkPhysicalDevicePresentWaitFeaturesKHR waitFeatures;
+	VkPhysicalDevicePresentIdFeaturesKHR idFeatures;
+	VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maint1Features;
 };
 
 #include "dispatch_wrapper.hpp"
@@ -202,15 +302,9 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 		}
 	}
 
-	bool usesSwapchain = false;
-	for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++)
-	{
-		if (strcmp(pCreateInfo->ppEnabledExtensionNames[i], VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0)
-		{
-			usesSwapchain = true;
-			break;
-		}
-	}
+	bool usesSwapchain = findExtension(pCreateInfo->ppEnabledExtensionNames,
+	                                   pCreateInfo->enabledExtensionCount,
+	                                   VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
 	if (usesSwapchain && instance->sinkGpu && gpu != instance->sinkGpu)
 	{
@@ -223,13 +317,48 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 		queueInfo.queueFamilyIndex = instance->sinkGpuQueueFamily;
 		queueInfo.pQueuePriorities = &prio;
 
-		static const char *extensions[] = {
+		VkPhysicalDeviceFeatures2 features2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+
+		std::vector<const char *> enabledExtensions = {
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 			VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME,
 		};
 
-		createInfo.ppEnabledExtensionNames = extensions;
-		createInfo.enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]);
+		for (uint32_t i = 0; i < pCreateInfo->enabledLayerCount; i++)
+		{
+			const char *ext = pCreateInfo->ppEnabledExtensionNames[i];
+			if (findExtension(redirectedExtensions, ext))
+			{
+				enabledExtensions.push_back(ext);
+
+				if (strcmp(ext, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) == 0)
+				{
+					waitFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+					                 nullptr, VK_TRUE };
+					waitFeatures.pNext = features2.pNext;
+					features2.pNext = &waitFeatures;
+				}
+				else if (strcmp(ext, VK_KHR_PRESENT_ID_EXTENSION_NAME) == 0)
+				{
+					idFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+					               nullptr, VK_TRUE };
+					idFeatures.pNext = features2.pNext;
+					features2.pNext = &idFeatures;
+				}
+				else if (strcmp(ext, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) == 0)
+				{
+					maint1Features = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT,
+					                   nullptr, VK_TRUE };
+					maint1Features.pNext = features2.pNext;
+					features2.pNext = &maint1Features;
+				}
+			}
+		}
+
+		createInfo.ppEnabledExtensionNames = enabledExtensions.data();
+		createInfo.enabledExtensionCount = uint32_t(enabledExtensions.size());
+		createInfo.pNext = &features2;
+
 		PFN_vkGetDeviceProcAddr gdpa = nullptr;
 		if (instance->layerCreateDevice(instance->instance, instance->sinkGpu, &createInfo, nullptr, &sinkDevice,
 		                                VK_LAYER_PYROFLING_CROSS_WSI_vkGetInstanceProcAddr, &gdpa) != VK_SUCCESS)
@@ -238,6 +367,95 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 		layerInitDeviceDispatchTable(sinkDevice, &sinkTable, gdpa);
 		sinkTable.GetDeviceQueue(sinkDevice, instance->sinkGpuQueueFamily, 0, &sinkQueue);
 	}
+}
+
+Swapchain::Swapchain(Device *device_)
+	: device(device_)
+{
+}
+
+VkCommandPool Swapchain::createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family)
+{
+	VkCommandPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+	VkCommandPool pool = VK_NULL_HANDLE;
+
+	poolInfo.queueFamilyIndex = family;
+	table.CreateCommandPool(device, &poolInfo, nullptr, &pool);
+	return pool;
+}
+
+VkResult Swapchain::submitSourceWork(uint32_t index)
+{
+
+}
+
+VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
+{
+	currentPresentMode = pCreateInfo->presentMode;
+
+	auto tmpCreateInfo = *pCreateInfo;
+	auto *oldSwap = reinterpret_cast<Swapchain *>(pCreateInfo->oldSwapchain);
+	if (oldSwap)
+	{
+		oldSwap->retire();
+		tmpCreateInfo.oldSwapchain = oldSwap->sinkSwapchain;
+	}
+
+	VkResult result = device->sinkTable.CreateSwapchainKHR(
+			device->sinkDevice, &tmpCreateInfo, nullptr, &sinkSwapchain);
+
+	if (result != VK_SUCCESS)
+		return result;
+
+	uint32_t count;
+	device->sinkTable.GetSwapchainImagesKHR(device->sinkDevice, sinkSwapchain, &count, nullptr);
+	images.resize(count);
+	std::vector<VkImage> vkImages(count);
+	device->sinkTable.GetSwapchainImagesKHR(device->sinkDevice, sinkSwapchain, &count, vkImages.data());
+
+	sinkCmdPool.pool = createCommandPool(device->sinkDevice, device->sinkTable, device->getInstance()->sinkGpuQueueFamily);
+
+	return VK_SUCCESS;
+}
+
+Swapchain::~Swapchain()
+{
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		swapchainStatus = VK_ERROR_SURFACE_LOST_KHR;
+		cond.notify_one();
+	}
+
+	if (worker.joinable())
+		worker.join();
+
+	{
+		std::lock_guard<std::mutex> holder{device->sinkQueueLock};
+		device->sinkTable.QueueWaitIdle(device->sinkQueue);
+	}
+	device->sinkTable.DestroySwapchainKHR(device->sinkDevice, sinkSwapchain, nullptr);
+
+	for (auto &image : images)
+	{
+		device->table.DestroyBuffer(device->device, image.sourceBuffer.buffer, nullptr);
+		device->table.FreeMemory(device->device, image.sourceBuffer.memory, nullptr);
+		device->table.DestroyImage(device->device, image.sourceImage.image, nullptr);
+		device->table.FreeMemory(device->device, image.sourceImage.memory, nullptr);
+		device->table.DestroyFence(device->device, image.sourceFence, nullptr);
+
+		device->sinkTable.DestroyBuffer(device->sinkDevice, image.sinkBuffer.buffer, nullptr);
+		device->sinkTable.FreeMemory(device->sinkDevice, image.sinkBuffer.memory, nullptr);
+		device->sinkTable.DestroyImage(device->sinkDevice, image.sinkImage.image, nullptr);
+		device->sinkTable.FreeMemory(device->sinkDevice, image.sinkImage.memory, nullptr);
+		device->sinkTable.DestroySemaphore(device->sinkDevice, image.sinkSemaphore, nullptr);
+
+		// Free this last. This is important to avoid spurious device lost
+		// when submitting something with live VkDeviceMemory that references freed host memory.
+		free(image.externalHostMemory);
+	}
+
+	device->table.DestroyCommandPool(device->device, sourceCmdPool.pool, nullptr);
+	device->sinkTable.DestroyCommandPool(device->device, sinkCmdPool.pool, nullptr);
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
@@ -300,6 +518,31 @@ static VKAPI_ATTR void VKAPI_CALL DestroyInstance(VkInstance instance, const VkA
 	destroyLayerData(key, instanceData);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL EnumeratePhysicalDevices(
+		VkInstance instance, uint32_t *pPhysicalDeviceCount, VkPhysicalDevice *pPhysicalDevices)
+{
+	auto *layer = getInstanceLayer(instance);
+	if (layer->sourceGpu)
+	{
+		if (pPhysicalDevices)
+		{
+			VkResult res = *pPhysicalDeviceCount != 0 ? VK_SUCCESS : VK_INCOMPLETE;
+			if (*pPhysicalDeviceCount != 0)
+				pPhysicalDevices[0] = layer->sourceGpu;
+			return res;
+		}
+		else
+		{
+			*pPhysicalDeviceCount = 1;
+			return VK_SUCCESS;
+		}
+	}
+	else
+	{
+		return layer->getTable()->EnumeratePhysicalDevices(instance, pPhysicalDeviceCount, pPhysicalDevices);
+	}
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
 		VkPhysicalDevice                            physicalDevice,
 		const char*                                 pLayerName,
@@ -318,13 +561,6 @@ static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
 	if (!layer->sinkGpu || physicalDevice == layer->sinkGpu)
 		return layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
 
-	// These won't be meaningfully implemented on non-sink GPU, so don't expose them.
-	static const char *blockedExtensions[] = {
-		VK_KHR_PRESENT_ID_EXTENSION_NAME,
-		VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
-		VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
-	};
-
 	// The surface and display queries are all instance extensions,
 	// and thus the loader is responsible for dealing with it.
 	uint32_t count = 0;
@@ -332,10 +568,17 @@ static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
 	std::vector<VkExtensionProperties> props(count);
 	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, props.data());
 
-	auto itr = std::remove_if(props.begin(), props.end(), [](const VkExtensionProperties &prop) -> bool {
-		for (auto *blocked : blockedExtensions)
-			if (strcmp(prop.extensionName, blocked) == 0)
-				return true;
+	layer->getTable()->EnumerateDeviceExtensionProperties(layer->sinkGpu, pLayerName, &count, nullptr);
+	std::vector<VkExtensionProperties> redirectedProps(count);
+	layer->getTable()->EnumerateDeviceExtensionProperties(layer->sinkGpu, pLayerName, &count, redirectedProps.data());
+
+	// For redirected extensions, both source and sink must support it.
+	// Rewriting PDF2 chains is generally quite problematic.
+	auto itr = std::remove_if(props.begin(), props.end(), [&redirectedProps](const VkExtensionProperties &prop) -> bool {
+		if (findExtension(redirectedExtensions, prop.extensionName))
+			return !findExtension(redirectedProps, prop.extensionName);
+		else if (findExtension(blockedExtensions, prop.extensionName))
+			return true;
 		return false;
 	});
 	props.erase(itr, props.end());
@@ -389,23 +632,31 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 		                     pCreateInfo->ppEnabledExtensionNames + pCreateInfo->enabledExtensionCount};
 	}
 
-	// If these are not supported for whatever reason,
-	// we will just not wrap entry points and pass through all device functions.
 	auto tmpCreateInfo = *pCreateInfo;
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_FENCE_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+
+	bool usesSwapchain = findExtension(pCreateInfo->ppEnabledExtensionNames,
+	                                   pCreateInfo->enabledExtensionCount,
+	                                   VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+	if (usesSwapchain && gpu != layer->sinkGpu && layer->sinkGpu)
+	{
+		// If these are not supported for whatever reason,
+		// we will just not wrap entry points and pass through all device functions.
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_FENCE_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 #ifndef _WIN32
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME);
-	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME);
+		addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
 #endif
-	tmpCreateInfo.enabledExtensionCount = enabledExtensions.size();
-	tmpCreateInfo.ppEnabledExtensionNames = enabledExtensions.data();
+		tmpCreateInfo.enabledExtensionCount = enabledExtensions.size();
+		tmpCreateInfo.ppEnabledExtensionNames = enabledExtensions.data();
+	}
 
 	// Advance the link info for the next element on the chain
 	chainInfo->u.pLayerInfo = chainInfo->u.pLayerInfo->pNext;
@@ -423,7 +674,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 	return VK_SUCCESS;
 }
 
-static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
+static VKAPI_ATTR void VKAPI_CALL
+DestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
 {
 	void *key = getDispatchKey(device);
 	auto *layer = getLayerData(key, deviceData);
@@ -436,17 +688,25 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 static VKAPI_ATTR VkResult VKAPI_CALL
 CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
                    const VkAllocationCallbacks *pAllocator,
-                   VkSwapchainKHR *pSwachain)
+                   VkSwapchainKHR *pSwapchain)
 {
 	auto *layer = getDeviceLayer(device);
 	if (!layer->sinkDevice)
-		return layer->getTable()->CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwachain);
+		return layer->getTable()->CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
 
-	auto result = layer->getTable()->CreateSwapchainKHR(device, &info, pAllocator, pSwachain);
+	auto result = layer->getTable()->CreateSwapchainKHR(layer->sinkDevice, pCreateInfo, pAllocator, pSwapchain);
 	if (result != VK_SUCCESS)
 		return result;
 
-	return VK_SUCCESS;
+	auto *swap = new Swapchain(layer);
+
+	auto res = swap->init(pCreateInfo);
+	if (res != VK_SUCCESS)
+		delete swap;
+	else
+		*pSwapchain = reinterpret_cast<VkSwapchainKHR>(swap);
+
+	return res;
 }
 
 static VKAPI_ATTR void VKAPI_CALL
@@ -456,7 +716,67 @@ DestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocatio
 	if (!layer->sinkDevice)
 		return layer->getTable()->DestroySwapchainKHR(device, swapchain, pAllocator);
 
-	layer->getTable()->DestroySwapchainKHR(device, swapchain, pAllocator);
+	auto *swap = reinterpret_cast<Swapchain *>(swapchain);
+	delete swap;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+GetSwapchainImagesKHR(
+		VkDevice                                    device,
+		VkSwapchainKHR                              swapchain,
+		uint32_t*                                   pSwapchainImageCount,
+		VkImage*                                    pSwapchainImages)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->sinkDevice)
+		return layer->getTable()->GetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+
+	auto *swap = reinterpret_cast<Swapchain *>(swapchain);
+	return swap->getSwapchainImages(pSwapchainImageCount, pSwapchainImages);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+AcquireNextImageKHR(
+		VkDevice                                    device,
+		VkSwapchainKHR                              swapchain,
+		uint64_t                                    timeout,
+		VkSemaphore                                 semaphore,
+		VkFence                                     fence,
+		uint32_t*                                   pImageIndex)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->sinkDevice)
+		return layer->getTable()->AcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+
+	auto *swap = reinterpret_cast<Swapchain *>(swapchain);
+	return swap->acquire(timeout, semaphore, fence, pImageIndex);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+AcquireNextImage2KHR(
+		VkDevice                                    device,
+		const VkAcquireNextImageInfoKHR*            pAcquireInfo,
+		uint32_t*                                   pImageIndex)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->sinkDevice)
+		return layer->getTable()->AcquireNextImage2KHR(device, pAcquireInfo, pImageIndex);
+
+	auto *swap = reinterpret_cast<Swapchain *>(pAcquireInfo->semaphore);
+	return swap->acquire(pAcquireInfo->timeout, pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+ReleaseSwapchainImagesEXT(
+		VkDevice                                    device,
+		const VkReleaseSwapchainImagesInfoEXT*      pReleaseInfo)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->sinkDevice)
+		return layer->getTable()->ReleaseSwapchainImagesEXT(device, pReleaseInfo);
+
+	auto *swap = reinterpret_cast<Swapchain *>(pReleaseInfo->swapchain);
+	return swap->releaseSwapchainImages(pReleaseInfo);
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL
@@ -466,8 +786,56 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	if (!layer->sinkDevice)
 		return layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
 
-	auto result = layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
-	return result;
+	VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+	submitInfo.pWaitDstStageMask = &waitStage;
+	submitInfo.waitSemaphoreCount = 1;
+
+	for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; i++)
+	{
+		submitInfo.pWaitSemaphores = &pPresentInfo->pWaitSemaphores[i];
+		VkResult res = layer->getTable()->QueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+		if (res != VK_SUCCESS)
+			return res;
+	}
+
+	VkResult res = VK_SUCCESS;
+	bool isSuboptimal = false;
+	bool isSurfaceLost = false;
+	bool isDeviceLost = false;
+
+	auto *fence = findChain<VkSwapchainPresentFenceInfoEXT>(
+			pPresentInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT);
+
+	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
+	{
+		auto *swap = reinterpret_cast<Swapchain *>(pPresentInfo->pSwapchains[i]);
+		VkResult result = swap->queuePresent(queue, pPresentInfo->pImageIndices[i],
+											 fence ? fence->pFences[i] : VK_NULL_HANDLE);
+
+		if (result == VK_SUBOPTIMAL_KHR)
+			isSuboptimal = true;
+		else if (result == VK_ERROR_SURFACE_LOST_KHR)
+			isSurfaceLost = true;
+		else if (result == VK_ERROR_DEVICE_LOST)
+			isDeviceLost = true;
+
+		if (pPresentInfo->pResults)
+			pPresentInfo->pResults[i] = result;
+
+		// What exactly are we supposed to return here?
+		if (result < 0)
+			res = result;
+	}
+
+	if (isDeviceLost)
+		res = VK_ERROR_DEVICE_LOST;
+	else if (isSurfaceLost)
+		res = VK_ERROR_SURFACE_LOST_KHR;
+	else if (res == VK_SUCCESS && isSuboptimal)
+		res = VK_SUBOPTIMAL_KHR;
+
+	return res;
 }
 
 // Always redirect any physical device surface query.
@@ -700,6 +1068,7 @@ static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 		{ "vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CROSS_WSI_vkGetInstanceProcAddr) },
 		{ "vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(CreateDevice) },
 		{ "vkEnumerateDeviceExtensionProperties", reinterpret_cast<PFN_vkVoidFunction>(EnumerateDeviceExtensionProperties) },
+		{ "vkEnumeratePhysicalDevices", reinterpret_cast<PFN_vkVoidFunction>(EnumeratePhysicalDevices) },
 	};
 
 	for (auto &cmd : coreInstanceCommands)
@@ -760,6 +1129,10 @@ static PFN_vkVoidFunction interceptDeviceCommand(const char *pName)
 		{ "vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(QueuePresentKHR) },
 		{ "vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(CreateSwapchainKHR) },
 		{ "vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySwapchainKHR) },
+		{ "vkGetSwapchainImagesKHR", reinterpret_cast<PFN_vkVoidFunction>(GetSwapchainImagesKHR) },
+		{ "vkAcquireNextImageKHR", reinterpret_cast<PFN_vkVoidFunction>(AcquireNextImageKHR) },
+		{ "vkAcquireNextImage2KHR", reinterpret_cast<PFN_vkVoidFunction>(AcquireNextImage2KHR) },
+		{ "vkReleaseSwapchainImagesEXT", reinterpret_cast<PFN_vkVoidFunction>(ReleaseSwapchainImagesEXT) },
 		{ "vkDestroyDevice", reinterpret_cast<PFN_vkVoidFunction>(DestroyDevice) },
 	};
 
@@ -780,6 +1153,16 @@ VK_LAYER_PYROFLING_CROSS_WSI_vkGetDeviceProcAddr(VkDevice device, const char *pN
 	}
 
 	auto proc = layer->getTable()->GetDeviceProcAddr(device, pName);
+
+	// Dummy layer, just punch through the device proc addr.
+	// Only need to make sure we handle vkDestroyDevice properly.
+	if (!layer->sinkDevice)
+	{
+		if (strcmp(pName, "vkDestroyDevice") == 0)
+			return reinterpret_cast<PFN_vkVoidFunction>(DestroyDevice);
+		else
+			return proc;
+	}
 
 	// If the underlying implementation returns nullptr, we also need to return nullptr.
 	// This means we never expose wrappers which will end up dispatching into nullptr.

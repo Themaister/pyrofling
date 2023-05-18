@@ -32,7 +32,11 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(CreateSwapchainKHR);
 	F(DestroySwapchainKHR);
 	F(GetSwapchainImagesKHR);
+	F(AcquireNextImageKHR);
+	F(AcquireNextImage2KHR);
+	F(ReleaseSwapchainImagesEXT);
 	F(QueueSubmit);
+	F(QueueWaitIdle);
 	F(QueuePresentKHR);
 	F(CreateCommandPool);
 	F(DestroyCommandPool);
@@ -47,11 +51,13 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(ResetFences);
 	F(DestroyFence);
 	F(CreateImage);
+	F(CreateBuffer);
 	F(GetImageMemoryRequirements);
 	F(AllocateMemory);
 	F(FreeMemory);
 	F(BindImageMemory);
 	F(DestroyImage);
+	F(DestroyBuffer);
 	F(CreateSemaphore);
 	F(DestroySemaphore);
 #ifndef _WIN32
@@ -126,4 +132,22 @@ void addUniqueExtension(std::vector<const char *> &extensions,
 			break;
 		}
 	}
+}
+
+bool findExtension(const std::vector<VkExtensionProperties> &props, const char *ext)
+{
+	for (auto &prop : props)
+		if (strcmp(prop.extensionName, ext) == 0)
+			return true;
+
+	return false;
+}
+
+bool findExtension(const char * const *ppExtensions, uint32_t count, const char *ext)
+{
+	for (uint32_t i = 0; i < count; i++)
+		if (strcmp(ppExtensions[i], ext) == 0)
+			return true;
+
+	return false;
 }

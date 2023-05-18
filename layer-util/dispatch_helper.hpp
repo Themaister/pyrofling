@@ -94,8 +94,12 @@ struct VkLayerDispatchTable
 	PFN_vkCreateSwapchainKHR CreateSwapchainKHR;
 	PFN_vkDestroySwapchainKHR DestroySwapchainKHR;
 	PFN_vkGetSwapchainImagesKHR GetSwapchainImagesKHR;
+	PFN_vkAcquireNextImageKHR AcquireNextImageKHR;
+	PFN_vkAcquireNextImage2KHR AcquireNextImage2KHR;
+	PFN_vkReleaseSwapchainImagesEXT ReleaseSwapchainImagesEXT;
 
 	PFN_vkQueueSubmit QueueSubmit;
+	PFN_vkQueueWaitIdle QueueWaitIdle;
 	PFN_vkQueuePresentKHR QueuePresentKHR;
 
 	PFN_vkCreateCommandPool CreateCommandPool;
@@ -114,10 +118,12 @@ struct VkLayerDispatchTable
 	PFN_vkDestroyFence DestroyFence;
 
 	PFN_vkCreateImage CreateImage;
+	PFN_vkCreateBuffer CreateBuffer;
 	PFN_vkGetImageMemoryRequirements GetImageMemoryRequirements;
 	PFN_vkAllocateMemory AllocateMemory;
 	PFN_vkBindImageMemory BindImageMemory;
 	PFN_vkDestroyImage DestroyImage;
+	PFN_vkDestroyBuffer DestroyBuffer;
 	PFN_vkFreeMemory FreeMemory;
 
 	PFN_vkCreateSemaphore CreateSemaphore;
@@ -170,3 +176,27 @@ void addUniqueExtension(std::vector<const char *> &extensions, const char *name)
 void addUniqueExtension(std::vector<const char *> &extensions,
                         const std::vector<VkExtensionProperties> &allowed,
                         const char *name);
+
+bool findExtension(const std::vector<VkExtensionProperties> &props, const char *ext);
+bool findExtension(const char * const *ppExtensions, uint32_t count, const char *ext);
+
+template <size_t N>
+static inline bool findExtension(const char * (&exts)[N], const char *ext)
+{
+	return findExtension(exts, N, ext);
+}
+
+template <typename T>
+static inline const T *findChain(const void *pNext, VkStructureType sType)
+{
+	while (pNext)
+	{
+		auto *s = static_cast<const VkBaseInStructure *>(pNext);
+		if (s->sType == sType)
+			return static_cast<const T *>(pNext);
+
+		pNext = s->pNext;
+	}
+
+	return nullptr;
+}
