@@ -126,6 +126,7 @@ struct VkLayerDispatchTable
 	PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
 	PFN_vkAllocateMemory AllocateMemory;
 	PFN_vkBindImageMemory BindImageMemory;
+	PFN_vkBindBufferMemory BindBufferMemory;
 	PFN_vkDestroyImage DestroyImage;
 	PFN_vkDestroyBuffer DestroyBuffer;
 	PFN_vkFreeMemory FreeMemory;

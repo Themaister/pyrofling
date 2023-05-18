@@ -60,6 +60,7 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(AllocateMemory);
 	F(FreeMemory);
 	F(BindImageMemory);
+	F(BindBufferMemory);
 	F(DestroyImage);
 	F(DestroyBuffer);
 	F(CreateSemaphore);

@@ -232,6 +232,7 @@ struct Swapchain
 
 	static VkCommandPool createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family);
 	VkResult initSourceCommands(uint32_t familyIndex);
+	VkResult initSinkCommands();
 	VkResult submitSourceWork(VkQueue queue, uint32_t index, VkFence fence);
 	VkResult markResult(VkResult err);
 
@@ -429,8 +430,90 @@ VkCommandPool Swapchain::createCommandPool(VkDevice device, const VkLayerDispatc
 	return pool;
 }
 
+VkResult Swapchain::initSinkCommands()
+{
+	auto &table = device->sinkTable;
+	auto vkDevice = device->sinkDevice;
+
+	sinkCmdPool.pool = createCommandPool(vkDevice, table, device->getInstance()->sinkGpuQueueFamily);
+	sinkCmdPool.family = device->getInstance()->sinkGpuQueueFamily;
+
+	if (!sinkCmdPool.pool)
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+	for (auto &image : images)
+	{
+		VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+		allocInfo.commandBufferCount = 1;
+		allocInfo.commandPool = sinkCmdPool.pool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		if (table.AllocateCommandBuffers(vkDevice, &allocInfo, &image.sinkCmd) != VK_SUCCESS)
+			return VK_ERROR_DEVICE_LOST;
+
+		// Dispatchable object.
+		auto cmd = image.sinkCmd;
+		device->setDeviceLoaderData(vkDevice, image.sinkCmd);
+
+		VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+		table.BeginCommandBuffer(cmd, &beginInfo);
+		{
+			VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+			barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT,
+			                             0, VK_REMAINING_MIP_LEVELS,
+			                             0, VK_REMAINING_ARRAY_LAYERS };
+			barrier.image = image.sinkImage.image;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			table.CmdPipelineBarrier(cmd,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			                         0, nullptr,
+			                         0, nullptr,
+			                         1, &barrier);
+
+			VkBufferImageCopy copy = {};
+			copy.imageExtent = { width, height, 1 };
+			copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			table.CmdCopyBufferToImage(cmd,
+			                           image.sinkBuffer.buffer,
+			                           image.sinkImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			                           1, &copy);
+
+			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+			barrier.dstAccessMask = 0;
+
+			VkBufferMemoryBarrier bufBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+			bufBarrier.buffer = image.sinkBuffer.buffer;
+			bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bufBarrier.size = VK_WHOLE_SIZE;
+			bufBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+
+			table.CmdPipelineBarrier(cmd,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			                         0, nullptr,
+			                         1, &bufBarrier,
+			                         1, &barrier);
+		}
+
+		if (table.EndCommandBuffer(cmd) != VK_SUCCESS)
+			return VK_ERROR_DEVICE_LOST;
+	}
+
+	return VK_SUCCESS;
+}
+
 VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 {
+	auto &table = device->table;
+	auto vkDevice = device->device;
+
 	if (familyIndex != sourceCmdPool.family)
 	{
 		// Wait until all source commands are done processing.
@@ -439,102 +522,110 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 			return submitCount == processedSourceCount;
 		});
 
-		device->table.DestroyCommandPool(device->device, sourceCmdPool.pool, nullptr);
+		table.DestroyCommandPool(vkDevice, sourceCmdPool.pool, nullptr);
 		sourceCmdPool.pool = VK_NULL_HANDLE;
 	}
 
 	if (sourceCmdPool.pool == VK_NULL_HANDLE)
 	{
-		sourceCmdPool.pool = createCommandPool(device->device, device->table, familyIndex);
+		sourceCmdPool.pool = createCommandPool(vkDevice, table, familyIndex);
 		sourceCmdPool.family = familyIndex;
 	}
 
-	// We have messed with sync objects at this point, so we must return DEVICE_LOST on failure here.
-	// Should never happen though ...
+	if (sourceCmdPool.pool == VK_NULL_HANDLE)
+	{
+		// We have messed with sync objects at this point, so we must return DEVICE_LOST on failure here.
+		// Should never happen though ...
+		return VK_ERROR_DEVICE_LOST;
+	}
 
 	// Just record the commands up front,
 	// they are immutable for a given swapchain anyway.
-	if (sourceCmdPool.pool != VK_NULL_HANDLE)
+	for (auto &image : images)
 	{
-		for (auto &image : images)
+		VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+		allocInfo.commandBufferCount = 1;
+		allocInfo.commandPool = sourceCmdPool.pool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		if (table.AllocateCommandBuffers(vkDevice, &allocInfo, &image.sourceCmd) != VK_SUCCESS)
+			return VK_ERROR_DEVICE_LOST;
+
+		auto cmd = image.sourceCmd;
+
+		// Dispatchable object.
+		device->setDeviceLoaderData(vkDevice, cmd);
+
+		VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+		table.BeginCommandBuffer(cmd, &beginInfo);
 		{
-			VkCommandBufferAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-			allocInfo.commandBufferCount = 1;
-			allocInfo.commandPool = sourceCmdPool.pool;
-			allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-			if (device->table.AllocateCommandBuffers(device->device, &allocInfo, &image.sourceCmd) != VK_SUCCESS)
-				return VK_ERROR_DEVICE_LOST;
+			VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+			barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT,
+										 0, VK_REMAINING_MIP_LEVELS,
+										 0, VK_REMAINING_ARRAY_LAYERS };
+			barrier.image = image.sourceImage.image;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-			// Dispatchable object.
-			device->setDeviceLoaderData(device->device, image.sourceCmd);
+			table.CmdPipelineBarrier(cmd,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+			                         0, nullptr,
+			                         0, nullptr,
+			                         1, &barrier);
 
-			VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-			device->table.BeginCommandBuffer(image.sourceCmd, &beginInfo);
-			{
-				VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-				barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-				barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-				barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-				barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-				barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT,
-				                             0, VK_REMAINING_MIP_LEVELS,
-				                             0, VK_REMAINING_ARRAY_LAYERS };
-				barrier.image = image.sourceImage.image;
-				barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+			VkBufferImageCopy copy = {};
+			copy.imageExtent = { width, height, 1 };
+			copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			table.CmdCopyImageToBuffer(cmd,
+			                           image.sourceImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			                           image.sourceBuffer.buffer,
+			                           1, &copy);
 
-				device->table.CmdPipelineBarrier(image.sourceCmd,
-												 VK_PIPELINE_STAGE_TRANSFER_BIT,
-												 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-												 0, nullptr,
-												 0, nullptr,
-												 1, &barrier);
+			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+			barrier.dstAccessMask = 0;
 
-				VkBufferImageCopy copy = {};
-				copy.imageExtent = { width, height, 1 };
-				copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-				device->table.CmdCopyImageToBuffer(image.sourceCmd,
-				                                   image.sourceImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				                                   image.sourceBuffer.buffer,
-				                                   1, &copy);
+			VkBufferMemoryBarrier bufBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+			bufBarrier.buffer = image.sourceBuffer.buffer;
+			bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			bufBarrier.size = VK_WHOLE_SIZE;
+			bufBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
 
-				barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-				barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-				barrier.dstAccessMask = 0;
-
-				device->table.CmdPipelineBarrier(image.sourceCmd,
-				                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-				                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-				                                 0, nullptr,
-				                                 0, nullptr,
-				                                 1, &barrier);
-			}
-
-			if (device->table.EndCommandBuffer(image.sourceCmd) != VK_SUCCESS)
-				return VK_ERROR_DEVICE_LOST;
+			table.CmdPipelineBarrier(cmd,
+			                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+			                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0,
+			                         0, nullptr,
+			                         1, &bufBarrier,
+			                         1, &barrier);
 		}
 
-		return VK_SUCCESS;
+		if (table.EndCommandBuffer(cmd) != VK_SUCCESS)
+			return VK_ERROR_DEVICE_LOST;
 	}
-	else
-	{
-		return VK_ERROR_DEVICE_LOST;
-	}
+
+	return VK_SUCCESS;
 }
 
 VkResult Swapchain::importHostBuffer(VkDevice vkDevice, const VkLayerDispatchTable &table, Swapchain::Buffer &buf,
                                      const VkPhysicalDeviceMemoryProperties &memProps,
                                      void *hostPointer)
 {
+	VkMemoryHostPointerPropertiesEXT hostProps;
 	VkMemoryRequirements reqs;
+	VkResult res;
+
 	table.GetBufferMemoryRequirements(vkDevice, buf.buffer, &reqs);
 
-	VkMemoryHostPointerPropertiesEXT hostProps;
-	if (device->table.GetMemoryHostPointerPropertiesEXT(
-			device->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-			buf.buffer, &hostProps) != VK_SUCCESS)
-	{
+	res = table.GetMemoryHostPointerPropertiesEXT(
+			vkDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+			buf.buffer, &hostProps);
+
+	if (res != VK_SUCCESS)
 		return VK_ERROR_OUT_OF_HOST_MEMORY;
-	}
 
 	reqs.memoryTypeBits &= hostProps.memoryTypeBits;
 
@@ -562,7 +653,11 @@ VkResult Swapchain::importHostBuffer(VkDevice vkDevice, const VkLayerDispatchTab
 	pointerInfo.pHostPointer = hostPointer;
 	dedicatedInfo.buffer = buf.buffer;
 
-	VkResult res = device->table.AllocateMemory(device->device, &allocInfo, nullptr, &buf.memory);
+	res = table.AllocateMemory(vkDevice, &allocInfo, nullptr, &buf.memory);
+	if (res != VK_SUCCESS)
+		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+	res = table.BindBufferMemory(vkDevice, buf.buffer, buf.memory, 0);
 	if (res != VK_SUCCESS)
 		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
@@ -707,7 +802,7 @@ VkResult Swapchain::pumpAcquireSinkImage()
 		VkFence fence;
 		auto res = device->sinkTable.CreateFence(device->sinkDevice, &fenceInfo, nullptr, &fence);
 		if (res != VK_SUCCESS)
-			return res;
+			return markResult(res);
 
 		sinkFencePool.push_back(fence);
 	}
@@ -722,10 +817,22 @@ VkResult Swapchain::pumpAcquireSinkImage()
 
 	if (res >= 0)
 	{
-		acquireQueue.push(index);
 		if (images[index].sinkAcquireFence)
+		{
+			if (device->sinkTable.WaitForFences(
+					device->sinkDevice, 1, &images[index].sinkAcquireFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+				return markResult(VK_ERROR_DEVICE_LOST);
+
+			if (device->sinkTable.ResetFences(device->sinkDevice, 1, &images[index].sinkAcquireFence) != VK_SUCCESS)
+				return markResult(VK_ERROR_DEVICE_LOST);
+
 			sinkFencePool.push_back(images[index].sinkAcquireFence);
+		}
+
 		images[index].sinkAcquireFence = fence;
+
+		std::lock_guard<std::mutex> holder{lock};
+		acquireQueue.push(index);
 	}
 
 	return markResult(res);
@@ -733,7 +840,102 @@ VkResult Swapchain::pumpAcquireSinkImage()
 
 void Swapchain::runWorker()
 {
+	Work work = {};
 
+	for (;;)
+	{
+		{
+			std::unique_lock<std::mutex> holder{lock};
+			cond.wait(holder, [this]() {
+				return workQueue.empty() || swapchainStatus < 0;
+			});
+
+			if (swapchainStatus < 0)
+				break;
+
+			work = workQueue.front();
+			workQueue.pop();
+		}
+
+		VkPresentIdKHR presentId = { VK_STRUCTURE_TYPE_PRESENT_ID_KHR };
+		VkSwapchainPresentModeInfoEXT modeInfo = { VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT };
+		VkPresentInfoKHR presentInfo = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+
+		presentInfo.pSwapchains = &sinkSwapchain;
+		presentInfo.swapchainCount = 1;
+		presentInfo.pWaitSemaphores = &images[work.index].sinkReleaseSemaphore;
+		presentInfo.waitSemaphoreCount = 1;
+		presentInfo.pImageIndices = &work.index;
+
+		if (work.presentId)
+		{
+			presentId.swapchainCount = 1;
+			presentId.pPresentIds = &work.presentId;
+			presentId.pNext = presentInfo.pNext;
+			presentInfo.pNext = &presentId;
+		}
+
+		if (work.setsMode)
+		{
+			modeInfo.swapchainCount = 1;
+			modeInfo.pPresentModes = &work.mode;
+			modeInfo.pNext = presentInfo.pNext;
+			presentInfo.pNext = &modeInfo;
+		}
+
+		if (device->table.WaitForFences(device->device, 1, &images[work.index].sourceFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+		{
+			markResult(VK_ERROR_DEVICE_LOST);
+			break;
+		}
+
+		if (device->table.ResetFences(device->device, 1, &images[work.index].sourceFence) != VK_SUCCESS)
+		{
+			markResult(VK_ERROR_DEVICE_LOST);
+			break;
+		}
+
+		{
+			std::lock_guard<std::mutex> holder{lock};
+			processedSourceCount++;
+			cond.notify_one();
+		}
+
+		if (device->sinkTable.WaitForFences(device->sinkDevice, 1, &images[work.index].sinkAcquireFence,
+		                                    VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+		{
+			markResult(VK_ERROR_DEVICE_LOST);
+			break;
+		}
+
+		if (device->sinkTable.ResetFences(device->sinkDevice, 1, &images[work.index].sinkAcquireFence) != VK_SUCCESS)
+		{
+			markResult(VK_ERROR_DEVICE_LOST);
+			break;
+		}
+
+		VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &images[work.index].sinkCmd;
+		submit.signalSemaphoreCount = 1;
+		submit.pSignalSemaphores = &images[work.index].sinkReleaseSemaphore;
+
+		VkResult result;
+		{
+			std::lock_guard<std::mutex> holder{device->sinkQueueLock};
+			result = device->sinkTable.QueueSubmit(device->sinkQueue, 1, &submit, images[work.index].sinkAcquireFence);
+		}
+
+		if (markResult(result))
+			break;
+
+		result = device->sinkTable.QueuePresentKHR(device->sinkQueue, &presentInfo);
+		if (markResult(result) < 0)
+			break;
+
+		if (pumpAcquireSinkImage() < 0)
+			break;
+	}
 }
 
 VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fence)
@@ -747,13 +949,13 @@ VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fenc
 	submit.pCommandBuffers = &images[index].sourceCmd;
 	result = device->table.QueueSubmit(queue, 1, &submit, images[index].sourceFence);
 	if (result != VK_SUCCESS)
-		return result;
+		return markResult(result);
 
 	// EXT_swapchain_maintenance1 fence.
 	if (fence != VK_NULL_HANDLE)
-		return device->table.QueueSubmit(queue, 0, nullptr, fence);
+		return markResult(device->table.QueueSubmit(queue, 0, nullptr, fence));
 	else
-		return VK_SUCCESS;
+		return markResult(VK_SUCCESS);
 }
 
 uint32_t Swapchain::getNumForwardProgressImages(const VkSwapchainCreateInfoKHR *pCreateInfo) const
@@ -854,8 +1056,9 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 			return res;
 	}
 
-	sinkCmdPool.pool = createCommandPool(device->sinkDevice, device->sinkTable,
-										 device->getInstance()->sinkGpuQueueFamily);
+	result = initSinkCommands();
+	if (result < 0)
+		return result;
 
 	uint32_t numForwardProgressImages = getNumForwardProgressImages(pCreateInfo);
 	for (uint32_t i = 0; i < numForwardProgressImages; i++)
@@ -910,6 +1113,7 @@ VkResult Swapchain::queuePresent(VkQueue queue, uint32_t index, VkFence fence)
 	{
 		std::lock_guard<std::mutex> holder{lock};
 		workQueue.push(nextWork);
+		submitCount++;
 		cond.notify_one();
 	}
 
@@ -964,7 +1168,7 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 			t += std::chrono::nanoseconds(timeout);
 
 			bool done = cond.wait_until(holder, t, [this]() {
-				return !acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
+				return !acquireQueue.empty() || swapchainStatus < 0;
 			});
 
 			if (!done)
@@ -973,11 +1177,11 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 		else
 		{
 			cond.wait(holder, [this]() {
-				return !acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
+				return !acquireQueue.empty() || swapchainStatus < 0;
 			});
 		}
 
-		if (swapchainStatus != VK_SUCCESS)
+		if (swapchainStatus < 0)
 			return swapchainStatus;
 
 		*pImageIndex = acquireQueue.front();
@@ -1007,7 +1211,7 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 			if (res != VK_SUCCESS)
 			{
 				acquireQueue.push(*pImageIndex);
-				return res;
+				return markResult(res);
 			}
 		}
 		else
@@ -1038,7 +1242,7 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 			if (res != VK_SUCCESS)
 			{
 				acquireQueue.push(*pImageIndex);
-				return res;
+				return markResult(res);
 			}
 		}
 		else
@@ -1048,7 +1252,7 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 		}
 	}
 
-	return VK_SUCCESS;
+	return markResult(VK_SUCCESS);
 }
 
 VkResult Swapchain::releaseSwapchainImages(const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo)
