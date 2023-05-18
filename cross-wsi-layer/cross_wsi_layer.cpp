@@ -504,11 +504,15 @@ VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fenc
 	VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers = &images[index].sourceCmd;
-	device->table.QueueSubmit(queue, 1, &submit, images[index].sourceFence);
+	result = device->table.QueueSubmit(queue, 1, &submit, images[index].sourceFence);
+	if (result != VK_SUCCESS)
+		return result;
 
 	// EXT_swapchain_maintenance1 fence.
 	if (fence != VK_NULL_HANDLE)
-		device->table.QueueSubmit(queue, 0, nullptr, fence);
+		return device->table.QueueSubmit(queue, 0, nullptr, fence);
+	else
+		return VK_SUCCESS;
 }
 
 VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
@@ -521,6 +525,10 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 		tmpCreateInfo.oldSwapchain = oldSwap->sinkSwapchain;
 	}
 
+	tmpCreateInfo.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	tmpCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	tmpCreateInfo.pQueueFamilyIndices = nullptr;
+	tmpCreateInfo.queueFamilyIndexCount = 0;
 	VkResult result = device->sinkTable.CreateSwapchainKHR(
 			device->sinkDevice, &tmpCreateInfo, nullptr, &sinkSwapchain);
 
@@ -534,6 +542,58 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 	device->sinkTable.GetSwapchainImagesKHR(device->sinkDevice, sinkSwapchain, &count, vkImages.data());
 
 	sinkCmdPool.pool = createCommandPool(device->sinkDevice, device->sinkTable, device->getInstance()->sinkGpuQueueFamily);
+
+	return VK_SUCCESS;
+}
+
+void Swapchain::retire()
+{
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		swapchainStatus = VK_ERROR_OUT_OF_DATE_KHR;
+		cond.notify_one();
+	}
+
+	if (worker.joinable())
+		worker.join();
+
+	// Release swapchain images so that oldSwapchain has a chance to work better.
+	while (!acquireQueue.empty() && device->maint1Features.swapchainMaintenance1)
+	{
+		VkReleaseSwapchainImagesInfoEXT releaseInfo = { VK_STRUCTURE_TYPE_RELEASE_SWAPCHAIN_IMAGES_INFO_EXT };
+		releaseInfo.pImageIndices = &acquireQueue.front();
+		releaseInfo.imageIndexCount = 1;
+		releaseInfo.swapchain = sinkSwapchain;
+		device->sinkTable.ReleaseSwapchainImagesEXT(device->sinkDevice, &releaseInfo);
+		acquireQueue.pop();
+	}
+}
+
+VkResult Swapchain::getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages)
+{
+	if (pSwapchainImages)
+	{
+		VkResult res = images.size() <= *pSwapchainImageCount ? VK_SUCCESS : VK_INCOMPLETE;
+		if (images.size() < *pSwapchainImageCount)
+			*pSwapchainImageCount = uint32_t(images.size());
+
+		uint32_t outCount = *pSwapchainImageCount;
+		for (uint32_t i = 0; i < outCount; i++)
+			pSwapchainImages[i] = images[i].sourceImage.image;
+
+		return res;
+	}
+	else
+	{
+		*pSwapchainImageCount = uint32_t(images.size());
+		return VK_SUCCESS;
+	}
+}
+
+VkResult Swapchain::releaseSwapchainImages(const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo)
+{
+	for (uint32_t i = 0; i < pReleaseInfo->imageIndexCount; i++)
+		acquireQueue.push(pReleaseInfo->pImageIndices[i]);
 
 	return VK_SUCCESS;
 }
