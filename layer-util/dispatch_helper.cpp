@@ -63,6 +63,7 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 #ifndef _WIN32
 	F(GetSemaphoreFdKHR);
 	F(ImportSemaphoreFdKHR);
+	F(ImportFenceFdKHR);
 	F(GetMemoryFdKHR);
 #endif
 #undef F

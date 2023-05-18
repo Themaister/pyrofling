@@ -134,6 +134,7 @@ struct VkLayerDispatchTable
 #ifndef _WIN32
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
+	PFN_vkImportFenceFdKHR ImportFenceFdKHR;
 	PFN_vkGetMemoryFdKHR GetMemoryFdKHR;
 #endif
 };

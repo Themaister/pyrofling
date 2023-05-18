@@ -26,6 +26,7 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <chrono>
 
 extern "C"
 {
@@ -225,6 +226,7 @@ struct Swapchain
 	static VkCommandPool createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family);
 	VkResult initSourceCommands(uint32_t familyIndex);
 	VkResult submitSourceWork(VkQueue queue, uint32_t index, VkFence fence);
+	VkResult markResult(VkResult err);
 };
 
 struct Device
@@ -569,6 +571,11 @@ void Swapchain::retire()
 	}
 }
 
+VkResult Swapchain::queuePresent(VkQueue queue, uint32_t index, VkFence fence)
+{
+	return VK_ERROR_SURFACE_LOST_KHR;
+}
+
 VkResult Swapchain::getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages)
 {
 	if (pSwapchainImages)
@@ -588,6 +595,116 @@ VkResult Swapchain::getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *
 		*pSwapchainImageCount = uint32_t(images.size());
 		return VK_SUCCESS;
 	}
+}
+
+VkResult Swapchain::markResult(VkResult err)
+{
+	std::lock_guard<std::mutex> holder{lock};
+
+	if (err == VK_SUCCESS)
+		return swapchainStatus;
+
+	if (err < 0 || swapchainStatus == VK_SUCCESS)
+		swapchainStatus = err;
+
+	return swapchainStatus;
+}
+
+VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex)
+{
+	{
+		std::unique_lock<std::mutex> holder{lock};
+		if (timeout != UINT64_MAX)
+		{
+			auto t = std::chrono::steady_clock::now();
+			t += std::chrono::nanoseconds(timeout);
+
+			bool done = cond.wait_until(holder, t, [this]() {
+				return acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
+			});
+
+			if (!done)
+				return timeout ? VK_TIMEOUT : VK_NOT_READY;
+		}
+		else
+		{
+			cond.wait(holder, [this]() {
+				return acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
+			});
+		}
+
+		if (swapchainStatus != VK_SUCCESS)
+			return swapchainStatus;
+
+		*pImageIndex = acquireQueue.front();
+		acquireQueue.pop();
+	}
+
+	// Need to synthesize a signal operation.
+
+	if (semaphore != VK_NULL_HANDLE)
+	{
+		VkPhysicalDeviceExternalSemaphoreInfo semInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO };
+		VkExternalSemaphoreProperties props = { VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
+
+		semInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+		device->instance->getTable()->GetPhysicalDeviceExternalSemaphorePropertiesKHR(
+				device->gpu, &semInfo, &props);
+
+		if (props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT)
+		{
+			VkImportSemaphoreFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR };
+			importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+			importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+			importInfo.semaphore = semaphore;
+			// FD -1 is treated as an already signalled payload, neat!
+			importInfo.fd = -1;
+			VkResult res = device->table.ImportSemaphoreFdKHR(device->device, &importInfo);
+			if (res != VK_SUCCESS)
+			{
+				acquireQueue.push(*pImageIndex);
+				return res;
+			}
+		}
+		else
+		{
+			acquireQueue.push(*pImageIndex);
+			return markResult(VK_ERROR_SURFACE_LOST_KHR);
+		}
+	}
+
+	if (fence != VK_NULL_HANDLE)
+	{
+		VkPhysicalDeviceExternalFenceInfo fenceInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO };
+		VkExternalFenceProperties props = { VK_STRUCTURE_TYPE_EXTERNAL_FENCE_PROPERTIES };
+
+		fenceInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+		device->instance->getTable()->GetPhysicalDeviceExternalFencePropertiesKHR(
+				device->gpu, &fenceInfo, &props);
+
+		if (props.externalFenceFeatures & VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT)
+		{
+			VkImportFenceFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_FENCE_FD_INFO_KHR };
+			importInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+			importInfo.flags = VK_FENCE_IMPORT_TEMPORARY_BIT;
+			importInfo.fence = fence;
+			// FD -1 is treated as an already signalled payload, neat!
+			importInfo.fd = -1;
+			VkResult res = device->table.ImportFenceFdKHR(device->device, &importInfo);
+			if (res != VK_SUCCESS)
+			{
+				acquireQueue.push(*pImageIndex);
+				return res;
+			}
+		}
+		else
+		{
+			acquireQueue.push(*pImageIndex);
+			return markResult(VK_ERROR_SURFACE_LOST_KHR);
+		}
+	}
+
+	return VK_SUCCESS;
 }
 
 VkResult Swapchain::releaseSwapchainImages(const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo)
