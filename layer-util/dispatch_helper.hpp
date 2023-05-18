@@ -46,6 +46,7 @@ struct VkLayerInstanceDispatchTable
 	PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
 	PFN_vkGetPhysicalDeviceProperties2KHR GetPhysicalDeviceProperties2KHR;
 	PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
+	PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
 
 	// Queries. We have to wrap these and forward to either sink device or passthrough.
 	// VK_KHR_surface

@@ -596,7 +596,34 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateI
 
 VkResult Swapchain::pumpAcquireSinkImage()
 {
-	return VK_SUCCESS;
+	if (sinkFencePool.empty())
+	{
+		VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+		VkFence fence;
+		auto res = device->sinkTable.CreateFence(device->sinkDevice, &fenceInfo, nullptr, &fence);
+		if (res != VK_SUCCESS)
+			return res;
+
+		sinkFencePool.push_back(fence);
+	}
+
+	VkFence fence = sinkFencePool.back();
+	sinkFencePool.pop_back();
+
+	uint32_t index;
+	VkResult res = device->sinkTable.AcquireNextImageKHR(device->sinkDevice,
+														 sinkSwapchain,
+														 UINT64_MAX, VK_NULL_HANDLE, fence, &index);
+
+	if (res >= 0)
+	{
+		acquireQueue.push(index);
+		if (images[index].sinkAcquireFence)
+			sinkFencePool.push_back(images[index].sinkAcquireFence);
+		images[index].sinkAcquireFence = fence;
+	}
+
+	return markResult(res);
 }
 
 void Swapchain::runWorker()
@@ -648,14 +675,14 @@ uint32_t Swapchain::getNumForwardProgressImages(const VkSwapchainCreateInfoKHR *
 		for (uint32_t i = 0; i < modes->presentModeCount; i++)
 		{
 			mode.presentMode = modes->pPresentModes[i];
-			instanceTable->GetPhysicalDeviceSurfaceCapabilities2KHR(device->getPhysicalDevice(), &surfaceInfo, &caps);
+			instanceTable->GetPhysicalDeviceSurfaceCapabilities2KHR(device->getInstance()->sinkGpu, &surfaceInfo, &caps);
 			minImageCount = std::max<uint32_t>(minImageCount, caps.surfaceCapabilities.minImageCount);
 		}
 	}
 	else
 	{
 		VkSurfaceCapabilitiesKHR caps;
-		instanceTable->GetPhysicalDeviceSurfaceCapabilitiesKHR(device->getPhysicalDevice(), pCreateInfo->surface, &caps);
+		instanceTable->GetPhysicalDeviceSurfaceCapabilitiesKHR(device->getInstance()->sinkGpu, pCreateInfo->surface, &caps);
 		minImageCount = caps.minImageCount;
 	}
 
@@ -756,9 +783,34 @@ void Swapchain::retire()
 	}
 }
 
+void Swapchain::setPresentId(uint64_t id)
+{
+	nextWork.presentId = id;
+}
+
+void Swapchain::setPresentMode(VkPresentModeKHR mode)
+{
+	nextWork.setsMode = true;
+	nextWork.mode = mode;
+}
+
 VkResult Swapchain::queuePresent(VkQueue queue, uint32_t index, VkFence fence)
 {
-	return VK_ERROR_SURFACE_LOST_KHR;
+	VkResult result = submitSourceWork(queue, index, fence);
+	if (result < 0)
+		return markResult(result);
+
+	nextWork.index = index;
+
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		workQueue.push(nextWork);
+		cond.notify_one();
+	}
+
+	nextWork.presentId = 0;
+	nextWork.setsMode = false;
+	return markResult(VK_SUCCESS);
 }
 
 VkResult Swapchain::getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages)
@@ -792,6 +844,8 @@ VkResult Swapchain::markResult(VkResult err)
 	if (err < 0 || swapchainStatus == VK_SUCCESS)
 		swapchainStatus = err;
 
+	// Wake up any sleepers on unusual results.
+	cond.notify_one();
 	return swapchainStatus;
 }
 
@@ -805,7 +859,7 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 			t += std::chrono::nanoseconds(timeout);
 
 			bool done = cond.wait_until(holder, t, [this]() {
-				return acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
+				return !acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
 			});
 
 			if (!done)
@@ -814,7 +868,7 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 		else
 		{
 			cond.wait(holder, [this]() {
-				return acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
+				return !acquireQueue.empty() || swapchainStatus != VK_SUCCESS;
 			});
 		}
 
@@ -1178,10 +1232,6 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	auto *layer = getDeviceLayer(device);
 	if (!layer->sinkDevice)
 		return layer->getTable()->CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
-
-	auto result = layer->getTable()->CreateSwapchainKHR(layer->sinkDevice, pCreateInfo, pAllocator, pSwapchain);
-	if (result != VK_SUCCESS)
-		return result;
 
 	auto *swap = new Swapchain(layer);
 

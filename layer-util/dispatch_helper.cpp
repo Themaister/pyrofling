@@ -75,6 +75,7 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 #define F(fun) table->fun = (PFN_vk##fun)gpa(instance, "vk"#fun)
 	*table = {};
 	F(DestroyInstance);
+	F(DestroySurfaceKHR);
 	F(EnumerateDeviceExtensionProperties);
 	F(GetPhysicalDeviceQueueFamilyProperties);
 	F(GetPhysicalDeviceMemoryProperties);
