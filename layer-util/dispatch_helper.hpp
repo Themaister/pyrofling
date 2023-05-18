@@ -123,11 +123,13 @@ struct VkLayerDispatchTable
 	PFN_vkCreateImage CreateImage;
 	PFN_vkCreateBuffer CreateBuffer;
 	PFN_vkGetImageMemoryRequirements GetImageMemoryRequirements;
+	PFN_vkGetBufferMemoryRequirements GetBufferMemoryRequirements;
 	PFN_vkAllocateMemory AllocateMemory;
 	PFN_vkBindImageMemory BindImageMemory;
 	PFN_vkDestroyImage DestroyImage;
 	PFN_vkDestroyBuffer DestroyBuffer;
 	PFN_vkFreeMemory FreeMemory;
+	PFN_vkGetMemoryHostPointerPropertiesEXT GetMemoryHostPointerPropertiesEXT;
 
 	PFN_vkCreateSemaphore CreateSemaphore;
 	PFN_vkDestroySemaphore DestroySemaphore;

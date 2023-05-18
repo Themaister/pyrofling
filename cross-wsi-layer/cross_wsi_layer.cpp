@@ -240,6 +240,8 @@ struct Swapchain
 	VkResult setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateInfo, VkImage image, uint32_t index);
 
 	VkResult allocateImageMemory(Image &img) const;
+	VkResult importHostBuffer(VkDevice device, const VkLayerDispatchTable &table, Buffer &buf,
+	                          const VkPhysicalDeviceMemoryProperties &memProps, void *hostPointer);
 
 	void runWorker();
 };
@@ -295,6 +297,7 @@ struct Device
 	VkPhysicalDevicePresentIdFeaturesKHR idFeatures;
 	VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maint1Features;
 	VkPhysicalDeviceMemoryProperties sourceMemoryProps;
+	VkPhysicalDeviceMemoryProperties sinkMemoryProps;
 };
 
 #include "dispatch_wrapper.hpp"
@@ -347,6 +350,8 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 
 	if (usesSwapchain && instance->sinkGpu && gpu != instance->sinkGpu)
 	{
+		instance->getTable()->GetPhysicalDeviceMemoryProperties(instance->sinkGpu, &sinkMemoryProps);
+
 		VkDeviceCreateInfo createInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
 		VkDeviceQueueCreateInfo queueInfo = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
 		const float prio = 0.5f;
@@ -516,6 +521,54 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 	}
 }
 
+VkResult Swapchain::importHostBuffer(VkDevice vkDevice, const VkLayerDispatchTable &table, Swapchain::Buffer &buf,
+                                     const VkPhysicalDeviceMemoryProperties &memProps,
+                                     void *hostPointer)
+{
+	VkMemoryRequirements reqs;
+	table.GetBufferMemoryRequirements(vkDevice, buf.buffer, &reqs);
+
+	VkMemoryHostPointerPropertiesEXT hostProps;
+	if (device->table.GetMemoryHostPointerPropertiesEXT(
+			device->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+			buf.buffer, &hostProps) != VK_SUCCESS)
+	{
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	}
+
+	reqs.memoryTypeBits &= hostProps.memoryTypeBits;
+
+	uint32_t memoryTypeIndex = UINT32_MAX;
+	for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
+	{
+		if ((memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 &&
+		    ((1u << i) & reqs.memoryTypeBits) != 0)
+		{
+			memoryTypeIndex = i;
+			break;
+		}
+	}
+
+	if (memoryTypeIndex == UINT32_MAX)
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+	VkMemoryAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+	VkMemoryDedicatedAllocateInfo dedicatedInfo = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
+	VkImportMemoryHostPointerInfoEXT pointerInfo = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT };
+	allocInfo.pNext = &dedicatedInfo;
+	dedicatedInfo.pNext = &pointerInfo;
+
+	pointerInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	pointerInfo.pHostPointer = hostPointer;
+	dedicatedInfo.buffer = buf.buffer;
+
+	VkResult res = device->table.AllocateMemory(device->device, &allocInfo, nullptr, &buf.memory);
+	if (res != VK_SUCCESS)
+		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+	return VK_SUCCESS;
+}
+
 VkResult Swapchain::allocateImageMemory(Image &img) const
 {
 	VkMemoryRequirements reqs;
@@ -579,7 +632,7 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateI
 	imageInfo.pQueueFamilyIndices = pCreateInfo->pQueueFamilyIndices;
 	imageInfo.queueFamilyIndexCount = pCreateInfo->queueFamilyIndexCount;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageInfo.usage = pCreateInfo->imageUsage;
+	imageInfo.usage = pCreateInfo->imageUsage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR)
 		imageInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 
@@ -588,6 +641,58 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateI
 		return res;
 
 	res = allocateImageMemory(img.sourceImage);
+	if (res != VK_SUCCESS)
+		return res;
+
+	VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	VkExternalMemoryBufferCreateInfo externalInfo = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+	bufferInfo.size = img.sourceImage.size;
+	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	bufferInfo.pNext = &externalInfo;
+	externalInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+
+	device->table.CreateBuffer(device->device, &bufferInfo, nullptr, &img.sourceBuffer.buffer);
+	device->sinkTable.CreateBuffer(device->sinkDevice, &bufferInfo, nullptr, &img.sinkBuffer.buffer);
+
+	VkMemoryRequirements sourceReqs, sinkReqs;
+	device->table.GetBufferMemoryRequirements(device->device, img.sourceBuffer.buffer, &sourceReqs);
+	device->sinkTable.GetBufferMemoryRequirements(device->sinkDevice, img.sinkBuffer.buffer, &sinkReqs);
+
+	size_t bufferSize = std::max<size_t>(sourceReqs.size, sinkReqs.size);
+	bufferSize = (bufferSize + 64 * 1024 - 1) & ~size_t(64 * 1024 - 1);
+
+	// Somewhat crude to use image size here, but it's physically impossible for it
+	// to be smaller than the linear, unpadded buffer size.
+	// The more sensible approach is to hook GetSurfaceFormatsKHR instead.
+	img.externalHostMemory = aligned_alloc(64 * 1024, bufferSize);
+	if (!img.externalHostMemory)
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+	VkMemoryHostPointerPropertiesEXT sourceHostPointerProps, sinkHostPointerProps;
+	if (device->table.GetMemoryHostPointerPropertiesEXT(
+			device->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+			img.externalHostMemory, &sourceHostPointerProps) != VK_SUCCESS)
+	{
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	}
+
+	if (device->sinkTable.GetMemoryHostPointerPropertiesEXT(
+			device->sinkDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+			img.externalHostMemory, &sinkHostPointerProps) != VK_SUCCESS)
+	{
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	}
+
+	sourceReqs.memoryTypeBits &= sourceHostPointerProps.memoryTypeBits;
+	sinkReqs.memoryTypeBits &= sinkReqs.memoryTypeBits;
+
+	res = importHostBuffer(device->device, device->table, img.sourceBuffer,
+	                       device->sourceMemoryProps, img.externalHostMemory);
+	if (res != VK_SUCCESS)
+		return res;
+
+	res = importHostBuffer(device->sinkDevice, device->sinkTable, img.sinkBuffer,
+	                       device->sinkMemoryProps, img.externalHostMemory);
 	if (res != VK_SUCCESS)
 		return res;
 

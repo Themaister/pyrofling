@@ -46,6 +46,8 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(AllocateCommandBuffers);
 	F(CmdPipelineBarrier);
 	F(CmdCopyImage);
+	F(CmdCopyImageToBuffer);
+	F(CmdCopyBufferToImage);
 	F(CreateFence);
 	F(WaitForFences);
 	F(ResetFences);
@@ -53,6 +55,8 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(CreateImage);
 	F(CreateBuffer);
 	F(GetImageMemoryRequirements);
+	F(GetBufferMemoryRequirements);
+	F(GetMemoryHostPointerPropertiesEXT);
 	F(AllocateMemory);
 	F(FreeMemory);
 	F(BindImageMemory);
