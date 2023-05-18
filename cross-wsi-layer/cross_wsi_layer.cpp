@@ -872,6 +872,7 @@ VkResult Swapchain::pumpAcquireSinkImage()
 
 		std::lock_guard<std::mutex> holder{lock};
 		acquireQueue.push(index);
+		cond.notify_one();
 	}
 
 	return markResult(res);
@@ -1376,7 +1377,7 @@ Swapchain::~Swapchain()
 		device->sinkTable.DestroyFence(device->sinkDevice, fence, nullptr);
 
 	device->table.DestroyCommandPool(device->device, sourceCmdPool.pool, nullptr);
-	device->sinkTable.DestroyCommandPool(device->device, sinkCmdPool.pool, nullptr);
+	device->sinkTable.DestroyCommandPool(device->sinkDevice, sinkCmdPool.pool, nullptr);
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
