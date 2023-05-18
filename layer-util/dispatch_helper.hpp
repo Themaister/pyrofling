@@ -100,6 +100,8 @@ struct VkLayerDispatchTable
 	PFN_vkReleaseSwapchainImagesEXT ReleaseSwapchainImagesEXT;
 
 	PFN_vkQueueSubmit QueueSubmit;
+	PFN_vkQueueSubmit2 QueueSubmit2;
+	PFN_vkQueueSubmit2KHR QueueSubmit2KHR;
 	PFN_vkQueueWaitIdle QueueWaitIdle;
 	PFN_vkQueuePresentKHR QueuePresentKHR;
 
@@ -131,6 +133,7 @@ struct VkLayerDispatchTable
 	PFN_vkDestroyBuffer DestroyBuffer;
 	PFN_vkFreeMemory FreeMemory;
 	PFN_vkGetMemoryHostPointerPropertiesEXT GetMemoryHostPointerPropertiesEXT;
+	PFN_vkWaitForPresentKHR WaitForPresentKHR;
 
 	PFN_vkCreateSemaphore CreateSemaphore;
 	PFN_vkDestroySemaphore DestroySemaphore;
@@ -140,6 +143,7 @@ struct VkLayerDispatchTable
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;
 	PFN_vkImportFenceFdKHR ImportFenceFdKHR;
 	PFN_vkGetMemoryFdKHR GetMemoryFdKHR;
+	PFN_vkGetFenceFdKHR GetFenceFdKHR;
 #endif
 };
 

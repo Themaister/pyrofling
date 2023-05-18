@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <queue>
 #include <chrono>
+#include <unistd.h>
 
 extern "C"
 {
@@ -169,6 +170,7 @@ struct Swapchain
 	VkResult queuePresent(VkQueue queue, uint32_t index, VkFence fence);
 	VkResult acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t *pImageIndex);
 	VkResult getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages);
+	VkResult waitForPresent(uint64_t presentId, uint64_t timeout);
 	void retire();
 
 	struct Buffer
@@ -191,6 +193,7 @@ struct Swapchain
 		Buffer sinkBuffer, sourceBuffer;
 		Image sinkImage, sourceImage;
 		VkFence sourceFence = VK_NULL_HANDLE;
+		VkSemaphore sourceAcquireSemaphore = VK_NULL_HANDLE;
 		VkSemaphore sinkReleaseSemaphore = VK_NULL_HANDLE;
 		VkFence sinkAcquireFence = VK_NULL_HANDLE;
 		VkCommandBuffer sourceCmd = VK_NULL_HANDLE;
@@ -293,12 +296,16 @@ struct Device
 	VkLayerDispatchTable sinkTable = {};
 	VkQueue sinkQueue = VK_NULL_HANDLE;
 	std::mutex sinkQueueLock;
+	std::mutex queueLock;
 
 	VkPhysicalDevicePresentWaitFeaturesKHR waitFeatures;
 	VkPhysicalDevicePresentIdFeaturesKHR idFeatures;
 	VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maint1Features;
 	VkPhysicalDeviceMemoryProperties sourceMemoryProps;
 	VkPhysicalDeviceMemoryProperties sinkMemoryProps;
+
+	VkResult forceSignalSemaphore(VkSemaphore semaphore);
+	VkResult createExportableSignalledSemaphore(VkSemaphore *pSemaphore);
 };
 
 #include "dispatch_wrapper.hpp"
@@ -316,6 +323,48 @@ uint32_t Device::queueToFamilyIndex(VkQueue queue) const
 			return q.familyIndex;
 
 	return VK_QUEUE_FAMILY_IGNORED;
+}
+
+VkResult Device::forceSignalSemaphore(VkSemaphore semaphore)
+{
+	if (!queueToFamily.empty())
+	{
+		std::lock_guard<std::mutex> holder{queueLock};
+		VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+		submit.signalSemaphoreCount = 1;
+		submit.pSignalSemaphores = &semaphore;
+
+		auto res = table.QueueSubmit(queueToFamily.front().queue, 1, &submit, VK_NULL_HANDLE);
+		if (res != VK_SUCCESS)
+			return res;
+	}
+
+	return VK_SUCCESS;
+}
+
+VkResult Device::createExportableSignalledSemaphore(VkSemaphore *pSemaphore)
+{
+	VkSemaphoreCreateInfo semInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	VkExportSemaphoreCreateInfo exportInfo = { VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO };
+	exportInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+	semInfo.pNext = &exportInfo;
+
+	auto res = table.CreateSemaphore(device, &semInfo, nullptr, pSemaphore);
+	if (res != VK_SUCCESS)
+	{
+		*pSemaphore = VK_NULL_HANDLE;
+		return res;
+	}
+
+	// It is unfortunate that there is no VK_SEMAPHORE_CREATE_SIGNALLED_BIT :(
+	// If there is no queue, there is also no queue that can wait on an unsignalled semaphore :3
+	res = forceSignalSemaphore(*pSemaphore);
+	if (res != VK_SUCCESS)
+	{
+		*pSemaphore = VK_NULL_HANDLE;
+		table.DestroySemaphore(device, *pSemaphore, nullptr);
+	}
+	return res;
 }
 
 void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, PFN_vkGetDeviceProcAddr gpa,
@@ -487,18 +536,11 @@ VkResult Swapchain::initSinkCommands()
 			barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 			barrier.dstAccessMask = 0;
 
-			VkBufferMemoryBarrier bufBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
-			bufBarrier.buffer = image.sinkBuffer.buffer;
-			bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			bufBarrier.size = VK_WHOLE_SIZE;
-			bufBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-
 			table.CmdPipelineBarrier(cmd,
 			                         VK_PIPELINE_STAGE_TRANSFER_BIT,
 			                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
 			                         0, nullptr,
-			                         1, &bufBarrier,
+			                         0, nullptr,
 			                         1, &barrier);
 		}
 
@@ -614,7 +656,7 @@ VkResult Swapchain::importHostBuffer(VkDevice vkDevice, const VkLayerDispatchTab
                                      const VkPhysicalDeviceMemoryProperties &memProps,
                                      void *hostPointer)
 {
-	VkMemoryHostPointerPropertiesEXT hostProps;
+	VkMemoryHostPointerPropertiesEXT hostProps = { VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
 	VkMemoryRequirements reqs;
 	VkResult res;
 
@@ -647,6 +689,8 @@ VkResult Swapchain::importHostBuffer(VkDevice vkDevice, const VkLayerDispatchTab
 	VkMemoryDedicatedAllocateInfo dedicatedInfo = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO };
 	VkImportMemoryHostPointerInfoEXT pointerInfo = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT };
 	allocInfo.pNext = &dedicatedInfo;
+	allocInfo.allocationSize = reqs.size;
+	allocInfo.memoryTypeIndex = memoryTypeIndex;
 	dedicatedInfo.pNext = &pointerInfo;
 
 	pointerInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
@@ -687,6 +731,7 @@ VkResult Swapchain::allocateImageMemory(Image &img) const
 	VkMemoryAllocateInfo allocInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
 	dedicatedInfo.image = img.image;
 	allocInfo.allocationSize = reqs.size;
+	allocInfo.memoryTypeIndex = memoryTypeIndex;
 	allocInfo.pNext = &dedicatedInfo;
 
 	VkResult res = device->table.AllocateMemory(device->device, &allocInfo, nullptr, &img.memory);
@@ -763,24 +808,6 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateI
 	if (!img.externalHostMemory)
 		return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-	VkMemoryHostPointerPropertiesEXT sourceHostPointerProps, sinkHostPointerProps;
-	if (device->table.GetMemoryHostPointerPropertiesEXT(
-			device->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-			img.externalHostMemory, &sourceHostPointerProps) != VK_SUCCESS)
-	{
-		return VK_ERROR_OUT_OF_HOST_MEMORY;
-	}
-
-	if (device->sinkTable.GetMemoryHostPointerPropertiesEXT(
-			device->sinkDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-			img.externalHostMemory, &sinkHostPointerProps) != VK_SUCCESS)
-	{
-		return VK_ERROR_OUT_OF_HOST_MEMORY;
-	}
-
-	sourceReqs.memoryTypeBits &= sourceHostPointerProps.memoryTypeBits;
-	sinkReqs.memoryTypeBits &= sinkReqs.memoryTypeBits;
-
 	res = importHostBuffer(device->device, device->table, img.sourceBuffer,
 	                       device->sourceMemoryProps, img.externalHostMemory);
 	if (res != VK_SUCCESS)
@@ -790,6 +817,18 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateI
 	                       device->sinkMemoryProps, img.externalHostMemory);
 	if (res != VK_SUCCESS)
 		return res;
+
+	VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	res = device->table.CreateFence(device->device, &fenceInfo, nullptr, &img.sourceFence);
+	if (res != VK_SUCCESS)
+		return res;
+
+	VkSemaphoreCreateInfo semInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	res = device->sinkTable.CreateSemaphore(device->sinkDevice, &semInfo, nullptr, &img.sinkReleaseSemaphore);
+	if (res != VK_SUCCESS)
+		return res;
+
+	res = device->createExportableSignalledSemaphore(&img.sourceAcquireSemaphore);
 
 	return VK_SUCCESS;
 }
@@ -847,7 +886,7 @@ void Swapchain::runWorker()
 		{
 			std::unique_lock<std::mutex> holder{lock};
 			cond.wait(holder, [this]() {
-				return workQueue.empty() || swapchainStatus < 0;
+				return !workQueue.empty() || swapchainStatus < 0;
 			});
 
 			if (swapchainStatus < 0)
@@ -947,13 +986,25 @@ VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, VkFence fenc
 	VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers = &images[index].sourceCmd;
-	result = device->table.QueueSubmit(queue, 1, &submit, images[index].sourceFence);
+
+	// Re-trigger the external semaphore, so we can re-export a fresh payload.
+	submit.pSignalSemaphores = &images[index].sourceAcquireSemaphore;
+	submit.signalSemaphoreCount = 1;
+
+	{
+		std::lock_guard<std::mutex> holder{device->queueLock};
+		result = device->table.QueueSubmit(queue, 1, &submit, images[index].sourceFence);
+	}
+
 	if (result != VK_SUCCESS)
 		return markResult(result);
 
 	// EXT_swapchain_maintenance1 fence.
 	if (fence != VK_NULL_HANDLE)
+	{
+		std::lock_guard<std::mutex> holder{device->queueLock};
 		return markResult(device->table.QueueSubmit(queue, 0, nullptr, fence));
+	}
 	else
 		return markResult(VK_SUCCESS);
 }
@@ -1040,6 +1091,9 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo)
 	VkResult result = device->sinkTable.CreateSwapchainKHR(
 			device->sinkDevice, &tmpCreateInfo, nullptr, &sinkSwapchain);
 
+	width = pCreateInfo->imageExtent.width;
+	height = pCreateInfo->imageExtent.height;
+
 	if (result != VK_SUCCESS)
 		return result;
 
@@ -1122,6 +1176,12 @@ VkResult Swapchain::queuePresent(VkQueue queue, uint32_t index, VkFence fence)
 	return markResult(VK_SUCCESS);
 }
 
+VkResult Swapchain::waitForPresent(uint64_t presentId, uint64_t timeout)
+{
+	return device->sinkTable.WaitForPresentKHR(device->sinkDevice, sinkSwapchain,
+	                                           presentId, timeout);
+}
+
 VkResult Swapchain::getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages)
 {
 	if (pSwapchainImages)
@@ -1192,63 +1252,65 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 
 	if (semaphore != VK_NULL_HANDLE)
 	{
-		VkPhysicalDeviceExternalSemaphoreInfo semInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO };
-		VkExternalSemaphoreProperties props = { VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
+		VkSemaphoreGetFdInfoKHR getInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR };
+		getInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+		getInfo.semaphore = images[*pImageIndex].sourceAcquireSemaphore;
+		int fd = -1;
 
-		semInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-		device->instance->getTable()->GetPhysicalDeviceExternalSemaphorePropertiesKHR(
-				device->gpu, &semInfo, &props);
+		auto res = device->table.GetSemaphoreFdKHR(device->device, &getInfo, &fd);
+		if (res != VK_SUCCESS)
+			return res;
 
-		if (props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT)
+		VkImportSemaphoreFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR };
+		importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+		importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+		importInfo.semaphore = semaphore;
+		importInfo.fd = fd;
+		res = device->table.ImportSemaphoreFdKHR(device->device, &importInfo);
+		if (res != VK_SUCCESS)
 		{
-			VkImportSemaphoreFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR };
-			importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-			importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
-			importInfo.semaphore = semaphore;
-			// FD -1 is treated as an already signalled payload, neat!
-			importInfo.fd = -1;
-			VkResult res = device->table.ImportSemaphoreFdKHR(device->device, &importInfo);
-			if (res != VK_SUCCESS)
-			{
-				acquireQueue.push(*pImageIndex);
-				return markResult(res);
-			}
-		}
-		else
-		{
+			::close(fd);
 			acquireQueue.push(*pImageIndex);
-			return markResult(VK_ERROR_SURFACE_LOST_KHR);
+			return markResult(res);
 		}
 	}
 
 	if (fence != VK_NULL_HANDLE)
 	{
-		VkPhysicalDeviceExternalFenceInfo fenceInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO };
-		VkExternalFenceProperties props = { VK_STRUCTURE_TYPE_EXTERNAL_FENCE_PROPERTIES };
+		// Work around lack of support for SYNC_FD. Export an already signalled fence and import it.
+		// WSI has temporary import semantics, so it's not spec compliant to use vkQueueSubmit().
+		VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+		VkExportFenceCreateInfo exportInfo = { VK_STRUCTURE_TYPE_EXPORT_FENCE_CREATE_INFO };
+		VkFence dummyFence = VK_NULL_HANDLE;
 
-		fenceInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
-		device->instance->getTable()->GetPhysicalDeviceExternalFencePropertiesKHR(
-				device->gpu, &fenceInfo, &props);
+		exportInfo.handleTypes = VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_FD_BIT;
+		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+		fenceInfo.pNext = &exportInfo;
+		auto res = device->table.CreateFence(device->device, &fenceInfo, nullptr, &dummyFence);
+		if (res != VK_SUCCESS)
+			return res;
 
-		if (props.externalFenceFeatures & VK_EXTERNAL_FENCE_FEATURE_IMPORTABLE_BIT)
+		VkFenceGetFdInfoKHR getInfo = { VK_STRUCTURE_TYPE_FENCE_GET_FD_INFO_KHR };
+		int fd = -1;
+
+		getInfo.fence = dummyFence;
+		getInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_FD_BIT;
+		if (res != device->table.GetFenceFdKHR(device->device, &getInfo, &fd))
+			return res;
+
+		VkImportFenceFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_FENCE_FD_INFO_KHR };
+		importInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_OPAQUE_FD_BIT;
+		importInfo.flags = VK_FENCE_IMPORT_TEMPORARY_BIT;
+		importInfo.fence = fence;
+		importInfo.fd = fd;
+		res = device->table.ImportFenceFdKHR(device->device, &importInfo);
+		device->table.DestroyFence(device->device, dummyFence, nullptr);
+
+		if (res != VK_SUCCESS)
 		{
-			VkImportFenceFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_FENCE_FD_INFO_KHR };
-			importInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
-			importInfo.flags = VK_FENCE_IMPORT_TEMPORARY_BIT;
-			importInfo.fence = fence;
-			// FD -1 is treated as an already signalled payload, neat!
-			importInfo.fd = -1;
-			VkResult res = device->table.ImportFenceFdKHR(device->device, &importInfo);
-			if (res != VK_SUCCESS)
-			{
-				acquireQueue.push(*pImageIndex);
-				return markResult(res);
-			}
-		}
-		else
-		{
+			::close(fd);
 			acquireQueue.push(*pImageIndex);
-			return markResult(VK_ERROR_SURFACE_LOST_KHR);
+			return markResult(res);
 		}
 	}
 
@@ -1258,7 +1320,17 @@ VkResult Swapchain::acquire(uint64_t timeout, VkSemaphore semaphore, VkFence fen
 VkResult Swapchain::releaseSwapchainImages(const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo)
 {
 	for (uint32_t i = 0; i < pReleaseInfo->imageIndexCount; i++)
-		acquireQueue.push(pReleaseInfo->pImageIndices[i]);
+	{
+		uint32_t index = pReleaseInfo->pImageIndices[i];
+
+		// Need to be able to signal again, so create another dummy semaphore.
+		device->table.DestroySemaphore(device->device, images[index].sourceAcquireSemaphore, nullptr);
+		auto res = device->createExportableSignalledSemaphore(&images[index].sourceAcquireSemaphore);
+		if (res != VK_SUCCESS)
+			return res;
+
+		acquireQueue.push(index);
+	}
 
 	return VK_SUCCESS;
 }
@@ -1287,6 +1359,7 @@ Swapchain::~Swapchain()
 		device->table.DestroyImage(device->device, image.sourceImage.image, nullptr);
 		device->table.FreeMemory(device->device, image.sourceImage.memory, nullptr);
 		device->table.DestroyFence(device->device, image.sourceFence, nullptr);
+		device->table.DestroySemaphore(device->device, image.sourceAcquireSemaphore, nullptr);
 
 		device->sinkTable.DestroyBuffer(device->sinkDevice, image.sinkBuffer.buffer, nullptr);
 		device->sinkTable.FreeMemory(device->sinkDevice, image.sinkBuffer.memory, nullptr);
@@ -1624,6 +1697,66 @@ ReleaseSwapchainImagesEXT(
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL
+WaitForPresentKHR(
+		VkDevice                                    device,
+		VkSwapchainKHR                              swapchain,
+		uint64_t                                    presentId,
+		uint64_t                                    timeout)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->sinkDevice)
+		return layer->getTable()->WaitForPresentKHR(device, swapchain, presentId, timeout);
+
+	auto *swap = reinterpret_cast<Swapchain *>(swapchain);
+	return swap->waitForPresent(presentId, timeout);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+QueueSubmit(
+		VkQueue                                     queue,
+		uint32_t                                    submitCount,
+		const VkSubmitInfo*                         pSubmits,
+		VkFence                                     fence)
+{
+	auto *layer = getDeviceLayer(queue);
+	if (!layer->sinkDevice)
+		return layer->getTable()->QueueSubmit(queue, submitCount, pSubmits, fence);
+
+	std::lock_guard<std::mutex> holder{layer->queueLock};
+	return layer->getTable()->QueueSubmit(queue, submitCount, pSubmits, fence);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+QueueSubmit2KHR(
+		VkQueue                                     queue,
+		uint32_t                                    submitCount,
+		const VkSubmitInfo2*                        pSubmits,
+		VkFence                                     fence)
+{
+	auto *layer = getDeviceLayer(queue);
+	if (!layer->sinkDevice)
+		return layer->getTable()->QueueSubmit2KHR(queue, submitCount, pSubmits, fence);
+
+	std::lock_guard<std::mutex> holder{layer->queueLock};
+	return layer->getTable()->QueueSubmit2KHR(queue, submitCount, pSubmits, fence);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+QueueSubmit2(
+		VkQueue                                     queue,
+		uint32_t                                    submitCount,
+		const VkSubmitInfo2*                        pSubmits,
+		VkFence                                     fence)
+{
+	auto *layer = getDeviceLayer(queue);
+	if (!layer->sinkDevice)
+		return layer->getTable()->QueueSubmit2(queue, submitCount, pSubmits, fence);
+
+	std::lock_guard<std::mutex> holder{layer->queueLock};
+	return layer->getTable()->QueueSubmit2(queue, submitCount, pSubmits, fence);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
 QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 {
 	auto *layer = getDeviceLayer(queue);
@@ -1638,6 +1771,7 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; i++)
 	{
 		submitInfo.pWaitSemaphores = &pPresentInfo->pWaitSemaphores[i];
+		std::lock_guard<std::mutex> holder{layer->queueLock};
 		VkResult res = layer->getTable()->QueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
 		if (res != VK_SUCCESS)
 			return res;
@@ -1650,10 +1784,19 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 
 	auto *fence = findChain<VkSwapchainPresentFenceInfoEXT>(
 			pPresentInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT);
+	auto *ids = findChain<VkPresentIdKHR>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
+	auto *mode = findChain<VkSwapchainPresentModeInfoEXT>(
+			pPresentInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT);
 
 	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
 	{
 		auto *swap = reinterpret_cast<Swapchain *>(pPresentInfo->pSwapchains[i]);
+
+		if (ids)
+			swap->setPresentId(ids->pPresentIds[i]);
+		if (mode)
+			swap->setPresentMode(mode->pPresentModes[i]);
+
 		VkResult result = swap->queuePresent(queue, pPresentInfo->pImageIndices[i],
 											 fence ? fence->pFences[i] : VK_NULL_HANDLE);
 
@@ -1977,6 +2120,10 @@ static PFN_vkVoidFunction interceptDeviceCommand(const char *pName)
 		{ "vkAcquireNextImageKHR", reinterpret_cast<PFN_vkVoidFunction>(AcquireNextImageKHR) },
 		{ "vkAcquireNextImage2KHR", reinterpret_cast<PFN_vkVoidFunction>(AcquireNextImage2KHR) },
 		{ "vkReleaseSwapchainImagesEXT", reinterpret_cast<PFN_vkVoidFunction>(ReleaseSwapchainImagesEXT) },
+		{ "vkWaitForPresentKHR", reinterpret_cast<PFN_vkVoidFunction>(WaitForPresentKHR) },
+		{ "vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(QueueSubmit) },
+		{ "vkQueueSubmit2", reinterpret_cast<PFN_vkVoidFunction>(QueueSubmit2) },
+		{ "vkQueueSubmit2KHR", reinterpret_cast<PFN_vkVoidFunction>(QueueSubmit2KHR) },
 		{ "vkDestroyDevice", reinterpret_cast<PFN_vkVoidFunction>(DestroyDevice) },
 	};
 

@@ -36,6 +36,8 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(AcquireNextImage2KHR);
 	F(ReleaseSwapchainImagesEXT);
 	F(QueueSubmit);
+	F(QueueSubmit2);
+	F(QueueSubmit2KHR);
 	F(QueueWaitIdle);
 	F(QueuePresentKHR);
 	F(CreateCommandPool);
@@ -65,11 +67,13 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(DestroyBuffer);
 	F(CreateSemaphore);
 	F(DestroySemaphore);
+	F(WaitForPresentKHR);
 #ifndef _WIN32
 	F(GetSemaphoreFdKHR);
 	F(ImportSemaphoreFdKHR);
 	F(ImportFenceFdKHR);
 	F(GetMemoryFdKHR);
+	F(GetFenceFdKHR);
 #endif
 #undef F
 }
