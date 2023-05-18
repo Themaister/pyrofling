@@ -219,6 +219,7 @@ struct Swapchain
 	std::thread worker;
 	uint64_t submitCount = 0;
 	uint64_t processedSourceCount = 0;
+	uint64_t pendingWaitId = 0;
 
 	uint32_t width = 0;
 	uint32_t height = 0;
@@ -282,7 +283,6 @@ struct Device
 	VkPhysicalDevice gpu = VK_NULL_HANDLE;
 	VkDevice device = VK_NULL_HANDLE;
 	Instance *instance = nullptr;
-	VkLayerDispatchTable table = {};
 
 	struct QueueInfo
 	{
@@ -293,7 +293,6 @@ struct Device
 	uint32_t queueToFamilyIndex(VkQueue queue) const;
 
 	VkDevice sinkDevice = VK_NULL_HANDLE;
-	VkLayerDispatchTable sinkTable = {};
 	VkQueue sinkQueue = VK_NULL_HANDLE;
 	std::mutex sinkQueueLock;
 	std::mutex queueLock;
@@ -306,6 +305,9 @@ struct Device
 
 	VkResult forceSignalSemaphore(VkSemaphore semaphore);
 	VkResult createExportableSignalledSemaphore(VkSemaphore *pSemaphore);
+
+	VkLayerDispatchTable table = {};
+	VkLayerDispatchTable sinkTable = {};
 };
 
 #include "dispatch_wrapper.hpp"
@@ -973,6 +975,13 @@ void Swapchain::runWorker()
 		if (markResult(result) < 0)
 			break;
 
+		if (work.presentId)
+		{
+			std::lock_guard<std::mutex> holder{lock};
+			pendingWaitId = work.presentId;
+			cond.notify_all();
+		}
+
 		if (pumpAcquireSinkImage() < 0)
 			break;
 	}
@@ -1128,7 +1137,7 @@ void Swapchain::retire()
 	{
 		std::lock_guard<std::mutex> holder{lock};
 		swapchainStatus = VK_ERROR_OUT_OF_DATE_KHR;
-		cond.notify_one();
+		cond.notify_all();
 	}
 
 	if (worker.joinable())
@@ -1179,8 +1188,41 @@ VkResult Swapchain::queuePresent(VkQueue queue, uint32_t index, VkFence fence)
 
 VkResult Swapchain::waitForPresent(uint64_t presentId, uint64_t timeout)
 {
-	return device->sinkTable.WaitForPresentKHR(device->sinkDevice, sinkSwapchain,
-	                                           presentId, timeout);
+	auto t = std::chrono::steady_clock::now();
+	{
+		std::unique_lock<std::mutex> holder{lock};
+		if (timeout != UINT64_MAX)
+		{
+			auto waitT = t + std::chrono::nanoseconds(timeout);
+			bool res = cond.wait_until(holder, waitT, [this, presentId]() {
+				return pendingWaitId >= presentId || swapchainStatus < 0;
+			});
+
+			if (!res)
+				return VK_TIMEOUT;
+		}
+		else
+		{
+			cond.wait(holder, [this, presentId]() {
+				return pendingWaitId >= presentId || swapchainStatus < 0;
+			});
+		}
+
+		if (swapchainStatus < 0)
+			return swapchainStatus;
+	}
+
+	if (timeout != UINT64_MAX)
+	{
+		auto postWaitDelta = std::chrono::steady_clock::now() - t;
+		auto ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(postWaitDelta).count());
+		if (ns > timeout)
+			return VK_TIMEOUT;
+		timeout -= ns;
+	}
+
+	return markResult(device->sinkTable.WaitForPresentKHR(device->sinkDevice, sinkSwapchain,
+	                                                      presentId, timeout));
 }
 
 VkResult Swapchain::getSwapchainImages(uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages)
@@ -1211,11 +1253,15 @@ VkResult Swapchain::markResult(VkResult err)
 	if (err == VK_SUCCESS)
 		return swapchainStatus;
 
-	if (err < 0 || swapchainStatus == VK_SUCCESS)
+	if (err < 0 || (swapchainStatus == VK_SUCCESS && err == VK_SUBOPTIMAL_KHR))
 		swapchainStatus = err;
 
+	// Nothing abnormal to report.
+	if (swapchainStatus == VK_SUCCESS)
+		return err;
+
 	// Wake up any sleepers on unusual results.
-	cond.notify_one();
+	cond.notify_all();
 	return swapchainStatus;
 }
 
