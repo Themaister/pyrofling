@@ -392,6 +392,7 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 		{
 			VkQueue queue;
 			table.GetDeviceQueue(device, family, j, &queue);
+			setDeviceLoaderData(device, queue);
 			queueToFamily.push_back({ queue, family });
 		}
 	}
@@ -463,6 +464,7 @@ void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, 
 
 		layerInitDeviceDispatchTable(sinkDevice, &sinkTable, gdpa);
 		sinkTable.GetDeviceQueue(sinkDevice, instance->sinkGpuQueueFamily, 0, &sinkQueue);
+		setDeviceLoaderData(sinkDevice, sinkQueue);
 	}
 }
 
@@ -876,6 +878,8 @@ VkResult Swapchain::pumpAcquireSinkImage()
 		acquireQueue.push(index);
 		cond.notify_one();
 	}
+	else
+		sinkFencePool.push_back(fence);
 
 	return markResult(res);
 }
@@ -968,7 +972,7 @@ void Swapchain::runWorker()
 			result = device->sinkTable.QueueSubmit(device->sinkQueue, 1, &submit, images[work.index].sinkAcquireFence);
 		}
 
-		if (markResult(result))
+		if (markResult(result) < 0)
 			break;
 
 		result = device->sinkTable.QueuePresentKHR(device->sinkQueue, &presentInfo);
@@ -1399,6 +1403,14 @@ Swapchain::~Swapchain()
 	}
 	device->sinkTable.DestroySwapchainKHR(device->sinkDevice, sinkSwapchain, nullptr);
 
+	// Drain any source GPU work that the worker thread did not process.
+	while (!workQueue.empty())
+	{
+		auto &w = workQueue.front();
+		device->table.WaitForFences(device->device, 1, &images[w.index].sourceFence, VK_TRUE, UINT64_MAX);
+		workQueue.pop();
+	}
+
 	for (auto &image : images)
 	{
 		device->table.DestroyBuffer(device->device, image.sourceBuffer.buffer, nullptr);
@@ -1412,7 +1424,12 @@ Swapchain::~Swapchain()
 		device->sinkTable.FreeMemory(device->sinkDevice, image.sinkBuffer.memory, nullptr);
 		// sinkImage is owned by swapchain.
 		device->sinkTable.DestroySemaphore(device->sinkDevice, image.sinkReleaseSemaphore, nullptr);
-		device->sinkTable.DestroyFence(device->sinkDevice, image.sinkAcquireFence, nullptr);
+
+		if (image.sinkAcquireFence)
+		{
+			device->sinkTable.WaitForFences(device->sinkDevice, 1, &image.sinkAcquireFence, VK_TRUE, UINT64_MAX);
+			device->sinkTable.DestroyFence(device->sinkDevice, image.sinkAcquireFence, nullptr);
+		}
 
 		// Free this last. This is important to avoid spurious device lost
 		// when submitting something with live VkDeviceMemory that references freed host memory.
