@@ -1001,17 +1001,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 	auto fpSetDeviceLoaderData = callbackInfo->u.pfnSetDeviceLoaderData;
 	auto fpGetInstanceProcAddr = chainInfo->u.pLayerInfo->pfnNextGetInstanceProcAddr;
 	auto fpGetDeviceProcAddr = chainInfo->u.pLayerInfo->pfnNextGetDeviceProcAddr;
-	auto fpCreateDevice =
-			reinterpret_cast<PFN_vkCreateDevice>(fpGetInstanceProcAddr(layer->getInstance(), "vkCreateDevice"));
-	if (!fpCreateDevice)
-		return VK_ERROR_INITIALIZATION_FAILED;
-
-	auto fpEnumerateDeviceExtensionProperties =
-			reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
-					fpGetInstanceProcAddr(layer->getInstance(), "vkEnumerateDeviceExtensionProperties"));
-
-	if (!fpEnumerateDeviceExtensionProperties)
-		return VK_ERROR_INITIALIZATION_FAILED;
+	auto fpCreateDevice = layer->getTable()->CreateDevice;
+	auto fpEnumerateDeviceExtensionProperties = layer->getTable()->EnumerateDeviceExtensionProperties;
 
 	// Querying supported device extensions works unlike in CreateInstance since we have a layer chain set up.
 	uint32_t supportedCount;

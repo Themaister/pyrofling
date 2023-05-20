@@ -93,6 +93,7 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 	F(GetPhysicalDeviceExternalBufferPropertiesKHR);
 	F(GetPhysicalDeviceProperties2KHR);
 	F(EnumeratePhysicalDevices);
+	F(CreateDevice);
 
 	F(GetPhysicalDeviceSurfaceFormatsKHR);
 	F(GetPhysicalDeviceSurfaceSupportKHR);

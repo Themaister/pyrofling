@@ -41,6 +41,7 @@
 struct VkLayerInstanceDispatchTable
 {
 	PFN_vkDestroyInstance DestroyInstance;
+	PFN_vkCreateDevice CreateDevice;
 	PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties;
 	PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
 	PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
