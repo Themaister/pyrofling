@@ -999,7 +999,6 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 	auto *callbackInfo = getChainInfo(pCreateInfo, VK_LOADER_DATA_CALLBACK);
 
 	auto fpSetDeviceLoaderData = callbackInfo->u.pfnSetDeviceLoaderData;
-	auto fpGetInstanceProcAddr = chainInfo->u.pLayerInfo->pfnNextGetInstanceProcAddr;
 	auto fpGetDeviceProcAddr = chainInfo->u.pLayerInfo->pfnNextGetDeviceProcAddr;
 	auto fpCreateDevice = layer->getTable()->CreateDevice;
 	auto fpEnumerateDeviceExtensionProperties = layer->getTable()->EnumerateDeviceExtensionProperties;
