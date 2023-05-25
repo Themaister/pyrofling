@@ -571,6 +571,11 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 		table.DestroyCommandPool(vkDevice, sourceCmdPool.pool, nullptr);
 		sourceCmdPool.pool = VK_NULL_HANDLE;
 	}
+	else if (sourceCmdPool.pool != VK_NULL_HANDLE)
+	{
+		// We're good.
+		return VK_SUCCESS;
+	}
 
 	if (sourceCmdPool.pool == VK_NULL_HANDLE)
 	{
