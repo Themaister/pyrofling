@@ -673,7 +673,7 @@ VkResult Swapchain::importHostBuffer(VkDevice vkDevice, const VkLayerDispatchTab
 
 	res = table.GetMemoryHostPointerPropertiesEXT(
 			vkDevice, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
-			buf.buffer, &hostProps);
+			hostPointer, &hostProps);
 
 	if (res != VK_SUCCESS)
 		return VK_ERROR_OUT_OF_HOST_MEMORY;
