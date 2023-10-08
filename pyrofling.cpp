@@ -982,6 +982,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 		std::string x264_tune;
 		std::string local_backup_path;
 		std::string encoder = "libx264";
+		std::string muxer;
 	} video_encode;
 
 	unsigned client_rate_multiplier = 1;
@@ -1037,8 +1038,11 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 			options.encoder = video_encode.encoder.c_str();
 			options.realtime = true;
 
-			if (video_encode.path.find("://") != std::string::npos)
+			if (!video_encode.muxer.empty())
+				options.realtime_options.muxer_format = video_encode.muxer.c_str();
+			else if (video_encode.path.find("://") != std::string::npos)
 				options.realtime_options.muxer_format = "flv";
+
 			options.realtime_options.bitrate_kbits = video_encode.bitrate_kbits;
 			options.realtime_options.max_bitrate_kbits = video_encode.max_bitrate_kbits;
 			options.realtime_options.gop_seconds = video_encode.gop_seconds;
@@ -1150,6 +1154,7 @@ static void print_help()
 	     "\t[--vbv-size-kbits SIZE]\n"
 	     "\t[--local-backup PATH]\n"
 	     "\t[--encoder ENCODER]\n"
+	     "\t[--muxer MUXER]\n"
 		 "\turl\n");
 }
 
@@ -1181,6 +1186,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--threads", [&](Util::CLIParser &parser) { opts.threads = parser.next_uint(); });
 	cbs.add("--local-backup", [&](Util::CLIParser &parser) { opts.local_backup_path = parser.next_string(); });
 	cbs.add("--encoder", [&](Util::CLIParser &parser) { opts.encoder = parser.next_string(); });
+	cbs.add("--muxer", [&](Util::CLIParser &parser) { opts.muxer = parser.next_string(); });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
