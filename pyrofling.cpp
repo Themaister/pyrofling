@@ -51,7 +51,7 @@ struct InstanceDeleter
 	}
 };
 
-struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
+struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory, Granite::MuxStreamCallback
 {
 	~SwapchainServer() override
 	{
@@ -854,6 +854,12 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 		return true;
 	}
 
+	void add_stream_socket(FileHandle tcp_fd) override
+	{
+		std::lock_guard<std::mutex> holder{tcp_fd_lock};
+		new_tcp_fds.push_back(std::move(tcp_fd));
+	}
+
 	bool register_handler(Dispatcher &dispatcher_, const FileHandle &fd, Handler *&handler) override
 	{
 		auto msg = parse_message(fd);
@@ -966,6 +972,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 	Granite::TaskGroupHandle encode_tasks[NumEncodeTasks];
 	unsigned next_encode_task_slot = 0;
 
+	std::mutex tcp_fd_lock;
+	std::vector<FileHandle> tcp_fds;
+	std::vector<FileHandle> new_tcp_fds;
+
 	struct Options
 	{
 		std::string path;
@@ -977,6 +987,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 		unsigned max_bitrate_kbits = 8000;
 		unsigned vbv_size_kbits = 6000;
 		unsigned threads = 0;
+		unsigned audio_rate = 44100;
 		float gop_seconds = 2.0f;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
@@ -1052,10 +1063,12 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 			options.realtime_options.threads = video_encode.threads;
 			options.realtime_options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
 
-			audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", 44100.0f, 2));
+			audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
 			encoder->set_audio_record_stream(audio_record.get());
+			if (video_encode.path.empty())
+				encoder->set_mux_stream_callback(this);
 			encoder_device = &gpu.context->device;
-			if (encoder->init(encoder_device, video_encode.path.c_str(), options))
+			if (encoder->init(encoder_device, video_encode.path.empty() ? nullptr : video_encode.path.c_str(), options))
 			{
 				Vulkan::ResourceLayout layout;
 				ShaderBank::Shaders<Vulkan::Program *, Vulkan::Shader *> bank{
@@ -1082,6 +1095,34 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory
 				return false;
 			}
 		}
+
+		return true;
+	}
+
+	bool write_stream(const void *data, size_t size) override
+	{
+		{
+			std::lock_guard<std::mutex> holder{tcp_fd_lock};
+			for (auto &fd : new_tcp_fds)
+				tcp_fds.push_back(std::move(fd));
+			new_tcp_fds.clear();
+		}
+
+		size_t i, n;
+		// Repeat the byte stream to all clients.
+		for (i = 0, n = tcp_fds.size(); i < n; )
+		{
+			if (!send_stream_message(tcp_fds[i], data, size))
+			{
+				if (i != n - 1)
+					std::swap(tcp_fds[i], tcp_fds[n - 1]);
+				n--;
+			}
+			else
+				i++;
+		}
+
+		tcp_fds.erase(tcp_fds.begin() + n, tcp_fds.end());
 
 		return true;
 	}
@@ -1155,6 +1196,8 @@ static void print_help()
 	     "\t[--local-backup PATH]\n"
 	     "\t[--encoder ENCODER]\n"
 	     "\t[--muxer MUXER]\n"
+	     "\t[--tcp PORT]\n"
+	     "\t[--audio-rate RATE]\n"
 		 "\turl\n");
 }
 
@@ -1164,6 +1207,7 @@ static int main_inner(int argc, char **argv)
 	unsigned client_rate_multiplier = 1;
 	SwapchainServer::Options opts;
 	unsigned device_index = 0;
+	std::string tcp_port;
 
 	opts.width = 1280;
 	opts.height = 720;
@@ -1187,6 +1231,8 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--local-backup", [&](Util::CLIParser &parser) { opts.local_backup_path = parser.next_string(); });
 	cbs.add("--encoder", [&](Util::CLIParser &parser) { opts.encoder = parser.next_string(); });
 	cbs.add("--muxer", [&](Util::CLIParser &parser) { opts.muxer = parser.next_string(); });
+	cbs.add("--tcp", [&](Util::CLIParser &parser) { tcp_port = parser.next_string(); });
+	cbs.add("--audio-rate", [&](Util::CLIParser &parser) { opts.audio_rate = parser.next_uint(); });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
@@ -1199,9 +1245,16 @@ static int main_inner(int argc, char **argv)
 		return EXIT_SUCCESS;
 	}
 
-	if (opts.path.empty())
+	if (opts.path.empty() && tcp_port.empty())
 	{
 		LOGE("Encode URL required.\n");
+		print_help();
+		return EXIT_FAILURE;
+	}
+
+	if (!opts.path.empty() && !tcp_port.empty())
+	{
+		LOGE("Cannot use both TCP output and URL output.\n");
 		print_help();
 		return EXIT_FAILURE;
 	}
@@ -1210,7 +1263,7 @@ static int main_inner(int argc, char **argv)
 	     opts.width, opts.height, opts.fps, opts.fps * client_rate_multiplier, opts.path.c_str(),
 	     opts.bitrate_kbits, opts.max_bitrate_kbits, opts.vbv_size_kbits, opts.gop_seconds);
 
-	Dispatcher dispatcher{socket_path.c_str()};
+	Dispatcher dispatcher{socket_path.c_str(), tcp_port.c_str()};
 	SwapchainServer server{dispatcher};
 	server.set_client_rate_multiplier(client_rate_multiplier);
 	server.set_encode_options(opts);

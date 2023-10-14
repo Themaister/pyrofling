@@ -59,16 +59,30 @@ private:
 	std::string unlink_path;
 };
 
+class TCPListener
+{
+public:
+	TCPListener() = default;
+	explicit TCPListener(const char *port);
+	const FileHandle &get_file_handle() const;
+	TCPListener &operator=(TCPListener &&other) = default;
+	explicit TCPListener(TCPListener &&other) = default;
+
+private:
+	FileHandle fd;
+};
+
 class HandlerFactoryInterface
 {
 public:
 	virtual bool register_handler(Dispatcher &dispatcher, const FileHandle &fd, Handler *&handler) = 0;
+	virtual void add_stream_socket(FileHandle fd);
 };
 
 class Dispatcher
 {
 public:
-	explicit Dispatcher(const char *name);
+	explicit Dispatcher(const char *name, const char *tcp_port);
 	void set_handler_factory_interface(HandlerFactoryInterface *iface);
 	bool iterate();
 	void kill();
@@ -87,9 +101,11 @@ public:
 private:
 	HandlerFactoryInterface *iface = nullptr;
 	Listener listener;
+	TCPListener tcp_listener;
 	FileHandle pollfd;
 
 	FileHandle accept_connection();
+	FileHandle accept_tcp_connection();
 	void add_signalfd();
 	void add_eventfd();
 	const FileHandle *event_handle = nullptr;

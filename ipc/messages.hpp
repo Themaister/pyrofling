@@ -385,4 +385,6 @@ static inline const MessageT *maybe_get(const Message &msg)
 	else
 		return nullptr;
 }
+
+bool send_stream_message(const FileHandle &fd, const void *data, size_t size);
 }

@@ -27,10 +27,13 @@
 #include <sys/stat.h>
 #include <sys/signalfd.h>
 #include <sys/eventfd.h>
+#include <sys/types.h>
+#include <netdb.h>
 #include <stdexcept>
 #include <algorithm>
 #include <errno.h>
 #include <assert.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <signal.h>
 
@@ -87,10 +90,62 @@ const FileHandle &Listener::get_file_handle() const
 	return fd;
 }
 
+TCPListener::TCPListener(const char *port)
+{
+	addrinfo hints = {};
+	addrinfo *res = nullptr;
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
+	if (getaddrinfo(nullptr, port, &hints, &res) < 0 || !res)
+		throw std::runtime_error("Failed to call getaddrinfo.");
+
+	struct Deleter
+	{
+		void operator()(addrinfo *info)
+		{
+			if (info)
+				freeaddrinfo(info);
+		}
+	};
+	std::unique_ptr<addrinfo, Deleter> holder{res};
+
+	fd = FileHandle(socket(res->ai_family, res->ai_socktype, res->ai_protocol));
+	if (!fd)
+		throw std::runtime_error("Failed to create TCP socket.");
+
+	int yes = 1;
+	if (setsockopt(fd.get_native_handle(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0)
+		throw std::runtime_error("Failed to set reuseaddr.");
+
+	if (bind(fd.get_native_handle(), res->ai_addr, res->ai_addrlen) < 0)
+		throw std::runtime_error("Failed to bind.");
+}
+
+const FileHandle &TCPListener::get_file_handle() const
+{
+	return fd;
+}
+
 FileHandle Dispatcher::accept_connection()
 {
 	FileHandle fd{::accept4(listener.get_file_handle().get_native_handle(),
 	                        nullptr, nullptr, SOCK_NONBLOCK)};
+	return fd;
+}
+
+FileHandle Dispatcher::accept_tcp_connection()
+{
+	FileHandle fd{::accept(tcp_listener.get_file_handle().get_native_handle(), nullptr, nullptr)};
+	if (fd)
+	{
+		int yes = 1;
+		if (setsockopt(fd.get_native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) < 0)
+			throw std::runtime_error("Failed to set TCP_NODELAY.");
+
+		// We'll only dump data here.
+		shutdown(fd.get_native_handle(), SHUT_RD);
+	}
 	return fd;
 }
 
@@ -168,21 +223,30 @@ bool Dispatcher::iterate_inner()
 	for (int i = 0; i < count; i++)
 	{
 		auto &e = events[i];
-		if (e.data.ptr == nullptr)
+		if (e.data.ptr == &listener || e.data.ptr == &tcp_listener)
 		{
-			auto fd = accept_connection();
+			auto fd = e.data.ptr == &tcp_listener ? accept_tcp_connection() : accept_connection();
 			if (fd)
 			{
-				auto c = std::make_unique<Connection>();
-				c->fd = std::move(fd);
-
-				struct epoll_event ev = {};
-				ev.data.ptr = c.get();
-				ev.events = EPOLLIN;
-				if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD,
-				              c->fd.get_native_handle(), &ev) == 0)
+				if (e.data.ptr == &listener)
 				{
-					connections.push_back(std::move(c));
+					auto c = std::make_unique<Connection>();
+					c->fd = std::move(fd);
+
+					struct epoll_event ev = {};
+					ev.data.ptr = c.get();
+					ev.events = EPOLLIN;
+					if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD,
+					              c->fd.get_native_handle(), &ev) == 0)
+					{
+						connections.push_back(std::move(c));
+					}
+				}
+				else if (iface)
+				{
+					// We just dump data to TCP directly, don't listen for messages.
+					// Just forward it to interface and forget about it.
+					iface->add_stream_socket(std::move(fd));
 				}
 			}
 		}
@@ -325,7 +389,7 @@ void Dispatcher::kill()
 		(void)::write(event_handle->get_native_handle(), &value, sizeof(value));
 }
 
-Dispatcher::Dispatcher(const char *name)
+Dispatcher::Dispatcher(const char *name, const char *port)
 	: listener(name)
 {
 	if (::listen(listener.get_file_handle().get_native_handle(), 16) < 0)
@@ -339,9 +403,27 @@ Dispatcher::Dispatcher(const char *name)
 	add_eventfd();
 
 	struct epoll_event e = {};
-	e.data.ptr = nullptr;
+	e.data.ptr = &listener;
 	e.events = EPOLLIN;
 	if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD, listener.get_file_handle().get_native_handle(), &e) < 0)
 		throw std::runtime_error("Failed to add to epoll.");
+
+	if (port)
+		tcp_listener = TCPListener{port};
+
+	if (tcp_listener.get_file_handle())
+	{
+		if (::listen(tcp_listener.get_file_handle().get_native_handle(), 4) < 0)
+			throw std::runtime_error("Failed to listen.");
+
+		e.data.ptr = &tcp_listener;
+		e.events = EPOLLIN;
+		if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD, tcp_listener.get_file_handle().get_native_handle(), &e) < 0)
+			throw std::runtime_error("Failed to add to epoll.");
+	}
+}
+
+void HandlerFactoryInterface::add_stream_socket(PyroFling::FileHandle)
+{
 }
 }

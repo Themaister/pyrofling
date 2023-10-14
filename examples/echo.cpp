@@ -97,7 +97,7 @@ struct TestServer : HandlerFactoryInterface
 int main()
 {
 	TestServer server;
-	Dispatcher dispatcher{"/tmp/pyrofling-test-socket"};
+	Dispatcher dispatcher{"/tmp/pyrofling-test-socket", nullptr};
 	dispatcher.set_handler_factory_interface(&server);
 
 	Client client{"/tmp/pyrofling-test-socket"};

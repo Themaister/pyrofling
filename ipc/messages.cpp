@@ -132,6 +132,24 @@ bool send_message(const FileHandle &fd, MessageType type, uint64_t serial)
 	return send_message(fd, type, serial, nullptr, 0, nullptr, 0);
 }
 
+bool send_stream_message(const FileHandle &fd, const void *data_, size_t size)
+{
+	auto *data = static_cast<const uint8_t *>(data_);
+	ssize_t ret;
+
+	while (size)
+	{
+		ret = ::send(fd.get_native_handle(), data, size, MSG_NOSIGNAL);
+		if (ret <= 0)
+			return false;
+
+		size -= ret;
+		data += ret;
+	}
+
+	return true;
+}
+
 template <typename T>
 static inline std::unique_ptr<Message> create_single_file_handle_message(const RawMessagePayload &payload,
 																		 std::vector<FileHandle> handles)
