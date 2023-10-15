@@ -23,7 +23,10 @@ endif()
 option(PYROFLING_LAYER_ONLY "Only build capture layer." OFF)
 
 include(GNUInstallDirs)
-add_subdirectory(ipc)
+
+if (NOT WIN32)
+    add_subdirectory(ipc)
+endif()
 
 # Disable stuff we don't need. We'll use slangmosh to precompile the two shaders we care about.
 set(GRANITE_VULKAN_SYSTEM_HANDLES OFF CACHE BOOL "" FORCE)
@@ -41,18 +44,22 @@ endif()
 add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
 if (NOT PYROFLING_LAYER_ONLY)
-    add_subdirectory(examples)
-    add_executable(pyrofling pyrofling.cpp)
-    target_compile_options(pyrofling PRIVATE ${PYROFLING_CXX_FLAGS})
-    target_link_libraries(pyrofling PRIVATE
+    if (NOT WIN32)
+        add_subdirectory(examples)
+        add_executable(pyrofling pyrofling.cpp)
+        target_compile_options(pyrofling PRIVATE ${PYROFLING_CXX_FLAGS})
+        target_link_libraries(pyrofling PRIVATE
             pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio)
-    install(TARGETS pyrofling)
+        install(TARGETS pyrofling)
+    endif()
 
     add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
     target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio)
     install(TARGETS pyrofling-viewer)
 endif()
 
-add_subdirectory(layer-util)
-add_subdirectory(capture-layer)
-add_subdirectory(cross-wsi-layer)
+if (NOT WIN32)
+	add_subdirectory(layer-util)
+	add_subdirectory(capture-layer)
+	add_subdirectory(cross-wsi-layer)
+endif()
