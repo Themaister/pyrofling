@@ -37,12 +37,16 @@ struct VideoPlayerApplication : Application, EventHandler
 		VideoDecoder::DecodeOptions opts;
 		// Crude :)
 		opts.realtime = strstr(video_path, "://") != nullptr;
+		realtime = opts.realtime;
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 			throw std::runtime_error("Failed to open file");
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
+
+		if (realtime)
+			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedMaybeTear);
 	}
 
 	std::string get_name() override
@@ -78,38 +82,69 @@ struct VideoPlayerApplication : Application, EventHandler
 
 	bool update(Vulkan::Device &device, double elapsed_time)
 	{
-		// Based on the audio PTS, we want to display a video frame that is slightly larger.
-		double target_pts = decoder.get_estimated_audio_playback_timestamp(elapsed_time);
-		if (target_pts < 0.0)
-			target_pts = elapsed_time;
+		if (realtime)
+		{
+			bool had_acquire = false;
+			// Always pick the most recent video frame we have.
+			for (;;)
+			{
+				if (next_frame.view)
+					shift_frame();
+				int ret = decoder.try_acquire_video_frame(next_frame);
 
-		// Update the latest frame. We want the closest PTS to target_pts.
-		if (!next_frame.view)
-			if (decoder.try_acquire_video_frame(next_frame) < 0 && target_pts > frame.pts)
+				if (ret < 0)
+					return false;
+				else if (ret == 0)
+					break;
+				else
+					had_acquire = true;
+			}
+
+			// Block until we have received at least one new frame.
+			// No point duplicating presents.
+			if (!had_acquire && !decoder.acquire_video_frame(next_frame))
 				return false;
 
-		LOGI("Video buffer latency: %.3f, audio buffer latency: %.3f s\n",
-		     decoder.get_last_video_buffering_pts() - target_pts,
-		     decoder.get_audio_buffering_duration());
-
-		while (next_frame.view)
-		{
-			// If we have two candidates, shift out frame if next_frame PTS is closer.
-			double d_current = std::abs(frame.pts - target_pts);
-			double d_next = std::abs(next_frame.pts - target_pts);
-
-			// In case we get two frames with same PTS for whatever reason, ensure forward progress.
-			// The less-equal check is load-bearing.
-			if (d_next <= d_current || !frame.view)
-			{
+			if (next_frame.view)
 				shift_frame();
+		}
+		else
+		{
+			// Synchronize based on audio. Prioritize smoothness over latency.
 
-				// Try to catch up quickly by skipping frames if we have to.
-				// Defer any EOF handling to next frame.
-				decoder.try_acquire_video_frame(next_frame);
+			// Based on the audio PTS, we want to display a video frame that is slightly larger.
+			double target_pts = decoder.get_estimated_audio_playback_timestamp(elapsed_time);
+			if (target_pts < 0.0)
+				target_pts = elapsed_time;
+
+			// Update the latest frame. We want the closest PTS to target_pts.
+			if (!next_frame.view)
+				if (decoder.try_acquire_video_frame(next_frame) < 0 && target_pts > frame.pts)
+					return false;
+
+			LOGI("Video buffer latency: %.3f, audio buffer latency: %.3f s\n",
+			     decoder.get_last_video_buffering_pts() - target_pts,
+			     decoder.get_audio_buffering_duration());
+
+			while (next_frame.view)
+			{
+				// If we have two candidates, shift out frame if next_frame PTS is closer.
+				double d_current = std::abs(frame.pts - target_pts);
+				double d_next = std::abs(next_frame.pts - target_pts);
+
+				// In case we get two frames with same PTS for whatever reason, ensure forward progress.
+				// The less-equal check is load-bearing.
+				if (d_next <= d_current || !frame.view)
+				{
+					shift_frame();
+
+					// Try to catch up quickly by skipping frames if we have to.
+					// Defer any EOF handling to next frame.
+					decoder.try_acquire_video_frame(next_frame);
+				}
+				else
+					break;
 			}
-			else
-				break;
 		}
 
 		if (need_acquire)
@@ -186,6 +221,7 @@ struct VideoPlayerApplication : Application, EventHandler
 	VideoFrame frame, next_frame;
 	bool need_acquire = false;
 	Vulkan::Program *blit = nullptr;
+	bool realtime = false;
 };
 
 namespace Granite
