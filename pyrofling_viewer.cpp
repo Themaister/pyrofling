@@ -27,6 +27,7 @@
 #include "slangmosh_decode_iface.hpp"
 #include "slangmosh_decode.hpp"
 #include "slangmosh_blit.hpp"
+#include <cmath>
 
 using namespace Granite;
 
@@ -215,6 +216,25 @@ struct VideoPlayerApplication : Application, EventHandler
 			cmd->set_opaque_sprite_state();
 			cmd->set_program(blit);
 			cmd->set_texture(0, 0, *frame.view, Vulkan::StockSampler::LinearClamp);
+
+			auto vp = cmd->get_viewport();
+			float video_aspect = float(decoder.get_width()) / float(decoder.get_height());
+			float vp_aspect = vp.width / vp.height;
+
+			if (vp_aspect > video_aspect)
+			{
+				float target_width = vp.height * video_aspect;
+				vp.x = std::round(0.5f * (vp.width - target_width));
+				vp.width = std::round(target_width);
+			}
+			else if (vp_aspect < video_aspect)
+			{
+				float target_height = vp.width / video_aspect;
+				vp.y = std::round(0.5f * (vp.height - target_height));
+				vp.height = std::round(target_height);
+			}
+
+			cmd->set_viewport(vp);
 			cmd->draw(3);
 		}
 		cmd->end_render_pass();
