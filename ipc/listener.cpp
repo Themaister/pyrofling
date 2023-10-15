@@ -139,9 +139,11 @@ FileHandle Dispatcher::accept_tcp_connection()
 	FileHandle fd{::accept(tcp_listener.get_file_handle().get_native_handle(), nullptr, nullptr)};
 	if (fd)
 	{
+#if 0
 		int yes = 1;
 		if (setsockopt(fd.get_native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) < 0)
 			throw std::runtime_error("Failed to set TCP_NODELAY.");
+#endif
 
 		// We'll only dump data here.
 		shutdown(fd.get_native_handle(), SHUT_RD);
