@@ -107,6 +107,11 @@ struct VideoPlayerApplication : Application, EventHandler
 
 			if (next_frame.view)
 				shift_frame();
+
+			// Audio syncs to video.
+			// Dynamic rate control.
+
+			decoder.latch_audio_presentation_target(frame.pts);
 		}
 		else
 		{
