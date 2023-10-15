@@ -35,6 +35,8 @@ struct VideoPlayerApplication : Application, EventHandler
 	explicit VideoPlayerApplication(const char *video_path)
 	{
 		VideoDecoder::DecodeOptions opts;
+		// Crude :)
+		opts.realtime = strstr(video_path, "://") != nullptr;
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 			throw std::runtime_error("Failed to open file");
 
@@ -85,6 +87,10 @@ struct VideoPlayerApplication : Application, EventHandler
 		if (!next_frame.view)
 			if (decoder.try_acquire_video_frame(next_frame) < 0 && target_pts > frame.pts)
 				return false;
+
+		LOGI("Video buffer latency: %.3f, audio buffer latency: %.3f s\n",
+		     decoder.get_last_video_buffering_pts() - target_pts,
+		     decoder.get_audio_buffering_duration());
 
 		while (next_frame.view)
 		{
