@@ -111,7 +111,8 @@ struct VideoPlayerApplication : Application, EventHandler
 			// Audio syncs to video.
 			// Dynamic rate control.
 
-			decoder.latch_audio_presentation_target(frame.pts);
+			// Give 20ms extra audio buffering for good measure.
+			decoder.latch_audio_presentation_target(frame.pts - 0.02);
 		}
 		else
 		{
