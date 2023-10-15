@@ -990,6 +990,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		unsigned threads = 0;
 		unsigned audio_rate = 44100;
 		float gop_seconds = 2.0f;
+		bool low_latency = false;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1058,6 +1059,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.realtime_options.bitrate_kbits = video_encode.bitrate_kbits;
 			options.realtime_options.max_bitrate_kbits = video_encode.max_bitrate_kbits;
 			options.realtime_options.gop_seconds = video_encode.gop_seconds;
+			options.low_latency = video_encode.low_latency;
 			options.realtime_options.vbv_size_kbits = video_encode.vbv_size_kbits;
 			options.realtime_options.x264_preset = video_encode.x264_preset.empty() ? nullptr : video_encode.x264_preset.c_str();
 			options.realtime_options.x264_tune = video_encode.x264_tune.empty() ? nullptr : video_encode.x264_tune.c_str();
@@ -1198,6 +1200,7 @@ static void print_help()
 	     "\t[--muxer MUXER]\n"
 	     "\t[--tcp PORT]\n"
 	     "\t[--audio-rate RATE]\n"
+	     "\t[--low-latency]\n"
 		 "\turl\n");
 }
 
@@ -1233,6 +1236,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--muxer", [&](Util::CLIParser &parser) { opts.muxer = parser.next_string(); });
 	cbs.add("--tcp", [&](Util::CLIParser &parser) { tcp_port = parser.next_string(); });
 	cbs.add("--audio-rate", [&](Util::CLIParser &parser) { opts.audio_rate = parser.next_uint(); });
+	cbs.add("--low-latency", [&](Util::CLIParser &) { opts.low_latency = true; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
