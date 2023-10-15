@@ -1,0 +1,6 @@
+{
+	"shaders": [
+		{ "name": "quad", "path": "quad.vert" },
+		{ "name": "blit", "path": "blit.frag" }
+	]
+}

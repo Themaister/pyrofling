@@ -30,7 +30,8 @@
 #include "audio_interface.hpp"
 #include "cli_parser.hpp"
 #include "timer.hpp"
-#include "slangmosh.hpp"
+#include "slangmosh_encode_iface.hpp"
+#include "slangmosh_encode.hpp"
 #include <stdexcept>
 #include <vector>
 #include <thread>
@@ -1071,11 +1072,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (encoder->init(encoder_device, video_encode.path.empty() ? nullptr : video_encode.path.c_str(), options))
 			{
 				Vulkan::ResourceLayout layout;
-				ShaderBank::Shaders<Vulkan::Program *, Vulkan::Shader *> bank{
-					gpu.context->device, layout, 0};
+				FFmpegEncode::Shaders<> bank{gpu.context->device, layout, 0};
 
 				for (auto &pipe : pipeline)
-					pipe = encoder->create_ycbcr_pipeline(bank.rgb_to_yuv, bank.chroma_downsample);
+					pipe = encoder->create_ycbcr_pipeline(bank);
 
 				if (!audio_record->start())
 				{

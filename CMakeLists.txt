@@ -27,6 +27,7 @@ add_subdirectory(ipc)
 
 # Disable stuff we don't need. We'll use slangmosh to precompile the two shaders we care about.
 set(GRANITE_VULKAN_SYSTEM_HANDLES OFF CACHE BOOL "" FORCE)
+set(GRANITE_RENDERER OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_SHADER_COMPILER_OPTIMIZE OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_SHADER_MANAGER_RUNTIME_COMPILER OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_FOSSILIZE OFF CACHE BOOL "" FORCE)
@@ -46,6 +47,10 @@ if (NOT PYROFLING_LAYER_ONLY)
     target_link_libraries(pyrofling PRIVATE
             pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio)
     install(TARGETS pyrofling)
+
+    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
+    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio)
+    install(TARGETS pyrofling-viewer)
 endif()
 
 add_subdirectory(layer-util)
