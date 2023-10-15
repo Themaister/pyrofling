@@ -43,6 +43,21 @@ struct VideoPlayerApplication : Application, EventHandler
 		                             Vulkan::DeviceShaderModuleReadyEvent);
 	}
 
+	std::string get_name() override
+	{
+		return "pyrofling-viewer";
+	}
+
+	unsigned get_default_width() override
+	{
+		return decoder.get_width();
+	}
+
+	unsigned get_default_height() override
+	{
+		return decoder.get_height();
+	}
+
 	void shift_frame()
 	{
 		if (frame.view)
