@@ -45,9 +45,6 @@ struct VideoPlayerApplication : Application, EventHandler
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
-
-		if (realtime)
-			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedMaybeTear);
 	}
 
 	std::string get_name() override
@@ -83,6 +80,8 @@ struct VideoPlayerApplication : Application, EventHandler
 
 	bool update(Vulkan::Device &device, double elapsed_time)
 	{
+#if 0
+		// Most aggressive method, not all that great for pacing ...
 		if (realtime)
 		{
 			bool had_acquire = false;
@@ -116,11 +115,24 @@ struct VideoPlayerApplication : Application, EventHandler
 			decoder.latch_audio_presentation_target(frame.pts - 0.02);
 		}
 		else
+#endif
 		{
 			// Synchronize based on audio. Prioritize smoothness over latency.
 
-			// Based on the audio PTS, we want to display a video frame that is slightly larger.
-			double target_pts = decoder.get_estimated_audio_playback_timestamp(elapsed_time);
+			double target_pts;
+
+			if (realtime)
+			{
+				// Based on the video PTS.
+				// Aim for 100ms of buffering to absorb network jank.
+				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, 0.1);
+			}
+			else
+			{
+				// Based on the audio PTS, we want to display a video frame that is slightly larger.
+				target_pts = decoder.get_estimated_audio_playback_timestamp(elapsed_time);
+			}
+
 			if (target_pts < 0.0)
 				target_pts = elapsed_time;
 
