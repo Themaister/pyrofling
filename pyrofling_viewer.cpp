@@ -28,18 +28,23 @@
 #include "slangmosh_decode.hpp"
 #include "slangmosh_blit.hpp"
 #include "global_managers_init.hpp"
+#include "cli_parser.hpp"
 #include <cmath>
 
 using namespace Granite;
 
 struct VideoPlayerApplication : Application, EventHandler
 {
-	explicit VideoPlayerApplication(const char *video_path)
+	explicit VideoPlayerApplication(const char *video_path,
+	                                float video_buffer, float audio_buffer, float target)
 	{
 		VideoDecoder::DecodeOptions opts;
 		// Crude :)
 		opts.realtime = strstr(video_path, "://") != nullptr;
+		opts.target_realtime_audio_buffer_time = audio_buffer;
+		opts.target_video_buffer_time = video_buffer;
 		realtime = opts.realtime;
+		target_realtime_delay = target;
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 			throw std::runtime_error("Failed to open file");
 
@@ -132,7 +137,7 @@ struct VideoPlayerApplication : Application, EventHandler
 			{
 				// Based on the video PTS.
 				// Aim for 100ms of buffering to absorb network jank.
-				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, 0.1);
+				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, target_realtime_delay);
 			}
 			else
 			{
@@ -263,7 +268,13 @@ struct VideoPlayerApplication : Application, EventHandler
 	bool need_acquire = false;
 	Vulkan::Program *blit = nullptr;
 	bool realtime = false;
+	double target_realtime_delay = 0.1;
 };
+
+static void print_help()
+{
+	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY]\n");
+}
 
 namespace Granite
 {
@@ -273,12 +284,51 @@ Application *application_create(int argc, char **argv)
 	Global::init(Global::MANAGER_FEATURE_EVENT_BIT | Global::MANAGER_FEATURE_AUDIO_MIXER_BIT |
 	             Global::MANAGER_FEATURE_THREAD_GROUP_BIT, 4);
 
-	if (argc != 2)
+	float video_buffer = 0.5f;
+	float audio_buffer = 0.5f;
+	float target_delay = 0.1f;
+	const char *path = nullptr;
+
+	Util::CLICallbacks cbs;
+	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
+	cbs.add("--video-buffer", [&](Util::CLIParser &parser) { video_buffer = float(parser.next_double()); });
+	cbs.add("--audio-buffer", [&](Util::CLIParser &parser) { audio_buffer = float(parser.next_double()); });
+	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
+	cbs.default_handler = [&](const char *path_) { path = path_; };
+	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
+
+	if (!parser.parse())
+	{
+		print_help();
 		return nullptr;
+	}
+	else if (parser.is_ended_state())
+	{
+		print_help();
+		exit(EXIT_SUCCESS);
+	}
+	else if (!path)
+	{
+		LOGI("Path required.\n");
+		print_help();
+		return nullptr;
+	}
+
+	if (video_buffer < target_delay * 2.0f)
+	{
+		LOGW("Video buffer (%.3f) is less than twice the target delay (%.3f), expect jank!\n",
+			 video_buffer, target_delay);
+	}
+
+	if (audio_buffer < target_delay * 2.0f)
+	{
+		LOGW("Audio buffer (%.3f) is less than twice the target delay (%.3f), expect jank!\n",
+		     audio_buffer, target_delay);
+	}
 
 	try
 	{
-		auto *app = new VideoPlayerApplication(argv[1]);
+		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay);
 		return app;
 	}
 	catch (const std::exception &e)
