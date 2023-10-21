@@ -41,6 +41,8 @@ if (NOT PYROFLING_LAYER_ONLY)
     set(GRANITE_AUDIO ON CACHE BOOL "" FORCE)
 endif()
 
+add_library(granite-application-interface-query STATIC pyrofling_app_query.cpp)
+
 add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
 if (NOT PYROFLING_LAYER_ONLY)

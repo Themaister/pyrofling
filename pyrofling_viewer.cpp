@@ -27,6 +27,7 @@
 #include "slangmosh_decode_iface.hpp"
 #include "slangmosh_decode.hpp"
 #include "slangmosh_blit.hpp"
+#include "global_managers_init.hpp"
 #include <cmath>
 
 using namespace Granite;
@@ -41,6 +42,12 @@ struct VideoPlayerApplication : Application, EventHandler
 		realtime = opts.realtime;
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 			throw std::runtime_error("Failed to open file");
+
+		float desired_audio_rate = -1.0f;
+		if (!realtime) // We don't add a resampler ourselves, so aim for whatever sampling rate the file has.
+			desired_audio_rate = decoder.get_audio_sample_rate();
+
+		Global::init(Global::MANAGER_FEATURE_AUDIO_BACKEND_BIT, 0, desired_audio_rate);
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
 		                             on_module_created, on_module_destroyed,
@@ -262,7 +269,9 @@ namespace Granite
 {
 Application *application_create(int argc, char **argv)
 {
-	GRANITE_APPLICATION_SETUP_FILESYSTEM();
+	application_dummy();
+	Global::init(Global::MANAGER_FEATURE_EVENT_BIT | Global::MANAGER_FEATURE_AUDIO_MIXER_BIT |
+	             Global::MANAGER_FEATURE_THREAD_GROUP_BIT, 4);
 
 	if (argc != 2)
 		return nullptr;
