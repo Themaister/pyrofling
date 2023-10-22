@@ -55,7 +55,7 @@ if (NOT PYROFLING_LAYER_ONLY)
         install(TARGETS pyrofling)
     endif()
 
-    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
+    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp tcp_socket.cpp tcp_socket.hpp)
     target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio)
     install(TARGETS pyrofling-viewer)
 endif()

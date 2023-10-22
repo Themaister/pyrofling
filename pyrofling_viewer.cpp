@@ -28,7 +28,9 @@
 #include "slangmosh_decode.hpp"
 #include "slangmosh_blit.hpp"
 #include "global_managers_init.hpp"
+#include "tcp_socket.hpp"
 #include "cli_parser.hpp"
+#include "string_helpers.hpp"
 #include <cmath>
 
 using namespace Granite;
@@ -45,6 +47,21 @@ struct VideoPlayerApplication : Application, EventHandler
 		opts.target_video_buffer_time = video_buffer;
 		realtime = opts.realtime;
 		target_realtime_delay = target;
+
+		if (strncmp(video_path, "pyro://", 7) == 0)
+		{
+			auto split = Util::split(video_path + 7, ":");
+			if (split.size() != 2)
+				throw std::runtime_error("Must specify both IP and port.");
+			LOGI("Connecting to raw pyrofling %s:%s.\n",
+			     split[0].c_str(), split[1].c_str());
+			if (!reader.connect(split[0].c_str(), split[1].c_str()))
+				throw std::runtime_error("Failed to connect to server.");
+
+			decoder.set_io_interface(&reader);
+			video_path = nullptr;
+		}
+
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 			throw std::runtime_error("Failed to open file");
 
@@ -57,6 +74,9 @@ struct VideoPlayerApplication : Application, EventHandler
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
+
+		if (target_realtime_delay <= 0.0)
+			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
 	}
 
 	std::string get_name() override
@@ -92,9 +112,8 @@ struct VideoPlayerApplication : Application, EventHandler
 
 	bool update(Vulkan::Device &device, double elapsed_time)
 	{
-#if 0
 		// Most aggressive method, not all that great for pacing ...
-		if (realtime)
+		if (realtime && target_realtime_delay <= 0.0)
 		{
 			bool had_acquire = false;
 			// Always pick the most recent video frame we have.
@@ -127,7 +146,6 @@ struct VideoPlayerApplication : Application, EventHandler
 			decoder.latch_audio_presentation_target(frame.pts - 0.02);
 		}
 		else
-#endif
 		{
 			// Synchronize based on audio. Prioritize smoothness over latency.
 
@@ -263,6 +281,7 @@ struct VideoPlayerApplication : Application, EventHandler
 		device.submit(cmd, nullptr, 1, &frame.sem);
 	}
 
+	PyroFling::TCPReader reader;
 	VideoDecoder decoder;
 	VideoFrame frame, next_frame;
 	bool need_acquire = false;

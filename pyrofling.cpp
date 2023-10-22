@@ -397,6 +397,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			img.target_period = present.wire.period;
 			img.target_timestamp = compute_next_target_timestamp();
 			img.present_id = present.wire.id;
+			img.pts = Util::get_current_time_nsecs() / 1000;
 			img.state = State::PresentQueued;
 
 			auto cmd = device.request_command_buffer(cmd_type);
@@ -651,6 +652,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			uint64_t target_timestamp = 0;
 			uint32_t target_period = 0;
 			uint64_t present_id = 0;
+			int64_t pts = 0;
 			State state = State::ClientOwned;
 
 			struct Deleter { void operator()(uint8_t *ptr) { Util::memalign_free(ptr); }};
