@@ -45,6 +45,7 @@ struct VideoPlayerApplication : Application, EventHandler
 		opts.realtime = strstr(video_path, "://") != nullptr;
 		opts.target_realtime_audio_buffer_time = audio_buffer;
 		opts.target_video_buffer_time = video_buffer;
+		opts.blocking = true;
 		realtime = opts.realtime;
 		target_realtime_delay = target;
 
