@@ -991,6 +991,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		unsigned audio_rate = 44100;
 		float gop_seconds = 2.0f;
 		bool low_latency = false;
+		bool audio = true;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1066,7 +1067,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.realtime_options.threads = video_encode.threads;
 			options.realtime_options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
 
-			audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
+			if (video_encode.audio)
+				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
+
 			encoder->set_audio_record_stream(audio_record.get());
 			if (video_encode.path.empty())
 				encoder->set_mux_stream_callback(this);
@@ -1079,7 +1082,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				for (auto &pipe : pipeline)
 					pipe = encoder->create_ycbcr_pipeline(bank);
 
-				if (!audio_record->start())
+				if (audio_record && !audio_record->start())
 				{
 					LOGE("Failed to initialize audio recorder.\n");
 					encoder.reset();
@@ -1201,6 +1204,7 @@ static void print_help()
 	     "\t[--tcp PORT]\n"
 	     "\t[--audio-rate RATE]\n"
 	     "\t[--low-latency]\n"
+	     "\t[--no-audio]\n"
 		 "\turl\n");
 }
 
@@ -1237,6 +1241,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--tcp", [&](Util::CLIParser &parser) { tcp_port = parser.next_string(); });
 	cbs.add("--audio-rate", [&](Util::CLIParser &parser) { opts.audio_rate = parser.next_uint(); });
 	cbs.add("--low-latency", [&](Util::CLIParser &) { opts.low_latency = true; });
+	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
