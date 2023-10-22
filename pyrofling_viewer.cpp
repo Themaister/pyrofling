@@ -40,6 +40,8 @@ struct VideoPlayerApplication : Application, EventHandler
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer, float audio_buffer, float target)
 	{
+		get_wsi().set_low_latency_mode(true);
+
 		VideoDecoder::DecodeOptions opts;
 		// Crude :)
 		opts.realtime = strstr(video_path, "://") != nullptr;
