@@ -127,6 +127,11 @@ struct Instance
 		return forceMailbox;
 	}
 
+	unsigned forcesNumImages() const
+	{
+		return forceImages;
+	}
+
 	void unregisterSurface(VkSurfaceKHR surface);
 	SurfaceState *registerSurface(VkSurfaceKHR surface);
 	void unregisterDevice(Device *device);
@@ -139,6 +144,7 @@ struct Instance
 	std::string applicationName;
 	std::string engineName;
 	bool forceMailbox = false;
+	unsigned forceImages = 0;
 
 	std::mutex surfaceLock;
 	std::unordered_map<VkSurfaceKHR, std::unique_ptr<SurfaceState>> surfaces;
@@ -203,6 +209,10 @@ void Instance::init(VkInstance instance_, const VkApplicationInfo *pApplicationI
 	const char *env = getenv("PYROFLING_FORCE_MAILBOX");
 	if (env)
 		forceMailbox = strtoul(env, nullptr, 0) != 0;
+
+	env = getenv("PYROFLING_IMAGES");
+	if (env)
+		forceImages = strtoul(env, nullptr, 0);
 }
 
 struct Device
@@ -846,9 +856,11 @@ void SurfaceState::setActiveDeviceAndSwapchain(Device *device_, const VkSwapchai
 		freeImage(img);
 	image.clear();
 
-	// Add a bit more latency for good measure to absorb any encode jank ...
-	// Display latency is unaffected.
-	if (!initImageGroup(4))
+	unsigned forced = instance->forcesNumImages();
+	if (forced < 2)
+		forced = 3;
+
+	if (!initImageGroup(forced))
 		client.reset();
 
 	if (client && !sendImageGroup())

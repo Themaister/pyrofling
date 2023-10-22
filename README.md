@@ -53,6 +53,10 @@ the display will then end up locking to the heartbeat of the server elegantly.
 If this environment variable is set however, the heartbeat from server is ignored and rendering will lock to
 local display refresh rate, meaning the encoded output will be somewhat more jittery.
 
+### `PYROFLING_IMAGES=n`
+
+Forces a certain swap chain depth between client and server. Used to improve latency in real-time scenarios.
+
 ## Server
 
 ```
