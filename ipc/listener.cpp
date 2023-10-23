@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <netinet/tcp.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
 
@@ -90,12 +91,13 @@ const FileHandle &Listener::get_file_handle() const
 	return fd;
 }
 
-TCPListener::TCPListener(const char *port)
+IPListener::IPListener(Proto proto, const char *port)
 {
 	addrinfo hints = {};
 	addrinfo *res = nullptr;
 	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_socktype = proto == Proto::TCP ? SOCK_STREAM : SOCK_DGRAM;
+	hints.ai_protocol = proto == Proto::TCP ? IPPROTO_TCP : IPPROTO_UDP;
 	hints.ai_flags = AI_PASSIVE;
 	if (getaddrinfo(nullptr, port, &hints, &res) < 0 || !res)
 		throw std::runtime_error("Failed to call getaddrinfo.");
@@ -120,9 +122,37 @@ TCPListener::TCPListener(const char *port)
 
 	if (bind(fd.get_native_handle(), res->ai_addr, res->ai_addrlen) < 0)
 		throw std::runtime_error("Failed to bind.");
+
+	if (proto == Proto::UDP)
+	{
+		// Keep the sndbuf healthy so we don't block in steady case.
+		int size = 1024 * 1024;
+		if (setsockopt(fd.get_native_handle(), SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
+			throw std::runtime_error("Failed to set reuseaddr.");
+
+		// Non-blocking as well to avoid stalling encoder.
+		fcntl(fd.get_native_handle(), F_SETFL, fcntl(fd.get_native_handle(), F_GETFL) | O_NONBLOCK);
+	}
 }
 
-const FileHandle &TCPListener::get_file_handle() const
+int IPListener::read_udp_datagram(RemoteAddress &remote, void *data, unsigned size)
+{
+	remote.addr_size = sizeof(remote.addr);
+	ssize_t ret = ::recvfrom(fd.get_native_handle(), data, size, 0,
+	                         reinterpret_cast<sockaddr *>(&remote.addr), &remote.addr_size);
+	return int(ret);
+}
+
+TCPConnection IPListener::accept_tcp_connection()
+{
+	TCPConnection conn;
+	conn.addr.addr_size = sizeof(conn.addr.addr);
+	conn.fd = FileHandle{::accept(fd.get_native_handle(),
+	                              reinterpret_cast<sockaddr *>(&conn.addr.addr), &conn.addr.addr_size)};
+	return conn;
+}
+
+const FileHandle &IPListener::get_file_handle() const
 {
 	return fd;
 }
@@ -134,26 +164,9 @@ FileHandle Dispatcher::accept_connection()
 	return fd;
 }
 
-FileHandle Dispatcher::accept_tcp_connection()
+TCPConnection Dispatcher::accept_tcp_connection()
 {
-	FileHandle fd{::accept(tcp_listener.get_file_handle().get_native_handle(), nullptr, nullptr)};
-	if (fd)
-	{
-#if 0
-		int yes = 1;
-		if (setsockopt(fd.get_native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)) < 0)
-			throw std::runtime_error("Failed to set TCP_NODELAY.");
-#endif
-
-		// Keep the sndbuf healthy so we don't block in steady case.
-		int size = 1024 * 1024;
-		if (setsockopt(fd.get_native_handle(), SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
-			throw std::runtime_error("Failed to set reuseaddr.");
-
-		// We'll only dump data here.
-		shutdown(fd.get_native_handle(), SHUT_RD);
-	}
-	return fd;
+	return tcp_listener.accept_tcp_connection();
 }
 
 void Dispatcher::set_handler_factory_interface(HandlerFactoryInterface *iface_)
@@ -217,6 +230,26 @@ bool Dispatcher::iterate()
 	return ret;
 }
 
+int Dispatcher::write_udp_datagram(const RemoteAddress &addr,
+                                   const void *header, unsigned header_size,
+                                   const void *data, unsigned size)
+{
+	struct msghdr msg = {};
+	msg.msg_name = const_cast<sockaddr_storage *>(&addr.addr);
+	msg.msg_namelen = addr.addr_size;
+
+	struct iovec iv[2] = {};
+	msg.msg_iov = iv;
+	msg.msg_iovlen = 2;
+
+	iv[0].iov_base = const_cast<void *>(header);
+	iv[0].iov_len = header_size;
+	iv[1].iov_base = const_cast<void *>(data);
+	iv[1].iov_len = size;
+
+	return int(::sendmsg(udp_listener.get_file_handle().get_native_handle(), &msg, 0));
+}
+
 bool Dispatcher::iterate_inner()
 {
 	if (!pollfd)
@@ -230,30 +263,47 @@ bool Dispatcher::iterate_inner()
 	for (int i = 0; i < count; i++)
 	{
 		auto &e = events[i];
-		if (e.data.ptr == &listener || e.data.ptr == &tcp_listener)
+		if (e.data.ptr == &udp_listener)
 		{
-			auto fd = e.data.ptr == &tcp_listener ? accept_tcp_connection() : accept_connection();
-			if (fd)
-			{
-				if (e.data.ptr == &listener)
-				{
-					auto c = std::make_unique<Connection>();
-					c->fd = std::move(fd);
+			// 64k is UDP limit.
+			uint8_t buffer[64 * 1024];
+			RemoteAddress remote;
 
-					struct epoll_event ev = {};
-					ev.data.ptr = c.get();
-					ev.events = EPOLLIN;
-					if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD,
-					              c->fd.get_native_handle(), &ev) == 0)
-					{
-						connections.push_back(std::move(c));
-					}
-				}
-				else if (iface)
+			int ret = udp_listener.read_udp_datagram(remote, buffer, sizeof(buffer));
+			if (ret > 0 && iface)
+				iface->handle_udp_datagram(*this, remote, buffer, ret);
+		}
+		else if (e.data.ptr == &listener || e.data.ptr == &tcp_listener)
+		{
+			TCPConnection tcp;
+			FileHandle domain;
+
+			if (e.data.ptr == &tcp_listener)
+				tcp = accept_tcp_connection();
+			else
+				domain = accept_connection();
+
+			auto c = std::make_unique<Connection>();
+
+			if (tcp.fd)
+			{
+				c->fd = std::move(tcp.fd);
+				c->remote = tcp.addr;
+			}
+			else if (domain)
+			{
+				c->fd = std::move(domain);
+			}
+
+			if (c->fd)
+			{
+				struct epoll_event ev = {};
+				ev.data.ptr = c.get();
+				ev.events = EPOLLIN;
+				if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD,
+				              c->fd.get_native_handle(), &ev) == 0)
 				{
-					// We just dump data to TCP directly, don't listen for messages.
-					// Just forward it to interface and forget about it.
-					iface->add_stream_socket(std::move(fd));
+					connections.push_back(std::move(c));
 				}
 			}
 		}
@@ -268,7 +318,12 @@ bool Dispatcher::iterate_inner()
 			}
 			else if (!conn->handler)
 			{
-				bool ret = iface && iface->register_handler(*this, conn->fd, conn->handler);
+				bool ret;
+				if (conn->remote)
+					ret = iface && iface->register_tcp_handler(*this, conn->fd, conn->remote, conn->handler);
+				else
+					ret = iface && iface->register_handler(*this, conn->fd, conn->handler);
+
 				if (!ret)
 					hangup = true;
 			}
@@ -396,7 +451,7 @@ void Dispatcher::kill()
 		(void)::write(event_handle->get_native_handle(), &value, sizeof(value));
 }
 
-Dispatcher::Dispatcher(const char *name, const char *port)
+Dispatcher::Dispatcher(const char *name, const char *listen_port)
 	: listener(name)
 {
 	if (::listen(listener.get_file_handle().get_native_handle(), 16) < 0)
@@ -415,10 +470,13 @@ Dispatcher::Dispatcher(const char *name, const char *port)
 	if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD, listener.get_file_handle().get_native_handle(), &e) < 0)
 		throw std::runtime_error("Failed to add to epoll.");
 
-	if (port)
-		tcp_listener = TCPListener{port};
+	if (listen_port)
+	{
+		tcp_listener = IPListener{IPListener::Proto::TCP, listen_port};
+		udp_listener = IPListener{IPListener::Proto::UDP, listen_port};
+	}
 
-	if (tcp_listener.get_file_handle())
+	if (tcp_listener.get_file_handle() && udp_listener.get_file_handle())
 	{
 		if (::listen(tcp_listener.get_file_handle().get_native_handle(), 4) < 0)
 			throw std::runtime_error("Failed to listen.");
@@ -427,10 +485,28 @@ Dispatcher::Dispatcher(const char *name, const char *port)
 		e.events = EPOLLIN;
 		if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD, tcp_listener.get_file_handle().get_native_handle(), &e) < 0)
 			throw std::runtime_error("Failed to add to epoll.");
+
+		e.data.ptr = &udp_listener;
+		e.events = EPOLLIN;
+		if (epoll_ctl(pollfd.get_native_handle(), EPOLL_CTL_ADD, udp_listener.get_file_handle().get_native_handle(), &e) < 0)
+			throw std::runtime_error("Failed to add to epoll.");
 	}
+	else if (listen_port)
+		throw std::runtime_error("Failed to set up TCP and UDP listeners.");
 }
 
-void HandlerFactoryInterface::add_stream_socket(PyroFling::FileHandle)
+RemoteAddress::operator bool() const
 {
+	return addr_size != 0;
+}
+
+bool RemoteAddress::operator==(const PyroFling::RemoteAddress &other) const
+{
+	return addr_size == other.addr_size && memcmp(&addr, &other.addr, addr_size) == 0;
+}
+
+bool RemoteAddress::operator!=(const PyroFling::RemoteAddress &other) const
+{
+	return !(*this == other);
 }
 }

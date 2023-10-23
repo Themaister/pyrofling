@@ -28,15 +28,20 @@
 #include "slangmosh_decode.hpp"
 #include "slangmosh_blit.hpp"
 #include "global_managers_init.hpp"
-#include "tcp_socket.hpp"
+#include "simple_socket.hpp"
 #include "cli_parser.hpp"
 #include "string_helpers.hpp"
 #include <cmath>
 
 using namespace Granite;
 
-struct VideoPlayerApplication : Application, EventHandler
+struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 {
+	bool read(void *data, size_t size) override
+	{
+		return udp.read(data, size);
+	}
+
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer, float audio_buffer, float target)
 	{
@@ -58,10 +63,12 @@ struct VideoPlayerApplication : Application, EventHandler
 				throw std::runtime_error("Must specify both IP and port.");
 			LOGI("Connecting to raw pyrofling %s:%s.\n",
 			     split[0].c_str(), split[1].c_str());
-			if (!reader.connect(split[0].c_str(), split[1].c_str()))
-				throw std::runtime_error("Failed to connect to server.");
+			if (!tcp.connect(PyroFling::Socket::Proto::TCP, split[0].c_str(), split[1].c_str()))
+				throw std::runtime_error("Failed to connect to server (TCP).");
+			if (!udp.connect(PyroFling::Socket::Proto::UDP, split[0].c_str(), split[1].c_str()))
+				throw std::runtime_error("Failed to connect to server (UDP).");
 
-			decoder.set_io_interface(&reader);
+			decoder.set_io_interface(this);
 			video_path = nullptr;
 		}
 
@@ -284,7 +291,7 @@ struct VideoPlayerApplication : Application, EventHandler
 		device.submit(cmd, nullptr, 1, &frame.sem);
 	}
 
-	PyroFling::TCPReader reader;
+	PyroFling::Socket tcp, udp;
 	VideoDecoder decoder;
 	VideoFrame frame, next_frame;
 	bool need_acquire = false;

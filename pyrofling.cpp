@@ -857,12 +857,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		return true;
 	}
 
-	void add_stream_socket(FileHandle tcp_fd) override
-	{
-		std::lock_guard<std::mutex> holder{tcp_fd_lock};
-		new_tcp_fds.push_back(std::move(tcp_fd));
-	}
-
 	bool register_handler(Dispatcher &dispatcher_, const FileHandle &fd, Handler *&handler) override
 	{
 		auto msg = parse_message(fd);

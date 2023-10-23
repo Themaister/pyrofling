@@ -150,6 +150,15 @@ bool send_stream_message(const FileHandle &fd, const void *data_, size_t size)
 	return true;
 }
 
+size_t receive_stream_message(const FileHandle &fd, void *data_, size_t size)
+{
+	auto *data = static_cast<uint8_t *>(data_);
+	ssize_t ret = ::recv(fd.get_native_handle(), data, size, 0);
+	if (ret <= 0)
+		return 0;
+	return size_t(ret);
+}
+
 template <typename T>
 static inline std::unique_ptr<Message> create_single_file_handle_message(const RawMessagePayload &payload,
 																		 std::vector<FileHandle> handles)

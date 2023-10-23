@@ -45,6 +45,10 @@ add_library(granite-application-interface-query STATIC pyrofling_app_query.cpp)
 
 add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
+add_library(pyrofling-socket simple_socket.cpp simple_socket.hpp)
+target_include_directories(pyrofling-socket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(pyrofling-socket PRIVATE ${PYROFLING_CXX_FLAGS})
+
 if (NOT PYROFLING_LAYER_ONLY)
     if (NOT WIN32)
         add_subdirectory(examples)
@@ -55,8 +59,8 @@ if (NOT PYROFLING_LAYER_ONLY)
         install(TARGETS pyrofling)
     endif()
 
-    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp tcp_socket.cpp tcp_socket.hpp)
-    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio)
+    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
+    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio pyrofling-socket)
     install(TARGETS pyrofling-viewer)
     if (WIN32)
             target_link_libraries(pyrofling-viewer PRIVATE ws2_32)
