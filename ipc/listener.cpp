@@ -366,6 +366,8 @@ bool Dispatcher::iterate_inner()
 
 		if (cancel->handler && cancel->handler->is_sentinel_file_handle())
 			is_sentinel = true;
+
+		cancel.reset();
 	}
 
 	cancellations.clear();

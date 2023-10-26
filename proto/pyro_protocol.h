@@ -43,6 +43,12 @@ struct pyro_codec_parameters
 	uint32_t rate;
 };
 
+struct pyro_progress_report
+{
+	uint64_t total_received_packets;
+	uint64_t total_dropped_packets;
+};
+
 #define PYRO_MAX_UDP_DATAGRAM_SIZE (PYRO_MAX_PAYLOAD_SIZE + sizeof(struct pyro_codec_parameters))
 
 // TCP: Server to client
@@ -60,7 +66,9 @@ typedef enum pyro_message_type
 	// Sent by client: Replies: CODEC_PARAMETERS if UDP cookie was received, NAK if not yet received or invalid.
 	// AGAIN is sent if UDP client is acknowledged, but stream is not ready yet (i.e. codec parameters are not known yet).
 	PYRO_MESSAGE_KICK = PYRO_MAKE_MESSAGE_TYPE(5, 0),
-	PYRO_MESSAGE_CODEC_PARAMETERS = PYRO_MAKE_MESSAGE_TYPE(6, sizeof(struct pyro_codec_parameters)),
+	// Returns nothing. Must be received by server every 5 seconds or connection is dropped.
+	PYRO_MESSAGE_PROGRESS = PYRO_MAKE_MESSAGE_TYPE(6, sizeof(struct pyro_progress_report)),
+	PYRO_MESSAGE_CODEC_PARAMETERS = PYRO_MAKE_MESSAGE_TYPE(7, sizeof(struct pyro_codec_parameters)),
 	PYRO_MESSAGE_MAX_INT = INT32_MAX,
 } pyro_message_type;
 
@@ -69,11 +77,6 @@ typedef enum pyro_message_type
 static inline bool pyro_message_validate_magic(uint32_t v)
 {
 	return PYRO_MAKE_MESSAGE_TYPE(0, 0) == (v & PYRO_MESSAGE_MAGIC_MASK);
-}
-
-static inline pyro_message_type pyro_message_get_type(uint32_t v)
-{
-	return (pyro_message_type)(v & ((1 << 6) - 1));
 }
 
 static inline uint32_t pyro_message_get_length(uint32_t v)
@@ -94,6 +97,38 @@ enum pyro_payload_flag_bits
 	PYRO_PAYLOAD_SUBPACKET_SEQ_BITS = 14,
 };
 typedef uint32_t pyro_payload_flags;
+
+#define PYRO_PAYLOAD_PACKET_SEQ_MASK ((1 << PYRO_PAYLOAD_PACKET_SEQ_BITS) - 1)
+#define PYRO_PAYLOAD_SUBPACKET_SEQ_MASK ((1 << PYRO_PAYLOAD_SUBPACKET_SEQ_BITS) - 1)
+
+static inline uint32_t pyro_payload_get_packet_seq(pyro_payload_flags flags)
+{
+	return (flags >> PYRO_PAYLOAD_PACKET_SEQ_OFFSET) & PYRO_PAYLOAD_PACKET_SEQ_MASK;
+}
+
+static inline uint32_t pyro_payload_get_subpacket_seq(pyro_payload_flags flags)
+{
+	return (flags >> PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET) & PYRO_PAYLOAD_SUBPACKET_SEQ_MASK;
+}
+
+static inline int pyro_payload_get_seq_delta(uint32_t a, uint32_t b, uint32_t mask)
+{
+	uint32_t d = (a - b) & mask;
+	if (d <= (mask >> 1))
+		return int(d);
+	else
+		return int(d) - int(mask + 1);
+}
+
+static inline int pyro_payload_get_packet_seq_delta(uint32_t a, uint32_t b)
+{
+	return pyro_payload_get_seq_delta(a, b, PYRO_PAYLOAD_PACKET_SEQ_MASK);
+}
+
+static inline int pyro_payload_get_subpacket_seq_delta(uint32_t a, uint32_t b)
+{
+	return pyro_payload_get_seq_delta(a, b, PYRO_PAYLOAD_SUBPACKET_SEQ_MASK);
+}
 
 struct pyro_payload_header
 {
