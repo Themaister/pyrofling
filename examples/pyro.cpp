@@ -142,6 +142,8 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t)
 	if (!ret)
 		return false;
 
+	tcp_length += ret;
+
 	while (tcp_length && tcp_length >= sizeof(pyro_message_type) &&
 	       tcp_length + sizeof(pyro_message_type) >= pyro_message_get_length(tcp.type))
 	{
@@ -184,6 +186,8 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t)
 				if (!send_stream_message(fd, &type, sizeof(type)))
 					return false;
 			}
+
+			kicked = true;
 			break;
 
 		default:
