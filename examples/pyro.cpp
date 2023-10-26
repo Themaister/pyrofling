@@ -10,144 +10,288 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
-using namespace PyroFling;
+#include "pyro_protocol.h"
 
-struct Server : HandlerFactoryInterface
+class PyroStreamConnection;
+
+class PyroStreamConnectionCancelInterface
 {
-	struct Connection : Handler
+public:
+	virtual ~PyroStreamConnectionCancelInterface() = default;
+	virtual void release_connection(PyroStreamConnection *conn) = 0;
+};
+
+class PyroStreamConnection : public PyroFling::Handler
+{
+public:
+	PyroStreamConnection(PyroFling::Dispatcher &dispatcher, PyroStreamConnectionCancelInterface &server,
+	                     const PyroFling::RemoteAddress &tcp_remote, uint64_t cookie);
+	void set_codec_parameters(const pyro_codec_parameters &parameters);
+
+	bool handle(const PyroFling::FileHandle &fd, uint32_t) override;
+	void release_id(uint32_t) override;
+
+	void write_video_packet(int64_t pts, int64_t dts, const void *data, size_t size, bool is_key_frame);
+	void write_audio_packet(int64_t pts, int64_t dts, const void *data, size_t size);
+
+	void handle_udp_datagram(PyroFling::Dispatcher &dispatcher,
+	                         const PyroFling::RemoteAddress &remote,
+	                         const void *msg, size_t size);
+
+private:
+	PyroStreamConnectionCancelInterface &server;
+	PyroFling::RemoteAddress tcp_remote;
+	PyroFling::RemoteAddress udp_remote;
+
+	uint64_t cookie;
+	uint32_t packet_seq_video = 0;
+	uint32_t packet_seq_audio = 0;
+
+	union
 	{
-		explicit Connection(Dispatcher &dispatcher_, Server &server_) : Handler(dispatcher_), server(server_) {}
-		Server &server;
-		RemoteAddress tcp_remote;
-		RemoteAddress udp_remote;
-		uint64_t cookie = 0;
-		uint64_t client_cookie = 0;
+		pyro_message_type type;
+		unsigned char buffer[PYRO_MAX_MESSAGE_BUFFER_LENGTH];
+	} tcp;
+	uint32_t tcp_length = 0;
 
-		std::string tcp_receive_buffer;
+	pyro_codec_parameters codec = {};
+	bool kicked = false;
 
-		bool handle(const FileHandle &fd, uint32_t) override
-		{
-			char buffer[8];
+	void write_packet(int64_t pts, int64_t dts, const void *data_, size_t size, bool is_audio, bool is_key_frame);
+};
 
-			if (tcp_receive_buffer.size() >= 8)
-				return false;
-
-			size_t ret = receive_stream_message(fd, buffer, sizeof(buffer) - tcp_receive_buffer.size());
-			if (!ret)
-				return false;
-
-			tcp_receive_buffer.insert(tcp_receive_buffer.end(), buffer, buffer + ret);
-			size_t n;
-
-			while ((n = tcp_receive_buffer.find_first_of('\n')) != std::string::npos)
-			{
-				auto cmd = tcp_receive_buffer.substr(0, n);
-				tcp_receive_buffer = tcp_receive_buffer.substr(n + 1);
-
-				if (cmd == "PYRO1")
-				{
-					if (!send_stream_message(fd, &cookie, sizeof(cookie)))
-						return false;
-				}
-				else if (cmd == "COOKIE")
-				{
-					if (!send_stream_message(fd, &client_cookie, sizeof(client_cookie)))
-						return false;
-				}
-				else
-					return false;
-			}
-
-			return true;
-		}
-
-		void release_id(uint32_t) override
-		{
-			std::lock_guard<std::mutex> holder{server.lock};
-			auto itr = std::find_if(server.connections.begin(), server.connections.end(),
-			                        [this](const std::unique_ptr<Connection> &ptr) {
-				                        return ptr.get() == this;
-			                        });
-			if (itr != server.connections.end())
-				server.connections.erase(itr);
-		}
-
-		void write_udp(const void *data, size_t size)
-		{
-			if (udp_remote)
-				dispatcher.write_udp_datagram(udp_remote, "HEADER", 6, data, size);
-		}
-	};
-
-	bool register_handler(Dispatcher &, const FileHandle &, Handler *&) override
+struct Server : PyroFling::HandlerFactoryInterface, PyroStreamConnectionCancelInterface
+{
+	bool register_handler(PyroFling::Dispatcher &, const PyroFling::FileHandle &, PyroFling::Handler *&) override
 	{
 		return false;
 	}
 
-	bool register_tcp_handler(Dispatcher &dispatcher, const FileHandle &, const RemoteAddress &remote,
-	                          Handler *&handler) override
+	bool register_tcp_handler(PyroFling::Dispatcher &dispatcher, const PyroFling::FileHandle &,
+	                          const PyroFling::RemoteAddress &remote,
+	                          PyroFling::Handler *&handler) override
 	{
-		{
-			char host[64] = {};
-			char serv[64] = {};
-			getnameinfo(reinterpret_cast<const sockaddr *>(&remote.addr), remote.addr_size,
-			            host, sizeof(host), serv, sizeof(serv), NI_DGRAM);
-
-			fprintf(stderr, "TCP: Host: \"%s\", Serv: \"%s\"\n", host, serv);
-		}
-
-		auto conn = std::make_unique<Connection>(dispatcher, *this);
-		conn->tcp_remote = remote;
-		conn->cookie = ++cookie;
+		auto conn = std::make_unique<PyroStreamConnection>(dispatcher, *this, remote, ++cookie);
 		handler = conn.get();
 		std::lock_guard<std::mutex> holder{lock};
 		connections.push_back(std::move(conn));
 		return true;
 	}
 
-	void write_udp(const void *data, size_t size)
+	void write_video_packet(int64_t pts, int64_t dts, const void *data, size_t size, bool is_key_frame)
 	{
 		std::lock_guard<std::mutex> holder{lock};
 		for (auto &conn : connections)
-			conn->write_udp(data, size);
+			conn->write_video_packet(pts, dts, data, size, is_key_frame);
 	}
 
-	void handle_udp_datagram(Dispatcher &, const RemoteAddress &remote,
+	void write_audio_packet(int64_t pts, int64_t dts, const void *data, size_t size)
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		for (auto &conn : connections)
+			conn->write_audio_packet(pts, dts, data, size);
+	}
+
+	void handle_udp_datagram(PyroFling::Dispatcher &dispatcher, const PyroFling::RemoteAddress &remote,
 	                         const void *msg, unsigned size) override
 	{
-		if (size == 2 * sizeof(uint64_t))
-		{
-			uint64_t c[2];
-			memcpy(c, msg, sizeof(c));
+		for (auto &conn : connections)
+			conn->handle_udp_datagram(dispatcher, remote, msg, size);
+	}
 
-			char host[64] = {};
-			char serv[64] = {};
-			getnameinfo(reinterpret_cast<const sockaddr *>(&remote.addr), remote.addr_size,
-						host, sizeof(host), serv, sizeof(serv), NI_DGRAM);
-
-			fprintf(stderr, "Host: \"%s\", Serv: \"%s\"\n", host, serv);
-
-			for (auto &conn : connections)
-			{
-				if (conn->cookie == c[0] && !conn->udp_remote)
-				{
-					conn->udp_remote = remote;
-					conn->client_cookie = c[1];
-					break;
-				}
-			}
-		}
+	void release_connection(PyroStreamConnection *conn) override
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		auto itr = std::find_if(connections.begin(), connections.end(),
+		                        [conn](const std::unique_ptr<PyroStreamConnection> &ptr) {
+			                        return ptr.get() == conn;
+		                        });
+		if (itr != connections.end())
+			connections.erase(itr);
 	}
 
 	uint64_t cookie = 1000;
 	std::mutex lock;
-	std::vector<std::unique_ptr<Connection>> connections;
+	std::vector<std::unique_ptr<PyroStreamConnection>> connections;
 };
+
+PyroStreamConnection::PyroStreamConnection(
+		PyroFling::Dispatcher &dispatcher, PyroStreamConnectionCancelInterface &server_,
+		const PyroFling::RemoteAddress &remote, uint64_t cookie_)
+	: PyroFling::Handler(dispatcher)
+	, server(server_)
+	, tcp_remote(remote)
+	, cookie(cookie_)
+{
+	packet_seq_video = cookie & ((1 << PYRO_PAYLOAD_PACKET_SEQ_BITS) - 1);
+	packet_seq_audio = (~cookie) & ((1 << PYRO_PAYLOAD_PACKET_SEQ_BITS) - 1);
+}
+
+void PyroStreamConnection::set_codec_parameters(const pyro_codec_parameters &parameters)
+{
+	codec = parameters;
+}
+
+bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t)
+{
+	// We've exhausted the buffer.
+	if (tcp_length >= sizeof(tcp.buffer))
+		return false;
+
+	size_t ret = receive_stream_message(fd, tcp.buffer + tcp_length, sizeof(tcp.buffer) - tcp_length);
+	if (!ret)
+		return false;
+
+	while (tcp_length && tcp_length >= sizeof(pyro_message_type) &&
+	       tcp_length + sizeof(pyro_message_type) >= pyro_message_get_length(tcp.type))
+	{
+		if (!pyro_message_validate_magic(tcp.type))
+			return false;
+
+		switch (pyro_message_get_type(tcp.type))
+		{
+		case PYRO_MESSAGE_HELLO:
+		{
+			const pyro_message_type type = PYRO_MESSAGE_COOKIE;
+			if (!send_stream_message(fd, &type, sizeof(type)))
+				return false;
+			if (!send_stream_message(fd, &cookie, sizeof(cookie)))
+				return false;
+			break;
+		}
+
+		case PYRO_MESSAGE_KICK:
+			if (kicked)
+				return false;
+
+			if (udp_remote && codec.video_codec != PYRO_VIDEO_CODEC_NONE)
+			{
+				const pyro_message_type type = PYRO_MESSAGE_CODEC_PARAMETERS;
+				if (!send_stream_message(fd, &type, sizeof(type)))
+					return false;
+				if (!send_stream_message(fd, &codec, sizeof(codec)))
+					return false;
+			}
+			else if (udp_remote)
+			{
+				const pyro_message_type type = PYRO_MESSAGE_AGAIN;
+				if (!send_stream_message(fd, &type, sizeof(type)))
+					return false;
+			}
+			else
+			{
+				const pyro_message_type type = PYRO_MESSAGE_NAK;
+				if (!send_stream_message(fd, &type, sizeof(type)))
+					return false;
+			}
+			break;
+
+		default:
+			// Invalid message.
+			return false;
+		}
+
+		size_t move_len = pyro_message_get_length(tcp.type) + sizeof(pyro_message_type);
+		memmove(tcp.buffer, tcp.buffer + move_len, tcp_length - move_len);
+		tcp_length -= move_len;
+	}
+
+	return true;
+}
+
+void PyroStreamConnection::release_id(uint32_t)
+{
+	server.release_connection(this);
+}
+
+void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
+                                        const void *data_, size_t size,
+                                        bool is_audio, bool is_key_frame)
+{
+	if (!udp_remote || !kicked)
+		return;
+
+	auto &seq = is_audio ? packet_seq_audio : packet_seq_video;
+
+	pyro_payload_header header = {};
+	header.pts_lo = uint32_t(pts);
+	header.pts_hi = uint32_t(pts >> 32);
+	header.dts_delta = uint32_t(pts - dts);
+	header.encoded |= is_audio ? PYRO_PAYLOAD_STREAM_TYPE_BIT : 0;
+	header.encoded |= is_key_frame ? PYRO_PAYLOAD_KEY_FRAME_BIT : 0;
+	header.encoded |= seq << PYRO_PAYLOAD_PACKET_SEQ_OFFSET;
+	uint32_t subseq = seq ^ 0xaabb; // Start on something arbitrary.
+
+	auto *data = static_cast<const uint8_t *>(data_);
+	for (size_t i = 0; i < size; i += PYRO_MAX_PAYLOAD_SIZE, data += PYRO_MAX_PAYLOAD_SIZE)
+	{
+		header.encoded &= ~(PYRO_PAYLOAD_PACKET_BEGIN_BIT | PYRO_PAYLOAD_PACKET_DONE_BIT);
+		if (i == 0)
+			header.encoded |= PYRO_PAYLOAD_PACKET_BEGIN_BIT;
+		if (i + PYRO_MAX_PAYLOAD_SIZE >= size)
+			header.encoded |= PYRO_PAYLOAD_PACKET_DONE_BIT;
+
+		header.encoded &= ((1 << PYRO_PAYLOAD_SUBPACKET_SEQ_BITS) - 1) << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;
+		header.encoded |= subseq << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;
+
+		dispatcher.write_udp_datagram(udp_remote, &header, sizeof(header),
+		                              data, std::min<size_t>(PYRO_MAX_PAYLOAD_SIZE, size - i));
+
+		subseq = (subseq + 1) & ((1 << PYRO_PAYLOAD_SUBPACKET_SEQ_BITS) - 1);
+	}
+
+	seq = (seq + 1) & ((1 << PYRO_PAYLOAD_PACKET_SEQ_BITS) - 1);
+}
+
+void PyroStreamConnection::write_video_packet(int64_t pts, int64_t dts,
+                                              const void *data, size_t size, bool is_key_frame)
+{
+	write_packet(pts, dts, data, size, false, is_key_frame);
+}
+
+void PyroStreamConnection::write_audio_packet(int64_t pts, int64_t dts, const void *data, size_t size)
+{
+	write_packet(pts, dts, data, size, true, false);
+}
+
+void PyroStreamConnection::handle_udp_datagram(
+		PyroFling::Dispatcher &, const PyroFling::RemoteAddress &remote,
+		const void *msg_, size_t size)
+{
+	auto *msg = static_cast<const uint8_t *>(msg_);
+	if (size < sizeof(pyro_message_type))
+		return;
+
+	pyro_message_type type;
+	memcpy(&type, msg, sizeof(type));
+
+	if (!pyro_message_validate_magic(type))
+		return;
+	if (pyro_message_get_length(type) + sizeof(type) != size)
+		return;
+
+	msg += sizeof(type);
+
+	switch (pyro_message_get_type(type))
+	{
+	case PYRO_MESSAGE_COOKIE:
+	{
+		if (memcmp(msg, &cookie, sizeof(cookie)) == 0 && !udp_remote)
+			udp_remote = remote;
+		break;
+	}
+
+	default:
+		break;
+	}
+}
 
 int main()
 {
+	using namespace PyroFling;
 	Dispatcher::block_signals();
 	Server server;
+
 	Dispatcher dispatcher("/tmp/pyro", "8080");
 	dispatcher.set_handler_factory_interface(&server);
 	std::thread thr([&dispatcher]() { while (dispatcher.iterate()); });
@@ -155,71 +299,8 @@ int main()
 		for (unsigned i = 0; i < 64; i++)
 		{
 			std::this_thread::sleep_for(std::chrono::milliseconds(500));
-			server.write_udp(" OHAI", 5);
 		}
 	});
-
-	Socket tcp, udp, tcp2, udp2;
-	if (!tcp.connect(Socket::Proto::TCP, "localhost", "8080"))
-		return EXIT_FAILURE;
-	if (!udp.connect(Socket::Proto::UDP, "127.0.0.1", "8080"))
-		return EXIT_FAILURE;
-	if (!tcp2.connect(Socket::Proto::TCP, "localhost", "8080"))
-		return EXIT_FAILURE;
-	if (!udp2.connect(Socket::Proto::UDP, "127.0.0.1", "8080"))
-		return EXIT_FAILURE;
-
-	if (!tcp.write("PYRO1\n", 6))
-		return EXIT_FAILURE;
-	if (!tcp2.write("PYRO1\n", 6))
-		return EXIT_FAILURE;
-
-	uint64_t cookie[2];
-	if (!tcp.read(&cookie[0], sizeof(cookie[0])))
-		return EXIT_FAILURE;
-	if (!tcp2.read(&cookie[1], sizeof(cookie[1])))
-		return EXIT_FAILURE;
-
-	for (unsigned j = 0; j < 2; j++)
-	{
-		for (unsigned i = 0; i < 8; i++)
-		{
-			uint64_t cs[] = { cookie[j], 100 + j };
-			auto &u = j ? udp2 : udp;
-			auto &t = j ? tcp2 : tcp;
-			if (!u.write(cs, sizeof(cs)))
-				return EXIT_FAILURE;
-
-			if (!t.write("COOKIE\n", 7))
-				return EXIT_FAILURE;
-
-			uint64_t client_cookie;
-			if (!t.read(&client_cookie, sizeof(client_cookie)))
-				return EXIT_FAILURE;
-
-			if (client_cookie == cs[1])
-				break;
-			else if (client_cookie != 0)
-				return EXIT_FAILURE;
-		}
-	}
-
-	uint8_t buffer[1024];
-
-	for (;;)
-	{
-		size_t len = udp.read_partial(buffer, sizeof(buffer) - 1);
-		if (len == 0)
-			break;
-		buffer[len] = '\0';
-		fprintf(stderr, "Conn #1: Got reply: \"%s\"\n", buffer);
-
-		len = udp2.read_partial(buffer, sizeof(buffer) - 1);
-		if (len == 0)
-			break;
-		buffer[len] = '\0';
-		fprintf(stderr, "Conn #2: Got reply: \"%s\"\n", buffer);
-	}
 
 	dispatcher.kill();
 	sender.join();
