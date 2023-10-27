@@ -1,4 +1,5 @@
 #include "simple_socket.hpp"
+#include <stdio.h>
 
 #ifdef _WIN32
 #include <ws2tcpip.h>
@@ -25,7 +26,7 @@ bool Socket::connect(Proto proto, const char *addr, const char *port)
 	WSADATA wsaData;
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
 	{
-		LOGE("Failed to initialize WSA.\n");
+		fprintf(stderr, "Failed to initialize WSA.\n");
 		return false;
 	}
 #endif
