@@ -67,6 +67,14 @@ bool Socket::connect(Proto proto, const char *addr, const char *port)
 
 	freeaddrinfo(servinfo);
 
+	if (proto == Proto::UDP)
+	{
+		// Keep the rcvbuf healthy so we don't drop packets too easily.
+		int size = 4 * 1024 * 1024;
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) < 0)
+			return false;
+	}
+
 	if (!walk)
 		return false;
 

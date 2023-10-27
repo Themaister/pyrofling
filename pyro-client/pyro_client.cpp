@@ -27,7 +27,7 @@ bool PyroStreamClient::handshake()
 	if (!tcp.read(&cookie, sizeof(cookie)))
 		return false;
 
-	for (unsigned i = 0; i < 16 && codec.video_codec == PYRO_VIDEO_CODEC_NONE; i++)
+	for (unsigned i = 0; i < 64 && codec.video_codec == PYRO_VIDEO_CODEC_NONE; i++)
 	{
 		type = PYRO_MESSAGE_COOKIE;
 		if (!udp.write_message(&type, sizeof(type), &cookie, sizeof(cookie)))
@@ -89,7 +89,7 @@ struct Packet
 {
 	pyro_payload_header header;
 	uint8_t buffer[PYRO_MAX_PAYLOAD_SIZE];
-	size_t size;
+	uint32_t size;
 };
 
 //#define PYRO_DEBUG_REORDER
@@ -100,6 +100,7 @@ unsigned num_simulated_packets;
 static bool simulate_drop;
 static bool simulate_reordering;
 static std::default_random_engine rng{100};
+static constexpr int PYRO_ROBUST_DIVIDER = 256 * 1024;
 
 void PyroStreamClient::set_simulate_drop(bool enable)
 {
@@ -132,21 +133,38 @@ bool PyroStreamClient::iterate()
 		if (sim.size <= sizeof(pyro_payload_header) || sim.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
 			return false;
 
+		if ((payload.header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) == 0)
+		{
+			printf(" SIM Received [%u, %u]",
+			       pyro_payload_get_packet_seq(sim.header.encoded),
+			       pyro_payload_get_subpacket_seq(sim.header.encoded));
+			if (sim.header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT)
+				printf(" [BEGIN]");
+			if (sim.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT)
+				printf(" [DONE]");
+			if (sim.header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT)
+				printf(" [KEY]");
+			printf("\n");
+		}
+
 		if (simulate_drop)
 		{
-			if (rng() % 16 != 0)
-				num_simulated_packets++;
-			else
+#if 0
+			if (rng() % PYRO_ROBUST_DIVIDER == 0)
 			{
 				printf(" !! Dropped [%u, %u]\n",
 				       pyro_payload_get_packet_seq(sim.header.encoded),
 				       pyro_payload_get_subpacket_seq(sim.header.encoded));
 			}
+			else
+#endif
+				num_simulated_packets++;
 		}
 		else
 			num_simulated_packets++;
 
-		if (num_simulated_packets >= 2 && simulate_reordering && rng() % 16 == 0)
+#if 0
+		if (num_simulated_packets >= 2 && simulate_reordering && rng() % PYRO_ROBUST_DIVIDER == 0)
 		{
 			unsigned index0 = rng() % num_simulated_packets;
 			unsigned index1 = rng() % num_simulated_packets;
@@ -160,19 +178,31 @@ bool PyroStreamClient::iterate()
 				std::swap(simulate_packets[index0], simulate_packets[index1]);
 			}
 		}
+#endif
 
-		if (num_simulated_packets >= 8)
+		if (num_simulated_packets >= 1)
 		{
-			payload = simulate_packets[0];
+			memcpy(&payload, &simulate_packets[0], sizeof(payload));
 			num_simulated_packets--;
-			memmove(simulate_packets, simulate_packets + 1, num_simulated_packets * sizeof(payload));
+			memmove(&simulate_packets[0], &simulate_packets[1],
+					num_simulated_packets * sizeof(simulate_packets[0]));
 		}
 		else
 			return true;
 
-		printf(" Received [%u, %u]\n",
-			pyro_payload_get_packet_seq(payload.header.encoded),
-			pyro_payload_get_subpacket_seq(payload.header.encoded));
+		if ((payload.header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) == 0)
+		{
+			printf(" Received [%u, %u]",
+			       pyro_payload_get_packet_seq(payload.header.encoded),
+			       pyro_payload_get_subpacket_seq(payload.header.encoded));
+			if (payload.header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT)
+				printf(" [BEGIN]");
+			if (payload.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT)
+				printf(" [DONE]");
+			if (payload.header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT)
+				printf(" [KEY]");
+			printf("\n");
+		}
 	}
 	else
 #endif
@@ -323,6 +353,14 @@ bool PyroStreamClient::iterate()
 		last_completed_seq = stream->packet_seq;
 		stream->payload = payload.header;
 		progress.total_received_packets++;
+
+#ifdef PYRO_DEBUG_REORDER
+		if ((h.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) == 0)
+		{
+			printf(" !! COMPLETE VIDEO %u %s\n", last_completed_seq,
+			       (h.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) ? "[KEY]" : "");
+		}
+#endif
 
 		auto current_time = std::chrono::steady_clock::now();
 		auto delta = current_time - last_progress_time;

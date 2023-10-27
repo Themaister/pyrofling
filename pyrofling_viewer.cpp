@@ -40,6 +40,11 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer, float audio_buffer, float target)
 	{
+		// Debug
+		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
+		//PyroFling::PyroStreamClient::set_simulate_drop(true);
+		////
+
 		get_wsi().set_low_latency_mode(true);
 
 		VideoDecoder::DecodeOptions opts;

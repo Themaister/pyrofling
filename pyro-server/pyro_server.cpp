@@ -63,6 +63,7 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 		{
 		case PYRO_MESSAGE_HELLO:
 		{
+			printf("HELLO for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
 			const pyro_message_type type = PYRO_MESSAGE_COOKIE;
 			if (!send_stream_message(fd, &type, sizeof(type)))
 				return false;
@@ -74,32 +75,37 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 		case PYRO_MESSAGE_KICK:
 		{
 			if (kicked)
-				return false;
+			{
+				printf("REDUNDANT KICK for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
+				return true;
+			}
 
 			auto codec = server.get_codec_parameters();
 
 			if (udp_remote && codec.video_codec != PYRO_VIDEO_CODEC_NONE)
 			{
+				printf("KICK -> OK for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
 				const pyro_message_type type = PYRO_MESSAGE_CODEC_PARAMETERS;
 				if (!send_stream_message(fd, &type, sizeof(type)))
 					return false;
 				if (!send_stream_message(fd, &codec, sizeof(codec)))
 					return false;
+				kicked = true;
 			}
 			else if (udp_remote)
 			{
+				printf("KICK -> AGAIN for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
 				const pyro_message_type type = PYRO_MESSAGE_AGAIN;
 				if (!send_stream_message(fd, &type, sizeof(type)))
 					return false;
 			}
 			else
 			{
+				printf("KICK -> NAK for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
 				const pyro_message_type type = PYRO_MESSAGE_NAK;
 				if (!send_stream_message(fd, &type, sizeof(type)))
 					return false;
 			}
-
-			kicked = true;
 
 			// Start timeout.
 			struct itimerspec tv = {};
@@ -175,8 +181,11 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 		header.encoded &= ~(PYRO_PAYLOAD_SUBPACKET_SEQ_MASK << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET);
 		header.encoded |= subseq << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;
 
-		dispatcher.write_udp_datagram(udp_remote, &header, sizeof(header),
-		                              data, std::min<size_t>(PYRO_MAX_PAYLOAD_SIZE, size - i));
+		if (dispatcher.write_udp_datagram(udp_remote, &header, sizeof(header),
+		                                  data, std::min<size_t>(PYRO_MAX_PAYLOAD_SIZE, size - i)) < 0)
+		{
+			fprintf(stderr, "Error writing UDP datagram. Congested buffers?\n");
+		}
 
 		subseq = (subseq + 1) & PYRO_PAYLOAD_SUBPACKET_SEQ_MASK;
 	}
@@ -217,6 +226,15 @@ void PyroStreamConnection::handle_udp_datagram(
 	{
 	case PYRO_MESSAGE_COOKIE:
 	{
+		char host[1024];
+		char serv[1024];
+		if (getnameinfo(reinterpret_cast<const struct sockaddr *>(&remote.addr), remote.addr_size,
+		                host, sizeof(host), serv, sizeof(serv), 0) == 0)
+		{
+			printf("UDP COOKIE for %s @ %s : %s @ %s\n",
+			       remote_addr.c_str(), remote_port.c_str(),
+			       host, serv);
+		}
 		if (memcmp(msg, &cookie, sizeof(cookie)) == 0 && !udp_remote)
 			udp_remote = remote;
 		break;

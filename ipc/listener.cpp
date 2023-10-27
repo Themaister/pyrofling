@@ -126,7 +126,7 @@ IPListener::IPListener(Proto proto, const char *port)
 	if (proto == Proto::UDP)
 	{
 		// Keep the sndbuf healthy so we don't block in steady case.
-		int size = 1024 * 1024;
+		int size = 4 * 1024 * 1024;
 		if (setsockopt(fd.get_native_handle(), SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
 			throw std::runtime_error("Failed to set reuseaddr.");
 
