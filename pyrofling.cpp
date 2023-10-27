@@ -32,6 +32,7 @@
 #include "timer.hpp"
 #include "slangmosh_encode_iface.hpp"
 #include "slangmosh_encode.hpp"
+#include "pyro_server.hpp"
 #include <stdexcept>
 #include <vector>
 #include <thread>
@@ -857,6 +858,18 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		return true;
 	}
 
+	bool register_tcp_handler(Dispatcher &dispatcher_, const FileHandle &fd,
+	                          const RemoteAddress &remote, Handler *&handler) override
+	{
+		return pyro.register_tcp_handler(dispatcher_, fd, remote, handler);
+	}
+
+	void handle_udp_datagram(Dispatcher &dispatcher_, const RemoteAddress &remote,
+	                         const void *msg, unsigned size) override
+	{
+		pyro.handle_udp_datagram(dispatcher_, remote, msg, size);
+	}
+
 	bool register_handler(Dispatcher &dispatcher_, const FileHandle &fd, Handler *&handler) override
 	{
 		auto msg = parse_message(fd);
@@ -972,6 +985,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	std::mutex tcp_fd_lock;
 	std::vector<FileHandle> tcp_fds;
 	std::vector<FileHandle> new_tcp_fds;
+
+	PyroStreamServer pyro;
 
 	struct Options
 	{
@@ -1100,34 +1115,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		return true;
 	}
 
-	bool write_stream(const void *data, size_t size) override
-	{
-		{
-			std::lock_guard<std::mutex> holder{tcp_fd_lock};
-			for (auto &fd : new_tcp_fds)
-				tcp_fds.push_back(std::move(fd));
-			new_tcp_fds.clear();
-		}
-
-		size_t i, n;
-		// Repeat the byte stream to all clients.
-		for (i = 0, n = tcp_fds.size(); i < n; )
-		{
-			if (!send_stream_message(tcp_fds[i], data, size))
-			{
-				if (i != n - 1)
-					std::swap(tcp_fds[i], tcp_fds[n - 1]);
-				n--;
-			}
-			else
-				i++;
-		}
-
-		tcp_fds.erase(tcp_fds.begin() + n, tcp_fds.end());
-
-		return true;
-	}
-
 	void unregister_handler(Swapchain *handler)
 	{
 		auto itr = std::find_if(handlers.begin(), handlers.end(), [handler](const Util::IntrusivePtr<Swapchain> &ptr_handler) {
@@ -1135,6 +1122,21 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		});
 		assert(itr != handlers.end());
 		handlers.erase(itr);
+	}
+
+	void set_codec_parameters(const pyro_codec_parameters &codec) override
+	{
+		pyro.set_codec_parameters(codec);
+	}
+
+	void write_video_packet(int64_t pts, int64_t dts, const void *data, size_t size, bool is_key_frame) override
+	{
+		pyro.write_video_packet(pts, dts, data, size, is_key_frame);
+	}
+
+	void write_audio_packet(int64_t pts, int64_t dts, const void *data, size_t size) override
+	{
+		pyro.write_audio_packet(pts, dts, data, size);
 	}
 };
 

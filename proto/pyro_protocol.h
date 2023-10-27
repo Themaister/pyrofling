@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PYRO_PROTOCOL_H_
+#define PYRO_PROTOCOL_H_
 
 #include <stdint.h>
 #include <limits.h>
@@ -139,4 +140,6 @@ struct pyro_payload_header
 
 #ifdef __cplusplus
 }
+#endif
+
 #endif

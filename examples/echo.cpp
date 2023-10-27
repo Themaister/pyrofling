@@ -92,6 +92,16 @@ struct TestServer : HandlerFactoryInterface
 		handler = new EchoRepeater{dispatcher};
 		return true;
 	}
+
+	bool register_tcp_handler(Dispatcher &, const FileHandle &, const RemoteAddress &,
+	                          Handler *&) override
+	{
+		return false;
+	}
+
+	void handle_udp_datagram(Dispatcher &, const RemoteAddress &, const void *, unsigned) override
+	{
+	}
 };
 
 int main()
