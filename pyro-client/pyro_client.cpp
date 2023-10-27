@@ -1,5 +1,6 @@
 #include "pyro_client.hpp"
 #include <string.h>
+#include <random>
 
 namespace PyroFling
 {
@@ -84,22 +85,107 @@ const pyro_payload_header &PyroStreamClient::get_payload_header() const
 	return current->payload;
 }
 
+struct Packet
+{
+	pyro_payload_header header;
+	uint8_t buffer[PYRO_MAX_PAYLOAD_SIZE];
+	size_t size;
+};
+
+//#define PYRO_DEBUG_REORDER
+
+#ifdef PYRO_DEBUG_REORDER
+static Packet simulate_packets[8];
+unsigned num_simulated_packets;
+static bool simulate_drop;
+static bool simulate_reordering;
+static std::default_random_engine rng{100};
+
+void PyroStreamClient::set_simulate_drop(bool enable)
+{
+	simulate_drop = enable;
+}
+
+void PyroStreamClient::set_simulate_reordering(bool enable)
+{
+	simulate_reordering = enable;
+}
+#else
+void PyroStreamClient::set_simulate_drop(bool)
+{
+}
+
+void PyroStreamClient::set_simulate_reordering(bool)
+{
+}
+#endif
+
 bool PyroStreamClient::iterate()
 {
-	struct
+	Packet payload;
+
+#ifdef PYRO_DEBUG_REORDER
+	if (simulate_drop || simulate_reordering)
 	{
-		pyro_payload_header header;
-		uint8_t buffer[PYRO_MAX_PAYLOAD_SIZE];
-	} payload;
+		auto &sim = simulate_packets[num_simulated_packets];
+		sim.size = udp.read_partial(&sim, sizeof(sim), &tcp);
+		if (sim.size <= sizeof(pyro_payload_header) || sim.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
+			return false;
 
-	size_t size = udp.read_partial(&payload, sizeof(payload), &tcp);
+		if (simulate_drop)
+		{
+			if (rng() % 16 != 0)
+				num_simulated_packets++;
+			else
+			{
+				printf(" !! Dropped [%u, %u]\n",
+				       pyro_payload_get_packet_seq(sim.header.encoded),
+				       pyro_payload_get_subpacket_seq(sim.header.encoded));
+			}
+		}
+		else
+			num_simulated_packets++;
 
-	if (size <= sizeof(pyro_payload_header))
+		if (num_simulated_packets >= 2 && simulate_reordering && rng() % 16 == 0)
+		{
+			unsigned index0 = rng() % num_simulated_packets;
+			unsigned index1 = rng() % num_simulated_packets;
+			if (index0 != index1)
+			{
+				printf(" !! Reordered [%u, %u] <-> [%u, %u]\n",
+				       pyro_payload_get_packet_seq(simulate_packets[0].header.encoded),
+				       pyro_payload_get_subpacket_seq(simulate_packets[0].header.encoded),
+				       pyro_payload_get_packet_seq(simulate_packets[1].header.encoded),
+				       pyro_payload_get_subpacket_seq(simulate_packets[1].header.encoded));
+				std::swap(simulate_packets[index0], simulate_packets[index1]);
+			}
+		}
+
+		if (num_simulated_packets >= 8)
+		{
+			payload = simulate_packets[0];
+			num_simulated_packets--;
+			memmove(simulate_packets, simulate_packets + 1, num_simulated_packets * sizeof(payload));
+		}
+		else
+			return true;
+
+		printf(" Received [%u, %u]\n",
+			pyro_payload_get_packet_seq(payload.header.encoded),
+			pyro_payload_get_subpacket_seq(payload.header.encoded));
+	}
+	else
+#endif
+	{
+		payload.size = udp.read_partial(&payload, sizeof(payload), &tcp);
+	}
+
+	if (payload.size <= sizeof(pyro_payload_header) || payload.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
 		return false;
-	size -= sizeof(pyro_payload_header);
+	payload.size -= sizeof(pyro_payload_header);
 
 	// Partial packets must be full packets (for simplicity to avoid stitching payloads together).
-	if ((payload.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) == 0 && size != PYRO_MAX_PAYLOAD_SIZE)
+	if ((payload.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) == 0 && payload.size != PYRO_MAX_PAYLOAD_SIZE)
 		return false;
 
 	bool is_audio = (payload.header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
@@ -189,7 +275,7 @@ bool PyroStreamClient::iterate()
 
 	if ((h.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) != 0)
 	{
-		stream->buffer.resize(stream->subpacket_seq_accum * PYRO_MAX_PAYLOAD_SIZE + size);
+		stream->buffer.resize(stream->subpacket_seq_accum * PYRO_MAX_PAYLOAD_SIZE + payload.size);
 		stream->has_done_bit = true;
 		stream->subseq_flags.resize(stream->subpacket_seq_accum + 1);
 	}
@@ -206,7 +292,7 @@ bool PyroStreamClient::iterate()
 		stream->subseq_flags[stream->subpacket_seq_accum] = true;
 		stream->num_done_subseqs++;
 		memcpy(stream->buffer.data() + stream->subpacket_seq_accum * PYRO_MAX_PAYLOAD_SIZE,
-		       payload.buffer, size);
+		       payload.buffer, payload.size);
 	}
 
 	if (stream->is_complete())

@@ -57,11 +57,15 @@ int main()
 		pyro_codec_parameters params = {};
 		params.video_codec = PYRO_VIDEO_CODEC_H264;
 		server.set_codec_parameters(params);
-		for (unsigned i = 0; i < 64; i++)
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		for (unsigned i = 0; i < 4096; i++)
 		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(500));
-			server.write_video_packet(i + 100, i, &i, sizeof(i), i % 16 == 0);
-			server.write_audio_packet(i + 1000, i + 1000, &i, sizeof(i));
+			uint8_t buf[12000];
+			for (unsigned j = 0; j < sizeof(buf); j++)
+				buf[j] = uint8_t(i + j * 17);
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			server.write_video_packet(i, i, buf, sizeof(buf), i % 16 == 0);
+			//server.write_audio_packet(i, i, buf, sizeof(buf));
 		}
 		dispatcher.kill();
 	});
@@ -71,6 +75,9 @@ int main()
 		return EXIT_FAILURE;
 	if (!client.handshake())
 		return EXIT_FAILURE;
+
+	PyroStreamClient::set_simulate_drop(false);
+	PyroStreamClient::set_simulate_reordering(true);
 
 	while (client.wait_next_packet())
 	{
@@ -83,12 +90,16 @@ int main()
 		bool is_audio = (header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
 		uint32_t seq = pyro_payload_get_packet_seq(header.encoded);
 
-		printf("%s || pts = %llu, dts = %llu, seq = %u, key = %u\n", is_audio ? "audio" : "video",
-		       pts, dts, seq, (header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0 ? 1 : 0);
-		printf("  ");
-		for (size_t i = 0; i < size; i++)
-			printf("%02x", data[i]);
-		printf("\n");
+		printf("%s (%zu) || pts = %llu, dts = %llu, seq = %u, key = %u\n", is_audio ? "audio" : "video",
+			   size, pts, dts, seq, (header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0 ? 1 : 0);
+		bool valid = true;
+		for (size_t i = 0; i < size && valid; i++)
+		{
+			auto expected = uint8_t(pts + 17 * i);
+			if (data[i] != expected)
+				valid = false;
+		}
+		printf("   Valid: %u\n", valid);
 	}
 
 	sender.join();
