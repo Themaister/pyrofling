@@ -47,10 +47,13 @@ add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
 add_subdirectory(proto)
 
-add_library(pyrofling-socket simple_socket.cpp simple_socket.hpp)
+add_library(pyrofling-socket STATIC simple_socket.cpp simple_socket.hpp)
 target_include_directories(pyrofling-socket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(pyrofling-socket PRIVATE ${PYROFLING_CXX_FLAGS})
 target_link_libraries(pyrofling-socket PRIVATE pyro-protocol)
+
+add_subdirectory(pyro-server)
+add_subdirectory(pyro-client)
 
 if (NOT PYROFLING_LAYER_ONLY)
     if (NOT WIN32)
