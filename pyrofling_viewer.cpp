@@ -28,18 +28,23 @@
 #include "slangmosh_decode.hpp"
 #include "slangmosh_blit.hpp"
 #include "global_managers_init.hpp"
-#include "tcp_socket.hpp"
+#include "pyro_client.hpp"
 #include "cli_parser.hpp"
 #include "string_helpers.hpp"
 #include <cmath>
 
 using namespace Granite;
 
-struct VideoPlayerApplication : Application, EventHandler
+struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 {
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer, float audio_buffer, float target)
 	{
+		// Debug
+		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
+		//PyroFling::PyroStreamClient::set_simulate_drop(true);
+		////
+
 		get_wsi().set_low_latency_mode(true);
 
 		VideoDecoder::DecodeOptions opts;
@@ -58,10 +63,13 @@ struct VideoPlayerApplication : Application, EventHandler
 				throw std::runtime_error("Must specify both IP and port.");
 			LOGI("Connecting to raw pyrofling %s:%s.\n",
 			     split[0].c_str(), split[1].c_str());
-			if (!reader.connect(split[0].c_str(), split[1].c_str()))
-				throw std::runtime_error("Failed to connect to server.");
 
-			decoder.set_io_interface(&reader);
+			if (!pyro.connect(split[0].c_str(), split[1].c_str()))
+				throw std::runtime_error("Failed to connect to server.");
+			if (!pyro.handshake())
+				throw std::runtime_error("Failed handshake.");
+
+			decoder.set_io_interface(this);
 			video_path = nullptr;
 		}
 
@@ -284,7 +292,32 @@ struct VideoPlayerApplication : Application, EventHandler
 		device.submit(cmd, nullptr, 1, &frame.sem);
 	}
 
-	PyroFling::TCPReader reader;
+	pyro_codec_parameters get_codec_parameters() override
+	{
+		return pyro.get_codec_parameters();
+	}
+
+	bool wait_next_packet() override
+	{
+		return pyro.wait_next_packet();
+	}
+
+	const void *get_data() override
+	{
+		return pyro.get_packet_data();
+	}
+
+	size_t get_size() override
+	{
+		return pyro.get_packet_size();
+	}
+
+	pyro_payload_header get_payload_header() override
+	{
+		return pyro.get_payload_header();
+	}
+
+	PyroFling::PyroStreamClient pyro;
 	VideoDecoder decoder;
 	VideoFrame frame, next_frame;
 	bool need_acquire = false;

@@ -26,6 +26,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <sys/socket.h>
 
 namespace PyroFling
 {
@@ -59,14 +60,34 @@ private:
 	std::string unlink_path;
 };
 
-class TCPListener
+struct RemoteAddress
+{
+	sockaddr_storage addr = {};
+	socklen_t addr_size = {};
+
+	bool operator==(const RemoteAddress &other) const;
+	bool operator!=(const RemoteAddress &other) const;
+	explicit operator bool() const;
+};
+
+struct TCPConnection
+{
+	FileHandle fd;
+	RemoteAddress addr;
+};
+
+class IPListener
 {
 public:
-	TCPListener() = default;
-	explicit TCPListener(const char *port);
+	enum class Proto { TCP, UDP };
+	IPListener() = default;
+	IPListener(Proto proto, const char *port);
 	const FileHandle &get_file_handle() const;
-	TCPListener &operator=(TCPListener &&other) = default;
-	explicit TCPListener(TCPListener &&other) = default;
+	IPListener &operator=(IPListener &&other) = default;
+	IPListener(IPListener &&other) = default;
+
+	TCPConnection accept_tcp_connection();
+	int read_udp_datagram(RemoteAddress &remote, void *data, unsigned size);
 
 private:
 	FileHandle fd;
@@ -76,13 +97,14 @@ class HandlerFactoryInterface
 {
 public:
 	virtual bool register_handler(Dispatcher &dispatcher, const FileHandle &fd, Handler *&handler) = 0;
-	virtual void add_stream_socket(FileHandle fd);
+	virtual bool register_tcp_handler(Dispatcher &dispatcher, const FileHandle &fd, const RemoteAddress &remote, Handler *&handler) = 0;
+	virtual void handle_udp_datagram(Dispatcher &dispatcher, const RemoteAddress &remote, const void *msg, unsigned size) = 0;
 };
 
 class Dispatcher
 {
 public:
-	explicit Dispatcher(const char *name, const char *tcp_port);
+	explicit Dispatcher(const char *name, const char *listen_port);
 	void set_handler_factory_interface(HandlerFactoryInterface *iface);
 	bool iterate();
 	void kill();
@@ -97,15 +119,18 @@ public:
 	};
 	bool add_connection(FileHandle fd, Handler *handler, uint32_t id, ConnectionType type);
 	void cancel_connection(Handler *handler, uint32_t id);
+	int write_udp_datagram(const RemoteAddress &addr,
+	                       const void *header, unsigned header_size,
+	                       const void *data, unsigned size);
 
 private:
 	HandlerFactoryInterface *iface = nullptr;
 	Listener listener;
-	TCPListener tcp_listener;
+	IPListener tcp_listener, udp_listener;
 	FileHandle pollfd;
 
 	FileHandle accept_connection();
-	FileHandle accept_tcp_connection();
+	TCPConnection accept_tcp_connection();
 	void add_signalfd();
 	void add_eventfd();
 	const FileHandle *event_handle = nullptr;
@@ -113,6 +138,7 @@ private:
 	struct Connection
 	{
 		FileHandle fd;
+		RemoteAddress remote;
 		uint32_t id = 0;
 		Handler *handler = nullptr;
 

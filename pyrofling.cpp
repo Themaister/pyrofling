@@ -32,6 +32,7 @@
 #include "timer.hpp"
 #include "slangmosh_encode_iface.hpp"
 #include "slangmosh_encode.hpp"
+#include "pyro_server.hpp"
 #include <stdexcept>
 #include <vector>
 #include <thread>
@@ -857,10 +858,16 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		return true;
 	}
 
-	void add_stream_socket(FileHandle tcp_fd) override
+	bool register_tcp_handler(Dispatcher &dispatcher_, const FileHandle &fd,
+	                          const RemoteAddress &remote, Handler *&handler) override
 	{
-		std::lock_guard<std::mutex> holder{tcp_fd_lock};
-		new_tcp_fds.push_back(std::move(tcp_fd));
+		return pyro.register_tcp_handler(dispatcher_, fd, remote, handler);
+	}
+
+	void handle_udp_datagram(Dispatcher &dispatcher_, const RemoteAddress &remote,
+	                         const void *msg, unsigned size) override
+	{
+		pyro.handle_udp_datagram(dispatcher_, remote, msg, size);
 	}
 
 	bool register_handler(Dispatcher &dispatcher_, const FileHandle &fd, Handler *&handler) override
@@ -978,6 +985,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	std::mutex tcp_fd_lock;
 	std::vector<FileHandle> tcp_fds;
 	std::vector<FileHandle> new_tcp_fds;
+
+	PyroStreamServer pyro;
 
 	struct Options
 	{
@@ -1106,34 +1115,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		return true;
 	}
 
-	bool write_stream(const void *data, size_t size) override
-	{
-		{
-			std::lock_guard<std::mutex> holder{tcp_fd_lock};
-			for (auto &fd : new_tcp_fds)
-				tcp_fds.push_back(std::move(fd));
-			new_tcp_fds.clear();
-		}
-
-		size_t i, n;
-		// Repeat the byte stream to all clients.
-		for (i = 0, n = tcp_fds.size(); i < n; )
-		{
-			if (!send_stream_message(tcp_fds[i], data, size))
-			{
-				if (i != n - 1)
-					std::swap(tcp_fds[i], tcp_fds[n - 1]);
-				n--;
-			}
-			else
-				i++;
-		}
-
-		tcp_fds.erase(tcp_fds.begin() + n, tcp_fds.end());
-
-		return true;
-	}
-
 	void unregister_handler(Swapchain *handler)
 	{
 		auto itr = std::find_if(handlers.begin(), handlers.end(), [handler](const Util::IntrusivePtr<Swapchain> &ptr_handler) {
@@ -1141,6 +1122,21 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		});
 		assert(itr != handlers.end());
 		handlers.erase(itr);
+	}
+
+	void set_codec_parameters(const pyro_codec_parameters &codec) override
+	{
+		pyro.set_codec_parameters(codec);
+	}
+
+	void write_video_packet(int64_t pts, int64_t dts, const void *data, size_t size, bool is_key_frame) override
+	{
+		pyro.write_video_packet(pts, dts, data, size, is_key_frame);
+	}
+
+	void write_audio_packet(int64_t pts, int64_t dts, const void *data, size_t size) override
+	{
+		pyro.write_audio_packet(pts, dts, data, size);
 	}
 };
 
@@ -1203,7 +1199,7 @@ static void print_help()
 	     "\t[--local-backup PATH]\n"
 	     "\t[--encoder ENCODER]\n"
 	     "\t[--muxer MUXER]\n"
-	     "\t[--tcp PORT]\n"
+	     "\t[--port PORT]\n"
 	     "\t[--audio-rate RATE]\n"
 	     "\t[--low-latency]\n"
 	     "\t[--no-audio]\n"
@@ -1216,7 +1212,7 @@ static int main_inner(int argc, char **argv)
 	unsigned client_rate_multiplier = 1;
 	SwapchainServer::Options opts;
 	unsigned device_index = 0;
-	std::string tcp_port;
+	std::string port;
 
 	opts.width = 1280;
 	opts.height = 720;
@@ -1240,7 +1236,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--local-backup", [&](Util::CLIParser &parser) { opts.local_backup_path = parser.next_string(); });
 	cbs.add("--encoder", [&](Util::CLIParser &parser) { opts.encoder = parser.next_string(); });
 	cbs.add("--muxer", [&](Util::CLIParser &parser) { opts.muxer = parser.next_string(); });
-	cbs.add("--tcp", [&](Util::CLIParser &parser) { tcp_port = parser.next_string(); });
+	cbs.add("--port", [&](Util::CLIParser &parser) { port = parser.next_string(); });
 	cbs.add("--audio-rate", [&](Util::CLIParser &parser) { opts.audio_rate = parser.next_uint(); });
 	cbs.add("--low-latency", [&](Util::CLIParser &) { opts.low_latency = true; });
 	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
@@ -1256,14 +1252,14 @@ static int main_inner(int argc, char **argv)
 		return EXIT_SUCCESS;
 	}
 
-	if (opts.path.empty() && tcp_port.empty())
+	if (opts.path.empty() && port.empty())
 	{
 		LOGE("Encode URL required.\n");
 		print_help();
 		return EXIT_FAILURE;
 	}
 
-	if (!opts.path.empty() && !tcp_port.empty())
+	if (!opts.path.empty() && !port.empty())
 	{
 		LOGE("Cannot use both TCP output and URL output.\n");
 		print_help();
@@ -1274,7 +1270,7 @@ static int main_inner(int argc, char **argv)
 	     opts.width, opts.height, opts.fps, opts.fps * client_rate_multiplier, opts.path.c_str(),
 	     opts.bitrate_kbits, opts.max_bitrate_kbits, opts.vbv_size_kbits, opts.gop_seconds);
 
-	Dispatcher dispatcher{socket_path.c_str(), tcp_port.c_str()};
+	Dispatcher dispatcher{socket_path.c_str(), port.c_str()};
 	SwapchainServer server{dispatcher};
 	server.set_client_rate_multiplier(client_rate_multiplier);
 	server.set_encode_options(opts);

@@ -45,22 +45,31 @@ add_library(granite-application-interface-query STATIC pyrofling_app_query.cpp)
 
 add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
+add_subdirectory(proto)
+
+add_library(pyrofling-socket STATIC simple_socket.cpp simple_socket.hpp)
+target_include_directories(pyrofling-socket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(pyrofling-socket PRIVATE ${PYROFLING_CXX_FLAGS})
+target_link_libraries(pyrofling-socket PRIVATE pyro-protocol)
+
+if (NOT WIN32)
+    add_subdirectory(pyro-server)
+endif()
+add_subdirectory(pyro-client)
+
 if (NOT PYROFLING_LAYER_ONLY)
     if (NOT WIN32)
         add_subdirectory(examples)
         add_executable(pyrofling pyrofling.cpp)
         target_compile_options(pyrofling PRIVATE ${PYROFLING_CXX_FLAGS})
         target_link_libraries(pyrofling PRIVATE
-            pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio)
+            pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio pyro-server)
         install(TARGETS pyrofling)
     endif()
 
-    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp tcp_socket.cpp tcp_socket.hpp)
-    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio)
+    add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
+    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio pyro-client)
     install(TARGETS pyrofling-viewer)
-    if (WIN32)
-            target_link_libraries(pyrofling-viewer PRIVATE ws2_32)
-    endif()
 endif()
 
 if (NOT WIN32)
