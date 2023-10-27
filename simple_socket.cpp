@@ -72,7 +72,7 @@ bool Socket::connect(Proto proto, const char *addr, const char *port)
 	{
 		// Keep the rcvbuf healthy so we don't drop packets too easily.
 		int size = 4 * 1024 * 1024;
-		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) < 0)
+		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&size), sizeof(size)) < 0)
 			return false;
 	}
 
