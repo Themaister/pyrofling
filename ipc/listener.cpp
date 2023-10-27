@@ -123,6 +123,7 @@ IPListener::IPListener(Proto proto, const char *port)
 	if (bind(fd.get_native_handle(), res->ai_addr, res->ai_addrlen) < 0)
 		throw std::runtime_error("Failed to bind.");
 
+#if 0
 	if (proto == Proto::UDP)
 	{
 		// Keep the sndbuf healthy so we don't block in steady case.
@@ -130,9 +131,10 @@ IPListener::IPListener(Proto proto, const char *port)
 		if (setsockopt(fd.get_native_handle(), SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) < 0)
 			throw std::runtime_error("Failed to set reuseaddr.");
 
-		// Non-blocking as well to avoid stalling encoder.
+		// Non-blocking as well to avoid stalling encoder. ? Seems to cause issues.
 		fcntl(fd.get_native_handle(), F_SETFL, fcntl(fd.get_native_handle(), F_GETFL) | O_NONBLOCK);
 	}
+#endif
 }
 
 int IPListener::read_udp_datagram(RemoteAddress &remote, void *data, unsigned size)
