@@ -1199,7 +1199,7 @@ static void print_help()
 	     "\t[--local-backup PATH]\n"
 	     "\t[--encoder ENCODER]\n"
 	     "\t[--muxer MUXER]\n"
-	     "\t[--tcp PORT]\n"
+	     "\t[--port PORT]\n"
 	     "\t[--audio-rate RATE]\n"
 	     "\t[--low-latency]\n"
 	     "\t[--no-audio]\n"
@@ -1212,7 +1212,7 @@ static int main_inner(int argc, char **argv)
 	unsigned client_rate_multiplier = 1;
 	SwapchainServer::Options opts;
 	unsigned device_index = 0;
-	std::string tcp_port;
+	std::string port;
 
 	opts.width = 1280;
 	opts.height = 720;
@@ -1236,7 +1236,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--local-backup", [&](Util::CLIParser &parser) { opts.local_backup_path = parser.next_string(); });
 	cbs.add("--encoder", [&](Util::CLIParser &parser) { opts.encoder = parser.next_string(); });
 	cbs.add("--muxer", [&](Util::CLIParser &parser) { opts.muxer = parser.next_string(); });
-	cbs.add("--tcp", [&](Util::CLIParser &parser) { tcp_port = parser.next_string(); });
+	cbs.add("--port", [&](Util::CLIParser &parser) { port = parser.next_string(); });
 	cbs.add("--audio-rate", [&](Util::CLIParser &parser) { opts.audio_rate = parser.next_uint(); });
 	cbs.add("--low-latency", [&](Util::CLIParser &) { opts.low_latency = true; });
 	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
@@ -1252,14 +1252,14 @@ static int main_inner(int argc, char **argv)
 		return EXIT_SUCCESS;
 	}
 
-	if (opts.path.empty() && tcp_port.empty())
+	if (opts.path.empty() && port.empty())
 	{
 		LOGE("Encode URL required.\n");
 		print_help();
 		return EXIT_FAILURE;
 	}
 
-	if (!opts.path.empty() && !tcp_port.empty())
+	if (!opts.path.empty() && !port.empty())
 	{
 		LOGE("Cannot use both TCP output and URL output.\n");
 		print_help();
@@ -1270,7 +1270,7 @@ static int main_inner(int argc, char **argv)
 	     opts.width, opts.height, opts.fps, opts.fps * client_rate_multiplier, opts.path.c_str(),
 	     opts.bitrate_kbits, opts.max_bitrate_kbits, opts.vbv_size_kbits, opts.gop_seconds);
 
-	Dispatcher dispatcher{socket_path.c_str(), tcp_port.c_str()};
+	Dispatcher dispatcher{socket_path.c_str(), port.c_str()};
 	SwapchainServer server{dispatcher};
 	server.set_client_rate_multiplier(client_rate_multiplier);
 	server.set_encode_options(opts);

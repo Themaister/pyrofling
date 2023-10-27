@@ -4,6 +4,7 @@
 
 #include <sys/timerfd.h>
 #include <string.h>
+#include <netdb.h>
 
 namespace PyroFling
 {
@@ -21,6 +22,16 @@ PyroStreamConnection::PyroStreamConnection(
 	timer_fd = PyroFling::FileHandle(timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC));
 	add_reference();
 	dispatcher.add_connection(timer_fd.dup(), this, 1, PyroFling::Dispatcher::ConnectionType::Input);
+
+	char host[1024];
+	char serv[1024];
+	if (getnameinfo(reinterpret_cast<const struct sockaddr *>(&tcp_remote.addr), tcp_remote.addr_size,
+	                host, sizeof(host), serv, sizeof(serv), 0) == 0)
+	{
+		printf("REMOTE: %s @ %s\n", host, serv);
+		remote_addr = host;
+		remote_port = serv;
+	}
 }
 
 bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
@@ -105,6 +116,12 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 			tv.it_value.tv_sec = 5;
 			timerfd_settime(timer_fd.get_native_handle(), 0, &tv, nullptr);
 			memcpy(&progress, tcp.split.payload, sizeof(progress));
+
+			printf("PROGRESS for %s @ %s: %llu complete, %llu dropped.\n",
+			       remote_addr.c_str(), remote_port.c_str(),
+			       static_cast<unsigned long long>(progress.total_received_packets),
+			       static_cast<unsigned long long>(progress.total_dropped_packets));
+
 			break;
 		}
 

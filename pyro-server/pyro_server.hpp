@@ -38,6 +38,7 @@ private:
 	PyroFling::RemoteAddress udp_remote;
 	PyroFling::FileHandle timer_fd;
 	pyro_progress_report progress = {};
+	std::string remote_addr, remote_port;
 
 	uint64_t cookie;
 	uint32_t packet_seq_video = 0;
