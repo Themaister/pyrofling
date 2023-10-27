@@ -1,5 +1,6 @@
 #include "simple_socket.hpp"
 #include <stdio.h>
+#include <stdint.h>
 
 #ifdef _WIN32
 #include <ws2tcpip.h>
@@ -147,6 +148,12 @@ size_t Socket::read_partial(void *data, size_t size, const Socket *sentinel)
 		return false;
 }
 
+#ifdef __linux__
+static constexpr int MSG_FLAG = MSG_NOSIGNAL;
+#else
+static constexpr int MSG_FLAG = 0;
+#endif
+
 bool Socket::write(const void *data_, size_t size)
 {
 	auto *data = static_cast<const uint8_t *>(data_);
@@ -154,7 +161,7 @@ bool Socket::write(const void *data_, size_t size)
 	while (size)
 	{
 		int ret;
-		if ((ret = int(::send(fd, reinterpret_cast<const char *>(data), size, MSG_NOSIGNAL))) <= 0)
+		if ((ret = int(::send(fd, reinterpret_cast<const char *>(data), size, MSG_FLAG))) <= 0)
 			return false;
 		size -= ret;
 		data += ret;
@@ -165,6 +172,15 @@ bool Socket::write(const void *data_, size_t size)
 
 bool Socket::write_message(const void *header, size_t header_size, const void *data, size_t size)
 {
+#ifdef _WIN32
+	uint8_t buffer[64 * 1024];
+	if (header_size + size > sizeof(buffer))
+		return false;
+
+	memcpy(buffer, header, header_size);
+	memcpy(buffer + header_size, data, size);
+	return write(buffer, header_size + size);
+#else
 	struct msghdr msg = {};
 	struct iovec iv[2] = {};
 
@@ -176,6 +192,7 @@ bool Socket::write_message(const void *header, size_t header_size, const void *d
 	msg.msg_iovlen = 2;
 	msg.msg_iov = iv;
 
-	return ::sendmsg(fd, &msg, MSG_NOSIGNAL) == ssize_t(header_size + size);
+	return ::sendmsg(fd, &msg, MSG_FLAG) == ssize_t(header_size + size);
+#endif
 }
 }
