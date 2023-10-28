@@ -31,6 +31,8 @@
 #include "pyro_client.hpp"
 #include "cli_parser.hpp"
 #include "string_helpers.hpp"
+#include "timeline_trace_file.hpp"
+#include "thread_group.hpp"
 #include <cmath>
 
 using namespace Granite;
@@ -123,6 +125,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 	bool update(Vulkan::Device &device, double elapsed_time)
 	{
+		GRANITE_SCOPED_TIMELINE_EVENT("update");
+
 		// Most aggressive method, not all that great for pacing ...
 		if (realtime && target_realtime_delay <= 0.0)
 		{
