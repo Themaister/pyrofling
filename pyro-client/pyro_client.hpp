@@ -52,6 +52,7 @@ private:
 	pyro_codec_parameters codec = {};
 
 	std::chrono::time_point<std::chrono::steady_clock> last_progress_time;
+	bool has_observed_keyframe = false;
 
 	bool iterate();
 };

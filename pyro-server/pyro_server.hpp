@@ -2,6 +2,7 @@
 #include "pyro_protocol.h"
 #include "listener.hpp"
 #include "intrusive.hpp"
+#include <atomic>
 #include <mutex>
 
 namespace PyroFling
@@ -32,6 +33,8 @@ public:
 	                         const PyroFling::RemoteAddress &remote,
 	                         const void *msg, size_t size);
 
+	bool requires_idr();
+
 private:
 	PyroStreamConnectionServerInterface &server;
 	PyroFling::RemoteAddress tcp_remote;
@@ -39,6 +42,7 @@ private:
 	PyroFling::FileHandle timer_fd;
 	pyro_progress_report progress = {};
 	std::string remote_addr, remote_port;
+	std::atomic<bool> has_observed_keyframe;
 
 	uint64_t cookie;
 	uint32_t packet_seq_video = 0;
@@ -74,11 +78,13 @@ public:
 	void handle_udp_datagram(PyroFling::Dispatcher &dispatcher, const PyroFling::RemoteAddress &remote,
 	                         const void *msg, unsigned size);
 	void release_connection(PyroStreamConnection *conn) override;
+	bool should_force_idr();
 
 private:
 	uint64_t cookie = 1000;
 	std::mutex lock;
 	std::vector<Util::IntrusivePtr<PyroStreamConnection>> connections;
 	pyro_codec_parameters codec = {};
+	unsigned idr_counter = 0;
 };
 }

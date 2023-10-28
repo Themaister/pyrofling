@@ -362,6 +362,9 @@ bool PyroStreamClient::iterate()
 		}
 #endif
 
+		if ((h.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0)
+			progress.total_received_key_frames++;
+
 		auto current_time = std::chrono::steady_clock::now();
 		auto delta = current_time - last_progress_time;
 		if (std::chrono::duration_cast<std::chrono::milliseconds>(delta).count() >= 1000)

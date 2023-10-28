@@ -32,6 +32,13 @@ PyroStreamConnection::PyroStreamConnection(
 		remote_addr = host;
 		remote_port = serv;
 	}
+
+	has_observed_keyframe = false;
+}
+
+bool PyroStreamConnection::requires_idr()
+{
+	return !has_observed_keyframe.load(std::memory_order_relaxed);
 }
 
 bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
@@ -123,10 +130,14 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 			timerfd_settime(timer_fd.get_native_handle(), 0, &tv, nullptr);
 			memcpy(&progress, tcp.split.payload, sizeof(progress));
 
-			printf("PROGRESS for %s @ %s: %llu complete, %llu dropped.\n",
+			printf("PROGRESS for %s @ %s: %llu complete, %llu dropped, %llu key frames.\n",
 			       remote_addr.c_str(), remote_port.c_str(),
 			       static_cast<unsigned long long>(progress.total_received_packets),
-			       static_cast<unsigned long long>(progress.total_dropped_packets));
+			       static_cast<unsigned long long>(progress.total_dropped_packets),
+			       static_cast<unsigned long long>(progress.total_received_key_frames));
+
+			if (progress.total_received_key_frames)
+				has_observed_keyframe.store(true, std::memory_order_relaxed);
 
 			break;
 		}
@@ -299,5 +310,25 @@ void PyroStreamServer::release_connection(PyroStreamConnection *conn)
 	                        });
 	if (itr != connections.end())
 		connections.erase(itr);
+}
+
+bool PyroStreamServer::should_force_idr()
+{
+	bool requires_idr = false;
+	if (idr_counter++ < 60)
+		return false;
+	idr_counter = 0;
+
+	std::lock_guard<std::mutex> holder{lock};
+	for (auto &conn : connections)
+	{
+		if (conn->requires_idr())
+		{
+			requires_idr = true;
+			break;
+		}
+	}
+
+	return requires_idr;
 }
 }

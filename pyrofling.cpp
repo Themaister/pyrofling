@@ -982,10 +982,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	Granite::TaskGroupHandle encode_tasks[NumEncodeTasks];
 	unsigned next_encode_task_slot = 0;
 
-	std::mutex tcp_fd_lock;
-	std::vector<FileHandle> tcp_fds;
-	std::vector<FileHandle> new_tcp_fds;
-
 	PyroStreamServer pyro;
 
 	struct Options
@@ -1137,6 +1133,11 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	void write_audio_packet(int64_t pts, int64_t dts, const void *data, size_t size) override
 	{
 		pyro.write_audio_packet(pts, dts, data, size);
+	}
+
+	bool should_force_idr() override
+	{
+		return pyro.should_force_idr();
 	}
 };
 
