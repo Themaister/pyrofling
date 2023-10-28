@@ -144,7 +144,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 			// Block until we have received at least one new frame.
 			// No point duplicating presents.
-			if (!had_acquire && !decoder.acquire_video_frame(next_frame))
+			if (!had_acquire && !decoder.acquire_video_frame(next_frame, 5000))
 				return false;
 
 			if (next_frame.view)
@@ -179,8 +179,12 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 			// Update the latest frame. We want the closest PTS to target_pts.
 			if (!next_frame.view)
+			{
 				if (decoder.try_acquire_video_frame(next_frame) < 0 && target_pts > frame.pts)
 					return false;
+			}
+			else if (decoder.is_eof())
+				return false;
 
 			while (next_frame.view)
 			{
