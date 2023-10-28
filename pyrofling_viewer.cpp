@@ -123,6 +123,9 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 		need_acquire = true;
 	}
 
+	double last_done_ts = 0.0;
+	double last_pts = 0.0;
+
 	bool update(Vulkan::Device &device, double elapsed_time)
 	{
 		GRANITE_SCOPED_TIMELINE_EVENT("update");
@@ -159,6 +162,23 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 			// Give 20ms extra audio buffering for good measure.
 			decoder.latch_audio_presentation_target(frame.pts - 0.02);
+
+			// Measure frame jitter.
+			if (frame.view)
+			{
+				if (last_done_ts != 0.0 && last_pts != 0.0)
+				{
+					double done_delta = frame.done_ts - last_done_ts;
+					double pts_delta = frame.pts - last_pts;
+					double jitter = done_delta - pts_delta;
+
+					// We want these to be increasing at same rate. If there is variation,
+					// we need to consider adding in extra delay to absorb the jitter.
+					LOGI("Jitter: %.3f ms.\n", jitter * 1e3);
+				}
+				last_done_ts = frame.done_ts;
+				last_pts = frame.pts;
+			}
 		}
 		else
 		{
