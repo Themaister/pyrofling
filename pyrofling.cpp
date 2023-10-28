@@ -842,8 +842,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			return;
 
 		// If video encode threads are busy, defer.
-		if (!encode_tasks[next_encode_task_slot]->poll())
+		if (encode_tasks[next_encode_task_slot] && !encode_tasks[next_encode_task_slot]->poll())
 			return;
+		encode_tasks[next_encode_task_slot].reset();
 
 		// Ignore period since we're doing unlocked rendering.
 		encode_surface(surface, 0);
