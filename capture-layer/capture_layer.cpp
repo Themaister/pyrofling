@@ -626,7 +626,9 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
 	{
 		// Ensure proper pacing.
 		// Acquire/Retire events may arrive in unpaced order.
-		while (complete_present_id + (image.size() - 1) < present_id)
+		// In 2 image mode, we basically need to block until next heartbeat completes.
+
+		while (complete_present_id + (image.size() - 2) < present_id)
 		{
 			if (client->wait_reply() < 0)
 			{
