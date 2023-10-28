@@ -504,6 +504,11 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			assert(images[index].state == State::PresentQueued);
 			images[index].state = State::PresentReady;
+
+			// If we're using immediate mode, we'll want to encode this frame right away and send it.
+			// It will be retired late.
+			server.notify_async_surface({ this, int(index) });
+
 			return retire_obsolete_images();
 		}
 
@@ -689,38 +694,14 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		return true;
 	}
 
-	bool heartbeat(uint64_t period_ns)
+	struct ReadySurface
 	{
-		if (encode_tasks[next_encode_task_slot])
-		{
-			if (!encode_tasks[next_encode_task_slot]->poll())
-			{
-				// Encoding is too slow. This is considered a stalled heartbeat.
-				return heartbeat_stalled(period_ns);
-			}
-			encode_tasks[next_encode_task_slot].reset();
-		}
+		Swapchain *chain;
+		int index;
+	};
 
-		struct ReadySurface
-		{
-			Swapchain *chain;
-			int index;
-		};
-		Util::SmallVector<ReadySurface> ready_surfaces;
-
-		for (auto &handler : handlers)
-		{
-			int index;
-			if (!handler->heartbeat(period_ns, index))
-			{
-				dispatcher.cancel_connection(handler.get(), 0);
-				return false;
-			}
-
-			if (index >= 0)
-				ready_surfaces.push_back({ handler.get(), index });
-		}
-
+	void encode_surface(const ReadySurface &surface, uint64_t period_ns)
+	{
 		Granite::VideoEncoder::YCbCrPipeline *ycbcr_pipeline = nullptr;
 		if (encoder)
 			ycbcr_pipeline = &pipeline[next_encode_task_slot];
@@ -738,7 +719,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			// For now, just select one candidate and pretend it's the foreground flip.
 			auto cmd = encoder_device->request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
 
-			if (ready_surfaces.empty())
+			if (!surface.chain)
 			{
 				// Some dummy background thing.
 				auto info = Vulkan::ImageCreateInfo::immutable_2d_image(1, 1, VK_FORMAT_R8G8B8A8_UNORM);
@@ -761,8 +742,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			}
 			else
 			{
-				auto &ready_surf = ready_surfaces.front();
-				auto &surf = ready_surf.chain->images[ready_surf.index];
+				auto &surf = surface.chain->images[surface.index];
 				const Vulkan::ImageView *view;
 
 				if (surf.src_cross_device_buffer)
@@ -771,7 +751,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					// If we have external host memory, we can bypass the memcpy since both GPUs will see the system memory.
 					if (!surf.cross_device_host_pointer)
 					{
-						auto &src_device = ready_surf.chain->association.ctx->device;
+						auto &src_device = surface.chain->association.ctx->device;
 						auto *src = src_device.map_host_buffer(*surf.src_cross_device_buffer, Vulkan::MEMORY_ACCESS_READ_BIT);
 						auto *dst = encoder_device->map_host_buffer(*surf.dst_cross_device_buffer, Vulkan::MEMORY_ACCESS_WRITE_BIT);
 						memcpy(dst, src, surf.src_cross_device_buffer->get_create_info().size);
@@ -809,15 +789,14 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			// Relying on external timelines would be nice though,
 			// but won't play nice with WSI layering :(
 			int compensate_audio_us = 0;
-			if (!ready_surfaces.empty())
+			if (surface.chain)
 			{
-				auto &ready_surf = ready_surfaces.front();
-				auto &surf = ready_surf.chain->images[ready_surfaces.front().index];
+				auto &surf = surface.chain->images[surface.index];
 
 				// If we're cross device, we're done reading the image when the present fence signals,
 				// so don't need a semaphore. It will also not work since we have to send a semaphore
 				// for the expected device.
-				if (&ready_surf.chain->association.ctx->device == encoder_device)
+				if (&surface.chain->association.ctx->device == encoder_device)
 				{
 					auto sem = encoder_device->request_semaphore_external(
 							VK_SEMAPHORE_TYPE_BINARY_KHR, Vulkan::ExternalHandle::get_opaque_semaphore_handle_type());
@@ -829,7 +808,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				// Somewhat crude, but hey.
 				// Our PTS really should be a little in the past since that was when the frame was presented to us.
 				// Compensate by delaying audio instead.
-				compensate_audio_us = int(ready_surfaces.front().chain->images.size() - 1) *
+				compensate_audio_us = int(surface.chain->images.size() - 1) *
 				                      int(surf.target_period) *
 				                      int(period_ns / 1000);
 			}
@@ -854,7 +833,61 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		for (auto &gpu : gpus)
 			if (gpu.context)
 				gpu.context->device.next_frame_context();
+	}
 
+	void notify_async_surface(const ReadySurface &surface)
+	{
+		// Defer encode / composite to heartbeat vblank.
+		if (!video_encode.immediate)
+			return;
+
+		// If video encode threads are busy, defer.
+		if (!encode_tasks[next_encode_task_slot]->poll())
+			return;
+
+		// Ignore period since we're doing unlocked rendering.
+		encode_surface(surface, 0);
+
+		// Skip any encode in heartbeat handler for this frame, only trigger completion events.
+		encode_performed_out_of_band = true;
+	}
+
+	bool heartbeat(uint64_t period_ns)
+	{
+		// Only relevant if we performed encode out of band.
+		if (!encode_performed_out_of_band && encode_tasks[next_encode_task_slot])
+		{
+			if (!encode_tasks[next_encode_task_slot]->poll())
+			{
+				// Encoding is too slow. This is considered a stalled heartbeat.
+				return heartbeat_stalled(period_ns);
+			}
+			encode_tasks[next_encode_task_slot].reset();
+		}
+
+		// Latch ready surfaces. If we did out of band encode, we will signal the completion here
+		// to ensure stable frame pacing.
+		ReadySurface ready_surface = {};
+
+		for (auto &handler : handlers)
+		{
+			int index;
+			if (!handler->heartbeat(period_ns, index))
+			{
+				dispatcher.cancel_connection(handler.get(), 0);
+				return false;
+			}
+
+			if (index >= 0)
+				ready_surface = { handler.get(), index };
+		}
+
+		// If there were no immediate mode encode tasks in flight, this is our deadline,
+		// and we must encode something.
+		if (!encode_performed_out_of_band)
+			encode_surface(ready_surface, period_ns);
+
+		encode_performed_out_of_band = false;
 		return true;
 	}
 
@@ -999,6 +1032,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		float gop_seconds = 2.0f;
 		bool low_latency = false;
 		bool audio = true;
+		bool immediate = false;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1008,6 +1042,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 	unsigned client_rate_multiplier = 1;
 	unsigned client_heartbeat_count = 0;
+	bool encode_performed_out_of_band = false;
 
 	void set_encode_options(const Options &opts)
 	{
@@ -1204,6 +1239,7 @@ static void print_help()
 	     "\t[--audio-rate RATE]\n"
 	     "\t[--low-latency]\n"
 	     "\t[--no-audio]\n"
+	     "\t[--immediate-encode]\n"
 		 "\turl\n");
 }
 
@@ -1241,6 +1277,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--audio-rate", [&](Util::CLIParser &parser) { opts.audio_rate = parser.next_uint(); });
 	cbs.add("--low-latency", [&](Util::CLIParser &) { opts.low_latency = true; });
 	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
+	cbs.add("--immediate-encode", [&](Util::CLIParser &) { opts.immediate = true; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
