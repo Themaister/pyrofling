@@ -93,7 +93,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
 
-		if (target_realtime_delay <= 0.0 && phase_locked != 0)
+		if (target_realtime_delay <= 0.0 && phase_locked == 0)
 			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
 	}
 

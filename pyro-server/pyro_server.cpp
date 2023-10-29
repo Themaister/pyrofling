@@ -255,7 +255,6 @@ void PyroStreamConnection::handle_udp_datagram(
 		pyro_phase_offset phase = {};
 		memcpy(&phase, msg, sizeof(phase));
 		server.set_phase_offset(phase.ideal_phase_offset_us);
-		printf("PHASE OFFSET = %d us\n", phase.ideal_phase_offset_us);
 		break;
 	}
 
