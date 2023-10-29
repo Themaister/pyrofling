@@ -1036,6 +1036,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		bool low_latency = false;
 		bool audio = true;
 		bool immediate = false;
+		unsigned bit_depth = 8;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1111,6 +1112,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.realtime_options.x264_tune = video_encode.x264_tune.empty() ? nullptr : video_encode.x264_tune.c_str();
 			options.realtime_options.threads = video_encode.threads;
 			options.realtime_options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
+
+			options.format = video_encode.bit_depth > 8 ?
+					Granite::VideoEncoder::Format::P016 : Granite::VideoEncoder::Format::NV12;
 
 			if (video_encode.audio)
 				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
@@ -1335,6 +1339,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--low-latency", [&](Util::CLIParser &) { opts.low_latency = true; });
 	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
 	cbs.add("--immediate-encode", [&](Util::CLIParser &) { opts.immediate = true; });
+	cbs.add("--10-bit", [&](Util::CLIParser &) { opts.bit_depth = 10; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
