@@ -85,6 +85,13 @@ const pyro_payload_header &PyroStreamClient::get_payload_header() const
 	return current->payload;
 }
 
+bool PyroStreamClient::send_target_phase_offset(int offset_us)
+{
+	pyro_message_type type = PYRO_MESSAGE_PHASE_OFFSET;
+	int32_t data = offset_us;
+	return udp.write_message(&type, sizeof(type), &data, sizeof(data));
+}
+
 struct Packet
 {
 	pyro_payload_header header;

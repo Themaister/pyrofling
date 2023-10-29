@@ -20,6 +20,8 @@ public:
 	size_t get_packet_size() const;
 	const pyro_payload_header &get_payload_header() const;
 
+	bool send_target_phase_offset(int offset_us);
+
 	// Purely for debugging.
 	static void set_simulate_reordering(bool enable);
 	static void set_simulate_drop(bool enable);
