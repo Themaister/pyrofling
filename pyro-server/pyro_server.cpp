@@ -339,13 +339,18 @@ bool PyroStreamServer::should_force_idr()
 	return requires_idr;
 }
 
+PyroStreamServer::PyroStreamServer()
+{
+	phase_offset_us.store(0, std::memory_order_relaxed);
+}
+
 void PyroStreamServer::set_phase_offset(int phase_offset_us_)
 {
-	phase_offset_us = phase_offset_us_;
+	phase_offset_us.fetch_add(phase_offset_us_, std::memory_order_relaxed);
 }
 
 int PyroStreamServer::get_phase_offset_us() const
 {
-	return phase_offset_us;
+	return phase_offset_us.exchange(0, std::memory_order_relaxed);
 }
 }

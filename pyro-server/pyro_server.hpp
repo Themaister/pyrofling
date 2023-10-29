@@ -67,6 +67,7 @@ private:
 class PyroStreamServer final : public PyroStreamConnectionServerInterface
 {
 public:
+	PyroStreamServer();
 	void set_codec_parameters(const pyro_codec_parameters &codec_);
 	pyro_codec_parameters get_codec_parameters() override;
 
@@ -89,6 +90,6 @@ private:
 	std::vector<Util::IntrusivePtr<PyroStreamConnection>> connections;
 	pyro_codec_parameters codec = {};
 	unsigned idr_counter = 0;
-	int phase_offset_us = 0;
+	mutable std::atomic<int> phase_offset_us;
 };
 }
