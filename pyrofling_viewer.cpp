@@ -323,39 +323,46 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 		}
 
 		auto cmd = device.request_command_buffer();
-		auto rp = device.get_swapchain_render_pass(Vulkan::SwapchainRenderPass::ColorOnly);
 
-		cmd->begin_render_pass(rp);
-		if (frame.view)
 		{
-			cmd->set_opaque_sprite_state();
-			cmd->set_program(blit);
-			cmd->set_texture(0, 0, *frame.view, Vulkan::StockSampler::LinearClamp);
+			GRANITE_SCOPED_TIMELINE_EVENT("build-cmd");
+			auto rp = device.get_swapchain_render_pass(Vulkan::SwapchainRenderPass::ColorOnly);
 
-			auto vp = cmd->get_viewport();
-			float video_aspect = float(decoder.get_width()) / float(decoder.get_height());
-			float vp_aspect = vp.width / vp.height;
-
-			if (vp_aspect > video_aspect)
+			cmd->begin_render_pass(rp);
+			if (frame.view)
 			{
-				float target_width = vp.height * video_aspect;
-				vp.x = std::round(0.5f * (vp.width - target_width));
-				vp.width = std::round(target_width);
-			}
-			else if (vp_aspect < video_aspect)
-			{
-				float target_height = vp.width / video_aspect;
-				vp.y = std::round(0.5f * (vp.height - target_height));
-				vp.height = std::round(target_height);
-			}
+				cmd->set_opaque_sprite_state();
+				cmd->set_program(blit);
+				cmd->set_texture(0, 0, *frame.view, Vulkan::StockSampler::LinearClamp);
 
-			cmd->set_viewport(vp);
-			cmd->draw(3);
+				auto vp = cmd->get_viewport();
+				float video_aspect = float(decoder.get_width()) / float(decoder.get_height());
+				float vp_aspect = vp.width / vp.height;
+
+				if (vp_aspect > video_aspect)
+				{
+					float target_width = vp.height * video_aspect;
+					vp.x = std::round(0.5f * (vp.width - target_width));
+					vp.width = std::round(target_width);
+				}
+				else if (vp_aspect < video_aspect)
+				{
+					float target_height = vp.width / video_aspect;
+					vp.y = std::round(0.5f * (vp.height - target_height));
+					vp.height = std::round(target_height);
+				}
+
+				cmd->set_viewport(vp);
+				cmd->draw(3);
+			}
+			cmd->end_render_pass();
 		}
-		cmd->end_render_pass();
 
-		frame.sem.reset();
-		device.submit(cmd, nullptr, 1, &frame.sem);
+		{
+			GRANITE_SCOPED_TIMELINE_EVENT("submit");
+			frame.sem.reset();
+			device.submit(cmd, nullptr, 1, &frame.sem);
+		}
 	}
 
 	pyro_codec_parameters get_codec_parameters() override
