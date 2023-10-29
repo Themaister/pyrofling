@@ -33,12 +33,12 @@ PyroStreamConnection::PyroStreamConnection(
 		remote_port = serv;
 	}
 
-	has_observed_keyframe = false;
+	needs_key_frame.store(false, std::memory_order_relaxed);
 }
 
 bool PyroStreamConnection::requires_idr()
 {
-	return !has_observed_keyframe.load(std::memory_order_relaxed);
+	return needs_key_frame.load(std::memory_order_relaxed);
 }
 
 bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
@@ -98,6 +98,7 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 				if (!send_stream_message(fd, &codec, sizeof(codec)))
 					return false;
 				kicked = true;
+				needs_key_frame.store(true, std::memory_order_relaxed);
 			}
 			else if (udp_remote)
 			{
@@ -136,9 +137,7 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 			       static_cast<unsigned long long>(progress.total_dropped_packets),
 			       static_cast<unsigned long long>(progress.total_received_key_frames));
 
-			if (progress.total_received_key_frames)
-				has_observed_keyframe.store(true, std::memory_order_relaxed);
-
+			needs_key_frame.store(progress.total_received_key_frames == 0, std::memory_order_relaxed);
 			break;
 		}
 

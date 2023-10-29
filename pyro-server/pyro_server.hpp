@@ -42,7 +42,7 @@ private:
 	PyroFling::FileHandle timer_fd;
 	pyro_progress_report progress = {};
 	std::string remote_addr, remote_port;
-	std::atomic<bool> has_observed_keyframe;
+	std::atomic<bool> needs_key_frame;
 
 	uint64_t cookie;
 	uint32_t packet_seq_video = 0;
