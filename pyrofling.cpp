@@ -1189,11 +1189,11 @@ struct HeartbeatHandler final : Handler
 
 	bool handle(const FileHandle &fd, uint32_t) override
 	{
-		update_loop(fd, server.pyro.get_phase_offset_us());
-
 		uint64_t timeouts = 0;
 		if (::read(fd.get_native_handle(), &timeouts, sizeof(timeouts)) <= 0)
 			return false;
+
+		update_loop(fd, server.pyro.get_phase_offset_us());
 
 		for (uint64_t i = 1; i < timeouts; i++)
 		{
