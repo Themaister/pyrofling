@@ -250,6 +250,15 @@ void PyroStreamConnection::handle_udp_datagram(
 		break;
 	}
 
+	case PYRO_MESSAGE_PHASE_OFFSET:
+	{
+		pyro_phase_offset phase = {};
+		memcpy(&phase, msg, sizeof(phase));
+		server.set_phase_offset(phase.ideal_phase_offset_us);
+		printf("PHASE OFFSET = %d us\n", phase.ideal_phase_offset_us);
+		break;
+	}
+
 	default:
 		break;
 	}
@@ -329,5 +338,15 @@ bool PyroStreamServer::should_force_idr()
 	}
 
 	return requires_idr;
+}
+
+void PyroStreamServer::set_phase_offset(int phase_offset_us_)
+{
+	phase_offset_us = phase_offset_us_;
+}
+
+int PyroStreamServer::get_phase_offset_us() const
+{
+	return phase_offset_us;
 }
 }

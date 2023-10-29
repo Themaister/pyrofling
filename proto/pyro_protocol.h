@@ -51,6 +51,14 @@ struct pyro_progress_report
 	uint64_t total_received_key_frames;
 };
 
+struct pyro_phase_offset
+{
+	// Tells server that ideally we should have received frame at
+	// an offset from the time it was actually received.
+	// If positive, server will slow down slightly, if negative, speed up.
+	int32_t ideal_phase_offset_us;
+};
+
 #define PYRO_MAX_UDP_DATAGRAM_SIZE (PYRO_MAX_PAYLOAD_SIZE + sizeof(struct pyro_codec_parameters))
 
 // TCP: Server to client
@@ -71,6 +79,7 @@ typedef enum pyro_message_type
 	// Returns nothing. Must be received by server every 5 seconds or connection is dropped.
 	PYRO_MESSAGE_PROGRESS = PYRO_MAKE_MESSAGE_TYPE(6, sizeof(struct pyro_progress_report)),
 	PYRO_MESSAGE_CODEC_PARAMETERS = PYRO_MAKE_MESSAGE_TYPE(7, sizeof(struct pyro_codec_parameters)),
+	PYRO_MESSAGE_PHASE_OFFSET = PYRO_MAKE_MESSAGE_TYPE(8, sizeof(struct pyro_phase_offset)),
 	PYRO_MESSAGE_MAX_INT = INT32_MAX,
 } pyro_message_type;
 

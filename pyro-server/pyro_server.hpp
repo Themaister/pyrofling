@@ -15,9 +15,10 @@ public:
 	virtual ~PyroStreamConnectionServerInterface() = default;
 	virtual void release_connection(PyroStreamConnection *conn) = 0;
 	virtual pyro_codec_parameters get_codec_parameters() = 0;
+	virtual void set_phase_offset(int phase_us) = 0;
 };
 
-class PyroStreamConnection : public PyroFling::Handler, public Util::IntrusivePtrEnabled<PyroStreamConnection>
+class PyroStreamConnection : public PyroFling::Handler, public Util::ThreadSafeIntrusivePtrEnabled<PyroStreamConnection>
 {
 public:
 	PyroStreamConnection(PyroFling::Dispatcher &dispatcher, PyroStreamConnectionServerInterface &server,
@@ -79,6 +80,8 @@ public:
 	                         const void *msg, unsigned size);
 	void release_connection(PyroStreamConnection *conn) override;
 	bool should_force_idr();
+	void set_phase_offset(int phase_offset_us) override;
+	int get_phase_offset_us() const;
 
 private:
 	uint64_t cookie = 1000;
@@ -86,5 +89,6 @@ private:
 	std::vector<Util::IntrusivePtr<PyroStreamConnection>> connections;
 	pyro_codec_parameters codec = {};
 	unsigned idr_counter = 0;
+	int phase_offset_us = 0;
 };
 }

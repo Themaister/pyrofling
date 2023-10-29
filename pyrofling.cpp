@@ -1182,10 +1182,15 @@ struct HeartbeatHandler final : Handler
 	HeartbeatHandler(Dispatcher &dispatcher_, SwapchainServer &server_, unsigned fps)
 			: Handler(dispatcher_), server(server_), timebase_ns(1000000000u / fps)
 	{
+		// Nudge the timebase by up to 1% in 0.01% increments.
+		timebase_ns_fraction = timebase_ns / 10000;
+		target_interval_ns = timebase_ns;
 	}
 
 	bool handle(const FileHandle &fd, uint32_t) override
 	{
+		update_loop(fd, server.pyro.get_phase_offset_us());
+
 		uint64_t timeouts = 0;
 		if (::read(fd.get_native_handle(), &timeouts, sizeof(timeouts)) <= 0)
 			return false;
@@ -1213,8 +1218,52 @@ struct HeartbeatHandler final : Handler
 		delete this;
 	}
 
+	void update_loop(const FileHandle &fd, int phase_offset_us)
+	{
+		// +/- 0.5ms is perfectly fine.
+		if (abs(phase_offset_us) < 500)
+			return;
+
+		timespec tv = {};
+		itimerspec itimer = {};
+		clock_gettime(CLOCK_MONOTONIC, &tv);
+
+		// The gettime result is always relative to next tick, regardless of ABSTIME being used.
+		timerfd_gettime(fd.get_native_handle(), &itimer);
+
+		uint64_t target_time_ns =
+				(tv.tv_sec + itimer.it_value.tv_sec) * 1000000000ull +
+				tv.tv_nsec + itimer.it_value.tv_nsec;
+
+		if (phase_offset_us > 0 && tick_interval_offset < 100)
+		{
+			// Client want frame delivered later, increase interval.
+			tick_interval_offset++;
+			target_time_ns += timebase_ns_fraction;
+			target_interval_ns += timebase_ns_fraction;
+		}
+		else if (phase_offset_us < 0 && tick_interval_offset > -100)
+		{
+			// Client want frame delivered sooner, reduce interval.
+			tick_interval_offset--;
+			target_time_ns -= timebase_ns_fraction;
+			target_interval_ns -= timebase_ns_fraction;
+		}
+
+		itimer.it_value.tv_nsec = long(target_time_ns % 1000000000);
+		itimer.it_value.tv_sec = time_t(target_time_ns / 1000000000);
+		itimer.it_interval.tv_nsec = long(target_interval_ns % 1000000000);
+		itimer.it_interval.tv_sec = time_t(target_interval_ns / 1000000000);
+
+		LOGI("Updating tick rate: %d\n", tick_interval_offset);
+		timerfd_settime(fd.get_native_handle(), TFD_TIMER_ABSTIME, &itimer, nullptr);
+	}
+
 	SwapchainServer &server;
 	uint64_t timebase_ns;
+	uint64_t timebase_ns_fraction = 0;
+	uint64_t target_interval_ns = 0;
+	int tick_interval_offset = 0;
 };
 
 static void print_help()
