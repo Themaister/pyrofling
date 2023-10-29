@@ -1182,8 +1182,8 @@ struct HeartbeatHandler final : Handler
 	HeartbeatHandler(Dispatcher &dispatcher_, SwapchainServer &server_, unsigned fps)
 			: Handler(dispatcher_), server(server_), timebase_ns(1000000000u / fps)
 	{
-		// Nudge the timebase by up to 1% in 0.1% increments.
-		timebase_ns_fraction = timebase_ns / 1000;
+		// Nudge the timebase by up to 1% in 0.01% increments.
+		timebase_ns_fraction = timebase_ns / 10000;
 		target_interval_ns = timebase_ns;
 	}
 
@@ -1220,8 +1220,8 @@ struct HeartbeatHandler final : Handler
 
 	void update_loop(const FileHandle &fd, int phase_offset_us)
 	{
-		// +/- 0.5ms is perfectly fine.
-		if (abs(phase_offset_us) < 500)
+		// +/- 0.2ms is perfectly fine.
+		if (abs(phase_offset_us) < 200)
 			return;
 
 		timespec tv = {};
@@ -1235,9 +1235,10 @@ struct HeartbeatHandler final : Handler
 				(tv.tv_sec + itimer.it_value.tv_sec) * 1000000000ull +
 				tv.tv_nsec + itimer.it_value.tv_nsec;
 
-		constexpr int respond_factor = 4;
+		// Add larger immediate offsets, but accelerate slowly.
+		constexpr int respond_factor = 40;
 
-		if (phase_offset_us > 0 && tick_interval_offset < 10)
+		if (phase_offset_us > 0 && tick_interval_offset < 30)
 		{
 			// Client want frame delivered later, increase interval.
 			// Offset the interval more sharply so we can respond in time.
@@ -1245,7 +1246,7 @@ struct HeartbeatHandler final : Handler
 			target_time_ns += respond_factor * timebase_ns_fraction;
 			target_interval_ns += timebase_ns_fraction;
 		}
-		else if (phase_offset_us < 0 && tick_interval_offset > -10)
+		else if (phase_offset_us < 0 && tick_interval_offset > -30)
 		{
 			// Client want frame delivered sooner, reduce interval.
 			// Offset the interval more sharply so we can respond in time.
