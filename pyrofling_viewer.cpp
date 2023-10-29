@@ -127,16 +127,16 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 	double last_done_ts = 0.0;
 	double last_pts = 0.0;
-	double audio_buffer[64] = {};
+	double audio_delay_buffer[64] = {};
 	unsigned audio_buffer_counter = 0;
 	bool stats;
 
 	void update_audio_buffer_stats()
 	{
-		audio_buffer[audio_buffer_counter++] = decoder.get_audio_buffering_duration();
+		audio_delay_buffer[audio_buffer_counter++] = decoder.get_audio_buffering_duration();
 		audio_buffer_counter %= 64;
 		double avg = 0.0;
-		for (auto &v: audio_buffer)
+		for (auto &v : audio_delay_buffer)
 			avg += v;
 		avg /= 64.0;
 		LOGI("Buffered audio: %.3f ms, underflows %u.\n", avg * 1e3, decoder.get_audio_underflow_counter());
