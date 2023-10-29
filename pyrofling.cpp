@@ -1266,7 +1266,6 @@ struct HeartbeatHandler final : Handler
 		itimer.it_interval.tv_nsec = long(target_interval_ns % 1000000000);
 		itimer.it_interval.tv_sec = time_t(target_interval_ns / 1000000000);
 
-		LOGI("Updating tick rate: %d\n", tick_interval_offset);
 		timerfd_settime(fd.get_native_handle(), TFD_TIMER_ABSTIME, &itimer, nullptr);
 	}
 
