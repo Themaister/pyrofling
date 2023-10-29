@@ -40,7 +40,9 @@ using namespace Granite;
 struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 {
 	explicit VideoPlayerApplication(const char *video_path,
-	                                float video_buffer, float audio_buffer, float target)
+	                                float video_buffer,
+	                                float audio_buffer, float target, bool stats_)
+		: stats(stats_)
 	{
 		// Debug
 		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
@@ -125,6 +127,20 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 	double last_done_ts = 0.0;
 	double last_pts = 0.0;
+	double audio_buffer[64] = {};
+	unsigned audio_buffer_counter = 0;
+	bool stats;
+
+	void update_audio_buffer_stats()
+	{
+		audio_buffer[audio_buffer_counter++] = decoder.get_audio_buffering_duration();
+		audio_buffer_counter %= 64;
+		double avg = 0.0;
+		for (auto &v: audio_buffer)
+			avg += v;
+		avg /= 64.0;
+		LOGI("Buffered audio: %.3f ms, underflows %u.\n", avg * 1e3, decoder.get_audio_underflow_counter());
+	}
 
 	bool update(Vulkan::Device &device, double elapsed_time)
 	{
@@ -159,25 +175,29 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 			// Audio syncs to video.
 			// Dynamic rate control.
+			decoder.latch_audio_buffering_target(0.030);
 
-			// Give 20ms extra audio buffering for good measure.
-			decoder.latch_audio_presentation_target(frame.pts - 0.02);
-
-			// Measure frame jitter.
-			if (frame.view)
+			if (stats)
 			{
-				if (last_done_ts != 0.0 && last_pts != 0.0)
+				// Measure frame jitter.
+				if (frame.view)
 				{
-					double done_delta = frame.done_ts - last_done_ts;
-					double pts_delta = frame.pts - last_pts;
-					double jitter = done_delta - pts_delta;
+					if (last_done_ts != 0.0 && last_pts != 0.0)
+					{
+						double done_delta = frame.done_ts - last_done_ts;
+						double pts_delta = frame.pts - last_pts;
+						double jitter = done_delta - pts_delta;
 
-					// We want these to be increasing at same rate. If there is variation,
-					// we need to consider adding in extra delay to absorb the jitter.
-					LOGI("Jitter: %.3f ms.\n", jitter * 1e3);
+						// We want these to be increasing at same rate. If there is variation,
+						// we need to consider adding in extra delay to absorb the jitter.
+						LOGI("Jitter: %.3f ms.\n", jitter * 1e3);
+					}
+					last_done_ts = frame.done_ts;
+					last_pts = frame.pts;
 				}
-				last_done_ts = frame.done_ts;
-				last_pts = frame.pts;
+
+				if (stats)
+					update_audio_buffer_stats();
 			}
 		}
 		else
@@ -191,6 +211,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 				// Based on the video PTS.
 				// Aim for 100ms of buffering to absorb network jank.
 				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, target_realtime_delay);
+				if (stats)
+					update_audio_buffer_stats();
 			}
 			else
 			{
@@ -356,7 +378,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 static void print_help()
 {
-	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY]\n");
+	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--stats]\n");
 }
 
 namespace Granite
@@ -371,12 +393,14 @@ Application *application_create(int argc, char **argv)
 	float audio_buffer = 0.5f;
 	float target_delay = 0.1f;
 	const char *path = nullptr;
+	bool stats = false;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
 	cbs.add("--video-buffer", [&](Util::CLIParser &parser) { video_buffer = float(parser.next_double()); });
 	cbs.add("--audio-buffer", [&](Util::CLIParser &parser) { audio_buffer = float(parser.next_double()); });
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
+	cbs.add("--stats", [&](Util::CLIParser &) { stats = true; });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
 
@@ -411,7 +435,7 @@ Application *application_create(int argc, char **argv)
 
 	try
 	{
-		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay);
+		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay, stats);
 		return app;
 	}
 	catch (const std::exception &e)
