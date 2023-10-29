@@ -41,16 +41,14 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 {
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer,
-	                                float audio_buffer, float target, bool stats_, unsigned phase_locked_)
-		: stats(stats_), phase_locked(phase_locked_)
+	                                float audio_buffer, float target, bool stats_,
+									double phase_locked_offset_, bool phase_locked_enable_)
+		: stats(stats_), phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
 	{
 		// Debug
 		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
 		//PyroFling::PyroStreamClient::set_simulate_drop(true);
 		////
-
-		if (phase_locked)
-			target = 0.0f;
 
 		get_wsi().set_low_latency_mode(true);
 
@@ -79,6 +77,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 			decoder.set_io_interface(this);
 			video_path = nullptr;
 		}
+		else
+			phase_locked_enable = false;
 
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 			throw std::runtime_error("Failed to open file");
@@ -93,7 +93,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
 
-		if (target_realtime_delay <= 0.0 && phase_locked == 0)
+		if (target_realtime_delay <= 0.0 && !phase_locked_enable)
 			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
 	}
 
@@ -133,7 +133,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 	double audio_delay_buffer[64] = {};
 	unsigned audio_buffer_counter = 0;
 	bool stats;
-	unsigned phase_locked;
+	double phase_locked_offset;
+	bool phase_locked_enable;
 
 	void update_audio_buffer_stats()
 	{
@@ -151,11 +152,14 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 		GRANITE_SCOPED_TIMELINE_EVENT("update");
 
 		// Most aggressive method, not all that great for pacing ...
-		if (realtime && target_realtime_delay <= 0.0)
+		if (realtime && (target_realtime_delay <= 0.0 || phase_locked_enable))
 		{
+			double target_done = double(Util::get_current_time_nsecs()) * 1e-9 + phase_locked_offset;
 			bool had_acquire = false;
-			// Always pick the most recent video frame we have.
-			for (;;)
+			unsigned target_frames = phase_locked_enable ? 3 : 0;
+
+			// Catch up and then rely on phase locked loop to tune latency.
+			while (decoder.get_num_ready_video_frames() > target_frames)
 			{
 				if (next_frame.view)
 					shift_frame();
@@ -176,6 +180,14 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 			if (next_frame.view)
 				shift_frame();
+
+			if (phase_locked_enable)
+			{
+				double phase_offset = target_done - double(frame.done_ts) * 1e-9;
+				int target_phase_offset_us = int(phase_offset * 1e6);
+				if (!pyro.send_target_phase_offset(target_phase_offset_us))
+					LOGE("Failed to send phase offset.\n");
+			}
 
 			// Audio syncs to video.
 			// Dynamic rate control.
@@ -307,20 +319,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 	{
 		auto &device = get_wsi().get_device();
 
-		uint64_t start_update_ns = Util::get_current_time_nsecs();
 		if (!update(device, elapsed_time))
 			request_shutdown();
-		uint64_t end_update_ns = Util::get_current_time_nsecs();
-		if (phase_locked)
-		{
-			int us_update_time = int((end_update_ns - start_update_ns) / 1000);
-			int target_phase_offset_us = int(phase_locked) * 1000 - us_update_time;
-			if (!pyro.send_target_phase_offset(target_phase_offset_us))
-				LOGE("Failed to send phase offset.\n");
-
-			if (stats)
-				LOGI("Received frame at offset %d us.\n", us_update_time);
-		}
 
 		auto cmd = device.request_command_buffer();
 
@@ -396,7 +396,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 	bool need_acquire = false;
 	Vulkan::Program *blit = nullptr;
 	bool realtime = false;
-	double target_realtime_delay = 0.1;
+	double target_realtime_delay = 0.0;
 };
 
 static void print_help()
@@ -417,7 +417,8 @@ Application *application_create(int argc, char **argv)
 	float target_delay = 0.1f;
 	const char *path = nullptr;
 	bool stats = false;
-	unsigned phase_locked = 0;
+	double phase_locked_offset = 0.0;
+	bool phase_locked_enable = false;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
@@ -425,7 +426,7 @@ Application *application_create(int argc, char **argv)
 	cbs.add("--audio-buffer", [&](Util::CLIParser &parser) { audio_buffer = float(parser.next_double()); });
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
 	cbs.add("--stats", [&](Util::CLIParser &) { stats = true; });
-	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked = parser.next_uint(); });
+	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
 
@@ -460,7 +461,8 @@ Application *application_create(int argc, char **argv)
 
 	try
 	{
-		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay, stats, phase_locked);
+		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay, stats,
+		                                       phase_locked_offset, phase_locked_enable);
 		return app;
 	}
 	catch (const std::exception &e)
