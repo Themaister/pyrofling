@@ -401,7 +401,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 
 static void print_help()
 {
-	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--stats]\n");
+	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--stats] [--phase-locked OFFSET]\n");
 }
 
 namespace Granite
