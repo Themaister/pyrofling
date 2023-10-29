@@ -1002,7 +1002,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 	Granite::ThreadGroup group;
 	Dispatcher &dispatcher;
-	std::unique_ptr<Granite::Audio::RecordStream> audio_record;
 	std::unique_ptr<VkInstance_T, InstanceDeleter> instance;
 	std::vector<Util::IntrusivePtr<Swapchain>> handlers;
 	std::vector<PhysicalDevice> gpus;
@@ -1011,6 +1010,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	Granite::VideoEncoder::YCbCrPipeline pipeline[NumEncodeTasks];
 	std::unique_ptr<Granite::VideoEncoder> encoder;
 	Vulkan::Device *encoder_device = nullptr;
+
+	// Audio recorder must be destroyed before encoder.
+	std::unique_ptr<Granite::Audio::RecordStream> audio_record;
 
 	Granite::TaskGroupHandle last_encode_dependency;
 	Granite::TaskGroupHandle encode_tasks[NumEncodeTasks];

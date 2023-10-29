@@ -198,9 +198,10 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 				// Measure frame jitter.
 				if (frame.view)
 				{
+					double done_ts = double(frame.done_ts) * 1e-9;
 					if (last_done_ts != 0.0 && last_pts != 0.0)
 					{
-						double done_delta = frame.done_ts - last_done_ts;
+						double done_delta = done_ts - last_done_ts;
 						double pts_delta = frame.pts - last_pts;
 						double jitter = done_delta - pts_delta;
 
@@ -208,7 +209,7 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 						// we need to consider adding in extra delay to absorb the jitter.
 						LOGI("Jitter: %.3f ms.\n", jitter * 1e3);
 					}
-					last_done_ts = frame.done_ts;
+					last_done_ts = done_ts;
 					last_pts = frame.pts;
 				}
 
