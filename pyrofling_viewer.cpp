@@ -181,7 +181,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 #elif defined(HAVE_XINPUT_WINDOWS)
 		XInputManager input_manager;
-		if (!input_manager.init(&tracker))
+		if (!input_manager.init(&tracker, nullptr))
 		{
 			LOGE("Failed to init input manager.\n");
 			return;
