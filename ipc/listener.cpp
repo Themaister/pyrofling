@@ -347,8 +347,8 @@ bool Dispatcher::iterate_inner()
 				auto itr = std::find_if(connections.begin(), connections.end(),
 				                        [conn](const std::unique_ptr<Connection> &c)
 				                        { return c.get() == conn; });
-				assert(itr != connections.end());
-				connections.erase(itr);
+				if (itr != connections.end())
+					connections.erase(itr);
 
 				if (is_sentinel)
 					return false;

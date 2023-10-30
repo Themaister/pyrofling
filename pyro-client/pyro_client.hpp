@@ -22,6 +22,8 @@ public:
 
 	bool send_target_phase_offset(int offset_us);
 
+	bool send_gamepad_state(const pyro_gamepad_state &state);
+
 	// Purely for debugging.
 	static void set_simulate_reordering(bool enable);
 	static void set_simulate_drop(bool enable);
@@ -55,6 +57,7 @@ private:
 
 	std::chrono::time_point<std::chrono::steady_clock> last_progress_time;
 	bool has_observed_keyframe = false;
+	uint16_t gamepad_seq = 0;
 
 	bool iterate();
 };

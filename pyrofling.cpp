@@ -33,6 +33,7 @@
 #include "slangmosh_encode_iface.hpp"
 #include "slangmosh_encode.hpp"
 #include "pyro_server.hpp"
+#include "virtual_gamepad.hpp"
 #include <stdexcept>
 #include <vector>
 #include <thread>
@@ -902,6 +903,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	                         const void *msg, unsigned size) override
 	{
 		pyro.handle_udp_datagram(dispatcher_, remote, msg, size);
+		if (const auto *state = pyro.get_updated_gamepad_state())
+			uinput.report_state(*state);
 	}
 
 	bool register_handler(Dispatcher &dispatcher_, const FileHandle &fd, Handler *&handler) override
@@ -1017,6 +1020,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	Granite::TaskGroupHandle last_encode_dependency;
 	Granite::TaskGroupHandle encode_tasks[NumEncodeTasks];
 	unsigned next_encode_task_slot = 0;
+	VirtualGamepad uinput;
 
 	PyroStreamServer pyro;
 
