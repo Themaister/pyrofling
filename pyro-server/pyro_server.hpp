@@ -61,7 +61,9 @@ private:
 	} tcp;
 	uint32_t tcp_length = 0;
 
+	uint16_t last_gamepad_seq = 0;
 	bool kicked = false;
+	bool valid_gamepad_seq = false;
 	void write_packet(int64_t pts, int64_t dts, const void *data_, size_t size, bool is_audio, bool is_key_frame);
 };
 

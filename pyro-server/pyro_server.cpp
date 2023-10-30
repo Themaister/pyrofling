@@ -271,7 +271,14 @@ void PyroStreamConnection::handle_udp_datagram(
 		{
 			pyro_gamepad_state state = {};
 			memcpy(&state, msg, sizeof(state));
-			server.set_gamepad_state(udp_remote, state);
+
+			// Only accept monotonic gamepad updates.
+			if (((state.seq - last_gamepad_seq) & 0x8000) == 0 || !valid_gamepad_seq)
+			{
+				server.set_gamepad_state(udp_remote, state);
+				last_gamepad_seq = state.seq;
+			}
+			valid_gamepad_seq = true;
 		}
 		break;
 	}

@@ -94,6 +94,8 @@ bool PyroStreamClient::send_target_phase_offset(int offset_us)
 
 bool PyroStreamClient::send_gamepad_state(const pyro_gamepad_state &state)
 {
+	auto send_state = state;
+	send_state.seq = gamepad_seq++;
 	pyro_message_type type = PYRO_MESSAGE_GAMEPAD_STATE;
 	return udp.write_message(&type, sizeof(type), &state, sizeof(state));
 }
