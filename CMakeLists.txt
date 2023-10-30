@@ -69,6 +69,9 @@ if (NOT PYROFLING_LAYER_ONLY)
 
     add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
     target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio pyro-client)
+    if (WIN32)
+            target_link_libraries(pyrofling-viewer PRIVATE winmm)
+    endif()
     install(TARGETS pyrofling-viewer)
 endif()
 
