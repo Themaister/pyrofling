@@ -85,7 +85,7 @@ public:
 	void set_phase_offset(int phase_offset_us) override;
 	int get_phase_offset_us() const;
 	void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) override;
-	const pyro_gamepad_state *get_updated_gamepad_state() const;
+	const pyro_gamepad_state *get_updated_gamepad_state();
 
 private:
 	uint64_t cookie = 1000;

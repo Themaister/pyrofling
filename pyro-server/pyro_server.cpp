@@ -372,9 +372,11 @@ int PyroStreamServer::get_phase_offset_us() const
 	return phase_offset_us.exchange(0, std::memory_order_relaxed);
 }
 
-const pyro_gamepad_state *PyroStreamServer::get_updated_gamepad_state() const
+const pyro_gamepad_state *PyroStreamServer::get_updated_gamepad_state()
 {
-	return new_gamepad_state ? &current_gamepad_state : nullptr;
+	auto *ret = new_gamepad_state ? &current_gamepad_state : nullptr;
+	new_gamepad_state = false;
+	return ret;
 }
 
 void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)
