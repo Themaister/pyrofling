@@ -115,8 +115,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 			state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Right))) != 0 ? +1 : 0;
 			state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Up))) != 0 ? -1 : 0;
 			state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Down))) != 0 ? +1 : 0;
-			state.lz = uint8_t(255.0f * (joy.axis[int(JoypadAxis::LeftTrigger)] * 0.5f + 0.5f));
-			state.rz = uint8_t(255.0f * (joy.axis[int(JoypadAxis::RightTrigger)] * 0.5f + 0.5f));
+			state.lz = uint8_t(255.0f * joy.axis[int(JoypadAxis::LeftTrigger)]);
+			state.rz = uint8_t(255.0f * joy.axis[int(JoypadAxis::RightTrigger)]);
 			if (joy.button_mask & (1 << int(JoypadKey::East)))
 				state.buttons |= PYRO_PAD_EAST_BIT;
 			if (joy.button_mask & (1 << int(JoypadKey::South)))
@@ -137,6 +137,8 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 				state.buttons |= PYRO_PAD_START_BIT;
 			if (joy.button_mask & (1 << int(JoypadKey::Select)))
 				state.buttons |= PYRO_PAD_SELECT_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::Mode)))
+				state.buttons |= PYRO_PAD_MODE_BIT;
 		}
 
 		pyro.send_gamepad_state(state);

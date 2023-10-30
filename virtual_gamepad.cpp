@@ -12,7 +12,7 @@ namespace PyroFling
 {
 static const int button_mapping[] =
 {
-	BTN_SOUTH, BTN_EAST, BTN_WEST, BTN_NORTH,
+	BTN_A, BTN_B, BTN_X, BTN_Y, // Steam input seems to prefer this layout rather than standard cardinal.
 	BTN_TL, BTN_TR,
 	BTN_THUMBL, BTN_THUMBR,
 	BTN_START, BTN_SELECT,
