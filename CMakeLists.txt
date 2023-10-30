@@ -60,10 +60,10 @@ add_subdirectory(pyro-client)
 if (NOT PYROFLING_LAYER_ONLY)
     if (NOT WIN32)
         add_subdirectory(examples)
-        add_executable(pyrofling pyrofling.cpp)
+        add_executable(pyrofling pyrofling.cpp virtual_gamepad.cpp virtual_gamepad.hpp)
         target_compile_options(pyrofling PRIVATE ${PYROFLING_CXX_FLAGS})
         target_link_libraries(pyrofling PRIVATE
-            pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio pyro-server)
+                pyro-protocol pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio pyro-server)
         install(TARGETS pyrofling)
     endif()
 

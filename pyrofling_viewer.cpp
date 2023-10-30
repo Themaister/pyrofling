@@ -33,6 +33,7 @@
 #include "string_helpers.hpp"
 #include "timeline_trace_file.hpp"
 #include "thread_group.hpp"
+#include "pyro_protocol.h"
 #include <cmath>
 
 using namespace Granite;
@@ -93,8 +94,53 @@ struct VideoPlayerApplication : Application, EventHandler, DemuxerIOInterface
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
 
+		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_joy_state, JoypadStateEvent);
+
 		if (target_realtime_delay <= 0.0 && !phase_locked_enable)
 			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
+	}
+
+	bool on_joy_state(const JoypadStateEvent &e)
+	{
+		// TODO: Improve
+		pyro_gamepad_state state = {};
+		if (e.is_connected(0))
+		{
+			auto &joy = e.get_state(0);
+			state.axis_lx = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftX)]);
+			state.axis_ly = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftY)]);
+			state.axis_rx = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightX)]);
+			state.axis_ry = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightY)]);
+			state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Left))) != 0 ? -1 : 0;
+			state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Right))) != 0 ? +1 : 0;
+			state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Up))) != 0 ? -1 : 0;
+			state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Down))) != 0 ? +1 : 0;
+			state.lz = uint8_t(255.0f * (joy.axis[int(JoypadAxis::LeftTrigger)] * 0.5f + 0.5f));
+			state.rz = uint8_t(255.0f * (joy.axis[int(JoypadAxis::RightTrigger)] * 0.5f + 0.5f));
+			if (joy.button_mask & (1 << int(JoypadKey::East)))
+				state.buttons |= PYRO_PAD_EAST_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::South)))
+				state.buttons |= PYRO_PAD_SOUTH_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::West)))
+				state.buttons |= PYRO_PAD_WEST_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::North)))
+				state.buttons |= PYRO_PAD_NORTH_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::LeftShoulder)))
+				state.buttons |= PYRO_PAD_TL_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::RightShoulder)))
+				state.buttons |= PYRO_PAD_TR_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::LeftThumb)))
+				state.buttons |= PYRO_PAD_THUMBL_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::RightThumb)))
+				state.buttons |= PYRO_PAD_THUMBR_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::Start)))
+				state.buttons |= PYRO_PAD_START_BIT;
+			if (joy.button_mask & (1 << int(JoypadKey::Select)))
+				state.buttons |= PYRO_PAD_SELECT_BIT;
+		}
+
+		pyro.send_gamepad_state(state);
+		return true;
 	}
 
 	std::string get_name() override

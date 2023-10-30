@@ -16,6 +16,7 @@ public:
 	virtual void release_connection(PyroStreamConnection *conn) = 0;
 	virtual pyro_codec_parameters get_codec_parameters() = 0;
 	virtual void set_phase_offset(int phase_us) = 0;
+	virtual void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) = 0;
 };
 
 class PyroStreamConnection : public PyroFling::Handler, public Util::ThreadSafeIntrusivePtrEnabled<PyroStreamConnection>
@@ -83,6 +84,8 @@ public:
 	bool should_force_idr();
 	void set_phase_offset(int phase_offset_us) override;
 	int get_phase_offset_us() const;
+	void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) override;
+	const pyro_gamepad_state *get_updated_gamepad_state() const;
 
 private:
 	uint64_t cookie = 1000;
@@ -91,5 +94,10 @@ private:
 	pyro_codec_parameters codec = {};
 	unsigned idr_counter = 0;
 	mutable std::atomic<int> phase_offset_us;
+
+	// Current owner of virtual device. Super crude system, but hey :)
+	RemoteAddress current_gamepad_remote;
+	pyro_gamepad_state current_gamepad_state = {};
+	bool new_gamepad_state = false;
 };
 }

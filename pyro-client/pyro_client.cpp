@@ -92,6 +92,12 @@ bool PyroStreamClient::send_target_phase_offset(int offset_us)
 	return udp.write_message(&type, sizeof(type), &data, sizeof(data));
 }
 
+bool PyroStreamClient::send_gamepad_state(const pyro_gamepad_state &state)
+{
+	pyro_message_type type = PYRO_MESSAGE_GAMEPAD_STATE;
+	return udp.write_message(&type, sizeof(type), &state, sizeof(state));
+}
+
 struct Packet
 {
 	pyro_payload_header header;

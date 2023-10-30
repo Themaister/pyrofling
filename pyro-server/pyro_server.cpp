@@ -142,8 +142,12 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 		}
 
 		default:
-			// Invalid message.
-			return false;
+		{
+			const pyro_message_type type = PYRO_MESSAGE_NAK;
+			if (!send_stream_message(fd, &type, sizeof(type)))
+				return false;
+			break;
+		}
 		}
 
 		size_t move_offset = pyro_message_get_length(tcp.split.type) + sizeof(pyro_message_type);
@@ -252,9 +256,23 @@ void PyroStreamConnection::handle_udp_datagram(
 
 	case PYRO_MESSAGE_PHASE_OFFSET:
 	{
-		pyro_phase_offset phase = {};
-		memcpy(&phase, msg, sizeof(phase));
-		server.set_phase_offset(phase.ideal_phase_offset_us);
+		if (udp_remote == remote)
+		{
+			pyro_phase_offset phase = {};
+			memcpy(&phase, msg, sizeof(phase));
+			server.set_phase_offset(phase.ideal_phase_offset_us);
+		}
+		break;
+	}
+
+	case PYRO_MESSAGE_GAMEPAD_STATE:
+	{
+		if (udp_remote == remote)
+		{
+			pyro_gamepad_state state = {};
+			memcpy(&state, msg, sizeof(state));
+			server.set_gamepad_state(udp_remote, state);
+		}
 		break;
 	}
 
@@ -352,5 +370,21 @@ void PyroStreamServer::set_phase_offset(int phase_offset_us_)
 int PyroStreamServer::get_phase_offset_us() const
 {
 	return phase_offset_us.exchange(0, std::memory_order_relaxed);
+}
+
+const pyro_gamepad_state *PyroStreamServer::get_updated_gamepad_state() const
+{
+	return new_gamepad_state ? &current_gamepad_state : nullptr;
+}
+
+void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)
+{
+	// Use mode bit to take control of session. Super crude, but good enough for POC.
+	if (remote == current_gamepad_remote || !current_gamepad_remote || (state.buttons & PYRO_PAD_MODE_BIT) != 0)
+	{
+		current_gamepad_state = state;
+		current_gamepad_remote = remote;
+		new_gamepad_state = true;
+	}
 }
 }
