@@ -7,3 +7,7 @@ add_library(pyrofling-ipc STATIC
 target_include_directories(pyrofling-ipc PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(pyrofling-ipc PRIVATE ${PYROFLING_CXX_FLAGS})
 
+if (NOT WIN32)
+    target_link_libraries(pyrofling-ipc PUBLIC -pthread)
+endif()
+
