@@ -1117,8 +1117,20 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.realtime_options.threads = video_encode.threads;
 			options.realtime_options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
 
-			options.format = video_encode.bit_depth > 8 ?
-					Granite::VideoEncoder::Format::P016 : Granite::VideoEncoder::Format::NV12;
+			if (video_encode.bit_depth > 8 && options.encoder)
+			{
+				if (strstr(options.encoder, "nvenc") != nullptr)
+					options.format = Granite::VideoEncoder::Format::P016;
+				else if (strstr(options.encoder, "vaapi") != nullptr)
+					options.format = Granite::VideoEncoder::Format::P010;
+				else
+				{
+					LOGW("Unsure which 10-bit pixel format to use.\n");
+					options.format = Granite::VideoEncoder::Format::NV12;
+				}
+			}
+			else
+				options.format = Granite::VideoEncoder::Format::NV12;
 
 			if (video_encode.audio)
 				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
