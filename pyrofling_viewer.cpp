@@ -116,8 +116,17 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
 
+		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
+
 		if (target_realtime_delay <= 0.0 && !phase_locked_enable)
 			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
+	}
+
+	bool on_key_pressed(const KeyboardEvent &e)
+	{
+		if (e.get_key() == Key::V && e.get_key_state() == KeyState::Pressed)
+			stats.enable = !stats.enable;
+		return true;
 	}
 
 	struct PadHandler : InputTrackerHandler
@@ -294,6 +303,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		float server_frame_time[150];
 		float ping[150];
 		float buffered_video[150];
+		bool enable = false;
 	} stats = {};
 
 	void update_audio_buffer_stats()
@@ -518,21 +528,30 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				cmd->draw(3);
 			}
 
-			flat_renderer.begin();
+			if (stats.enable)
+			{
+				flat_renderer.begin();
 
-			float y_offset = 15.0f;
-			render_sliding_window("Server pace", 15.0f, y_offset, 300, 100, stats.server_frame_time);
-			render_sliding_window("Client pace", 15.0f + 320.0f, y_offset, 300, 100, stats.local_frame_time);
-			y_offset += 110.0f;
-			render_sliding_window("Phase offset", 15.0f, y_offset, 300, 100, stats.phase_offsets, true);
-			render_sliding_window("Jitter", 15.0f + 320.0f, y_offset, 300, 100, stats.pts_deltas);
-			y_offset += 110.0f;
-			render_sliding_window("Audio buffer", 15.0f, y_offset, 300, 100, stats.audio_delay_buffer);
-			render_sliding_window("Video buffer", 15.0f + 320.0f, y_offset, 300, 100, stats.buffered_video);
-			y_offset += 110.0f;
-			render_sliding_window("Ping", 15.0f, y_offset, 300, 100, stats.ping);
+				float y_offset = 15.0f;
+				render_sliding_window("Server pace", 15.0f, y_offset, 300, 100, stats.server_frame_time);
+				render_sliding_window("Client pace", 15.0f + 320.0f, y_offset, 300, 100, stats.local_frame_time);
+				y_offset += 110.0f;
 
-			flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
+				if (phase_locked_enable)
+				{
+					render_sliding_window("Phase offset", 15.0f, y_offset, 300, 100, stats.phase_offsets, true);
+					render_sliding_window("Jitter", 15.0f + 320.0f, y_offset, 300, 100, stats.pts_deltas);
+					y_offset += 110.0f;
+				}
+
+				render_sliding_window("Audio buffer", 15.0f, y_offset, 300, 100, stats.audio_delay_buffer);
+				render_sliding_window("Video buffer", 15.0f + 320.0f, y_offset, 300, 100, stats.buffered_video);
+				y_offset += 110.0f;
+				render_sliding_window("Ping", 15.0f, y_offset, 300, 100, stats.ping);
+
+				flat_renderer.flush(*cmd, {}, {cmd->get_viewport().width, cmd->get_viewport().height, 1.0f});
+			}
+
 			cmd->end_render_pass();
 		}
 
