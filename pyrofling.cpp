@@ -1242,10 +1242,6 @@ struct HeartbeatHandler final : Handler
 
 	void update_loop(const FileHandle &fd, int phase_offset_us)
 	{
-		// +/- 0.2ms is perfectly fine.
-		if (abs(phase_offset_us) < 200)
-			return;
-
 		timespec tv = {};
 		itimerspec itimer = {};
 		clock_gettime(CLOCK_MONOTONIC, &tv);
@@ -1259,22 +1255,28 @@ struct HeartbeatHandler final : Handler
 
 		// Add larger immediate offsets, but accelerate slowly.
 		constexpr int respond_factor = 60;
+		bool sets_time = false;
 
-		if (phase_offset_us > 0 && tick_interval_offset < 50)
+		if (abs(phase_offset_us) > 200)
 		{
-			// Client want frame delivered later, increase interval.
-			// Offset the interval more sharply so we can respond in time.
-			tick_interval_offset += 2;
-			target_time_ns += respond_factor * timebase_ns_fraction;
-			target_interval_ns += 2 * timebase_ns_fraction;
-		}
-		else if (phase_offset_us < 0 && tick_interval_offset > -50)
-		{
-			// Client want frame delivered sooner, reduce interval.
-			// Offset the interval more sharply so we can respond in time.
-			tick_interval_offset -= 2;
-			target_time_ns -= respond_factor * timebase_ns_fraction;
-			target_interval_ns -= 2 * timebase_ns_fraction;
+			if (phase_offset_us > 0 && tick_interval_offset < 50)
+			{
+				// Client want frame delivered later, increase interval.
+				// Offset the interval more sharply so we can respond in time.
+				tick_interval_offset += 2;
+				target_time_ns += respond_factor * timebase_ns_fraction;
+				target_interval_ns += 2 * timebase_ns_fraction;
+				sets_time = true;
+			}
+			else if (phase_offset_us < 0 && tick_interval_offset > -50)
+			{
+				// Client want frame delivered sooner, reduce interval.
+				// Offset the interval more sharply so we can respond in time.
+				tick_interval_offset -= 2;
+				target_time_ns -= respond_factor * timebase_ns_fraction;
+				target_interval_ns -= 2 * timebase_ns_fraction;
+				sets_time = true;
+			}
 		}
 
 		// When we get no messages, move towards center.
@@ -1282,19 +1284,24 @@ struct HeartbeatHandler final : Handler
 		{
 			tick_interval_offset--;
 			target_interval_ns -= timebase_ns_fraction;
+			sets_time = true;
 		}
 		else if (tick_interval_offset < 0)
 		{
 			tick_interval_offset++;
 			target_interval_ns += timebase_ns_fraction;
+			sets_time = true;
 		}
 
-		itimer.it_value.tv_nsec = long(target_time_ns % 1000000000);
-		itimer.it_value.tv_sec = time_t(target_time_ns / 1000000000);
-		itimer.it_interval.tv_nsec = long(target_interval_ns % 1000000000);
-		itimer.it_interval.tv_sec = time_t(target_interval_ns / 1000000000);
+		if (sets_time)
+		{
+			itimer.it_value.tv_nsec = long(target_time_ns % 1000000000);
+			itimer.it_value.tv_sec = time_t(target_time_ns / 1000000000);
+			itimer.it_interval.tv_nsec = long(target_interval_ns % 1000000000);
+			itimer.it_interval.tv_sec = time_t(target_interval_ns / 1000000000);
 
-		timerfd_settime(fd.get_native_handle(), TFD_TIMER_ABSTIME, &itimer, nullptr);
+			timerfd_settime(fd.get_native_handle(), TFD_TIMER_ABSTIME, &itimer, nullptr);
+		}
 	}
 
 	SwapchainServer &server;
