@@ -189,6 +189,7 @@ template <typename Program, typename Shader>
 template <typename Device, typename Layout, typename Resolver>
 Shaders<Program, Shader>::Shaders(Device &device, Layout &layout, const Resolver &resolver)
 {
+	(void)resolver;
 	layout.unserialize(reflection_bank + 0, 348);
 	this->rgb_to_yuv = device.request_program(spirv_bank + 0, 2040, &layout);
 	layout.unserialize(reflection_bank + 348, 348);

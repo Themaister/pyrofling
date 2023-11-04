@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_C_STANDARD 99)
-project(pyrofling LANGUAGES CXX)
+project(pyrofling LANGUAGES CXX C)
 
 if (CMAKE_COMPILER_IS_GNUCXX OR (${CMAKE_CXX_COMPILER_ID} MATCHES "Clang"))
     set(PYROFLING_CXX_FLAGS -Wshadow -Wall -Wextra -Wno-comment -Wno-missing-field-initializers -Wno-empty-body -fvisibility=hidden)
@@ -29,12 +29,13 @@ if (NOT WIN32)
 endif()
 
 # Disable stuff we don't need. We'll use slangmosh to precompile the two shaders we care about.
-set(GRANITE_VULKAN_SYSTEM_HANDLES OFF CACHE BOOL "" FORCE)
-set(GRANITE_RENDERER OFF CACHE BOOL "" FORCE)
+set(GRANITE_VULKAN_SYSTEM_HANDLES ON CACHE BOOL "" FORCE)
+set(GRANITE_RENDERER ON CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_SHADER_COMPILER_OPTIMIZE OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_SHADER_MANAGER_RUNTIME_COMPILER OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_FOSSILIZE OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_SPIRV_CROSS OFF CACHE BOOL "" FORCE)
+set(GRANITE_SHIPPING ON CACHE BOOL "" FORCE)
 
 if (NOT PYROFLING_LAYER_ONLY)
     set(GRANITE_FFMPEG ON CACHE BOOL "" FORCE)
@@ -67,8 +68,11 @@ if (NOT PYROFLING_LAYER_ONLY)
         install(TARGETS pyrofling)
     endif()
 
+	add_blob_archive_target(viewer-fonts viewer_fonts
+        ${CMAKE_CURRENT_SOURCE_DIR}/Granite/assets/fonts/font.ttf fonts/font.ttf)
+
     add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
-    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio pyro-client)
+    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio pyro-client viewer-fonts)
     if (WIN32)
             target_link_libraries(pyrofling-viewer PRIVATE winmm)
     endif()

@@ -1,6 +1,65 @@
 {
 	"shaders": [
 		{ "name": "quad", "path": "quad.vert" },
-		{ "name": "blit", "path": "blit.frag" }
+		{ "name": "blit", "path": "blit.frag" },
+		{ "name": "line_ui", "path": "line_ui.vert" },
+		{ "name": "debug_mesh", "path": "debug_mesh.frag" },
+		{ "name": "sprite_vert", "path": "sprite.vert", "variants": [ { "define": "HAVE_UV", "count": 2 } ] },
+		{ "name": "sprite_frag", "path": "sprite.frag", "variants": [ { "define": "HAVE_BASECOLORMAP", "count": 2 }, { "define": "VARIANT_BIT_4", "count": 2 } ] }
+	],
+	"programs": [
+		{
+			"vert" : { "name" : "sprite_vert", "manager_path": "builtin://shaders/sprite.vert" },
+			"frag" : { "name" : "sprite_frag", "manager_path": "builtin://shaders/sprite.frag" },
+			"variants": [
+				[
+					{ "define" : "HAVE_EMISSIVE", "value" : 0},
+					{ "define" : "HAVE_EMISSIVE_REFRACTION", "value" : 0},
+					{ "define" : "HAVE_EMISSIVE_REFLECTION", "value" : 0},
+					{ "define" : "HAVE_POSITION", "value" : 1},
+					{ "define" : "HAVE_UV", "value" : 0},
+					{ "define" : "HAVE_NORMAL", "value" : 0},
+					{ "define" : "HAVE_TANGENT", "value" : 0},
+					{ "define" : "HAVE_BONE_INDEX", "value" : 0},
+					{ "define" : "HAVE_BONE_WEIGHT", "value" : 0},
+					{ "define" : "HAVE_VERTEX_COLOR", "value" : 1}
+				],
+				[
+					{ "define" : "VARIANT_BIT_4", "value" : 1},
+					{ "define" : "HAVE_EMISSIVE", "value" : 0},
+					{ "define" : "HAVE_EMISSIVE_REFRACTION", "value" : 0},
+					{ "define" : "HAVE_EMISSIVE_REFLECTION", "value" : 0},
+					{ "define" : "HAVE_POSITION", "value" : 1},
+					{ "define" : "HAVE_UV", "value" : 1},
+					{ "define" : "HAVE_NORMAL", "value" : 0},
+					{ "define" : "HAVE_TANGENT", "value" : 0},
+					{ "define" : "HAVE_BONE_INDEX", "value" : 0},
+					{ "define" : "HAVE_BONE_WEIGHT", "value" : 0},
+					{ "define" : "HAVE_VERTEX_COLOR", "value" : 1},
+					{ "define" : "HAVE_BASECOLORMAP", "value" : 1},
+					{ "define" : "HAVE_METALLICROUGHNESSMAP", "value" : 0},
+					{ "define" : "HAVE_OCCLUSIONMAP", "value" : 0},
+					{ "define" : "HAVE_EMISSIVEMAP", "value" : 0}
+				]
+			]
+		},
+		{
+			"vert" : { "name" : "line_ui", "manager_path": "builtin://shaders/line_ui.vert" },
+			"frag" : { "name" : "debug_mesh", "manager_path": "builtin://shaders/debug_mesh.frag" },
+			"variants": [
+				[
+					{ "define" : "HAVE_EMISSIVE", "value" : 0},
+					{ "define" : "HAVE_EMISSIVE_REFRACTION", "value" : 0},
+					{ "define" : "HAVE_EMISSIVE_REFLECTION", "value" : 0},
+					{ "define" : "HAVE_POSITION", "value" : 1},
+					{ "define" : "HAVE_UV", "value" : 0},
+					{ "define" : "HAVE_NORMAL", "value" : 0},
+					{ "define" : "HAVE_TANGENT", "value" : 0},
+					{ "define" : "HAVE_BONE_INDEX", "value" : 0},
+					{ "define" : "HAVE_BONE_WEIGHT", "value" : 0},
+					{ "define" : "HAVE_VERTEX_COLOR", "value" : 1}
+				]
+			]
+		}
 	]
 }

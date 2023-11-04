@@ -32,8 +32,11 @@
 #include "cli_parser.hpp"
 #include "string_helpers.hpp"
 #include "timeline_trace_file.hpp"
-#include "thread_group.hpp"
 #include "pyro_protocol.h"
+#include "flat_renderer.hpp"
+#include "filesystem.hpp"
+#include "viewer_fonts.h"
+#include "ui_manager.hpp"
 #include <cmath>
 
 #ifdef HAVE_LINUX_INPUT
@@ -44,13 +47,20 @@
 
 using namespace Granite;
 
+template <typename T, size_t N, typename U>
+static void push_sliding_window(T (&v)[N], U value)
+{
+	memmove(&v[0], &v[1], sizeof(v) - sizeof(v[0]));
+	v[N - 1] = T(value);
+}
+
 struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterface
 {
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer,
-	                                float audio_buffer, float target, bool stats_,
+	                                float audio_buffer, float target,
 									double phase_locked_offset_, bool phase_locked_enable_)
-		: stats(stats_), phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
+		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
 	{
 		// Debug
 		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
@@ -257,6 +267,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			decoder.release_video_frame(frame.index, std::move(frame.sem));
 		}
 
+		if (frame.view && next_frame.view)
+			push_sliding_window(stats.server_frame_time, next_frame.pts - frame.pts);
+
 		frame = std::move(next_frame);
 		next_frame = {};
 		need_acquire = true;
@@ -264,28 +277,31 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 	double last_done_ts = 0.0;
 	double last_pts = 0.0;
-	double audio_delay_buffer[64] = {};
-	unsigned audio_buffer_counter = 0;
-	bool stats;
 	double phase_locked_offset;
 	bool phase_locked_enable;
 	std::thread poll_thread;
 	std::atomic_bool poll_thread_dead;
 
+	struct
+	{
+		float pts_deltas[64];
+		float phase_offsets[64];
+		float audio_delay_buffer[64];
+		float local_frame_time[64];
+		float server_frame_time[64];
+	} stats = {};
+
 	void update_audio_buffer_stats()
 	{
-		audio_delay_buffer[audio_buffer_counter++] = decoder.get_audio_buffering_duration();
-		audio_buffer_counter %= 64;
-		double avg = 0.0;
-		for (auto &v : audio_delay_buffer)
-			avg += v;
-		avg /= 64.0;
-		LOGI("Buffered audio: %.3f ms, underflows %u.\n", avg * 1e3, decoder.get_audio_underflow_counter());
+		push_sliding_window(stats.audio_delay_buffer, decoder.get_audio_buffering_duration());
 	}
 
-	bool update(Vulkan::Device &device, double elapsed_time)
+	bool update(Vulkan::Device &device, double frame_time, double elapsed_time)
 	{
 		GRANITE_SCOPED_TIMELINE_EVENT("update");
+
+		push_sliding_window(stats.local_frame_time, frame_time);
+		update_audio_buffer_stats();
 
 		// Most aggressive method, not all that great for pacing ...
 		if (realtime && (target_realtime_delay <= 0.0 || phase_locked_enable))
@@ -320,6 +336,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			if (phase_locked_enable)
 			{
 				double phase_offset = target_done - double(frame.done_ts) * 1e-9;
+				memmove(stats.phase_offsets, stats.phase_offsets + 1,
+				        sizeof(stats.phase_offsets) - sizeof(stats.phase_offsets[0]));
+				stats.phase_offsets[sizeof(stats.phase_offsets) / sizeof(stats.phase_offsets[0]) - 1] = float(phase_offset);
+				push_sliding_window(stats.phase_offsets, phase_offset);
+
 				int target_phase_offset_us = int(phase_offset * 1e6);
 				if (!pyro.send_target_phase_offset(target_phase_offset_us))
 					LOGE("Failed to send phase offset.\n");
@@ -329,28 +350,19 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			// Dynamic rate control.
 			decoder.latch_audio_buffering_target(0.030);
 
-			if (stats)
+			// Measure frame jitter.
+			if (frame.view)
 			{
-				// Measure frame jitter.
-				if (frame.view)
+				double done_ts = double(frame.done_ts) * 1e-9;
+				if (last_done_ts != 0.0 && last_pts != 0.0)
 				{
-					double done_ts = double(frame.done_ts) * 1e-9;
-					if (last_done_ts != 0.0 && last_pts != 0.0)
-					{
-						double done_delta = done_ts - last_done_ts;
-						double pts_delta = frame.pts - last_pts;
-						double jitter = done_delta - pts_delta;
-
-						// We want these to be increasing at same rate. If there is variation,
-						// we need to consider adding in extra delay to absorb the jitter.
-						LOGI("Jitter: %.3f ms.\n", jitter * 1e3);
-					}
-					last_done_ts = done_ts;
-					last_pts = frame.pts;
+					double done_delta = done_ts - last_done_ts;
+					double pts_delta = frame.pts - last_pts;
+					double jitter = done_delta - pts_delta;
+					push_sliding_window(stats.pts_deltas, jitter);
 				}
-
-				if (stats)
-					update_audio_buffer_stats();
+				last_done_ts = done_ts;
+				last_pts = frame.pts;
 			}
 		}
 		else
@@ -364,8 +376,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				// Based on the video PTS.
 				// Aim for 100ms of buffering to absorb network jank.
 				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, target_realtime_delay);
-				if (stats)
-					update_audio_buffer_stats();
 			}
 			else
 			{
@@ -452,11 +462,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		end();
 	}
 
-	void render_frame(double, double elapsed_time) override
+	void render_frame(double frame_time, double elapsed_time) override
 	{
 		auto &device = get_wsi().get_device();
 
-		if (!update(device, elapsed_time))
+		if (!update(device, frame_time, elapsed_time))
 			request_shutdown();
 
 		auto cmd = device.request_command_buffer();
@@ -492,6 +502,21 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				cmd->set_viewport(vp);
 				cmd->draw(3);
 			}
+
+			flat_renderer.begin();
+
+			float y_offset = 15.0f;
+			render_sliding_window("Server pace", 15, y_offset, 320, 100, stats.server_frame_time);
+			y_offset += 120.0f;
+			render_sliding_window("Client pace", 15, y_offset, 320, 100, stats.local_frame_time);
+			y_offset += 120.0f;
+			render_sliding_window("Phase offset", 15, y_offset, 320, 100, stats.phase_offsets);
+			y_offset += 120.0f;
+			render_sliding_window("Jitter", 15, y_offset, 320, 100, stats.pts_deltas);
+			y_offset += 120.0f;
+			render_sliding_window("Audio buffer", 15, y_offset, 320, 100, stats.audio_delay_buffer);
+
+			flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
 			cmd->end_render_pass();
 		}
 
@@ -500,6 +525,39 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			frame.sem.reset();
 			device.submit(cmd, nullptr, 1, &frame.sem);
 		}
+	}
+
+	template <size_t N>
+	void render_sliding_window(const char *tag, float x, float y, float width, float height, const float (&ts)[N])
+	{
+		flat_renderer.render_quad({x, y, 0.5f}, {width, height}, {0.0f, 0.0f, 0.0f, 0.5f});
+		flat_renderer.render_quad({x, y + 45.0f, 0.4f}, {width, height - 45.0f}, {0.0f, 0.0f, 0.0f, 0.5f});
+
+		vec2 offsets[N];
+		float avg = 0.0f;
+		for (size_t i = 0; i < N; i++)
+		{
+			offsets[i].x = x + width * float(i) / float(N - 1);
+			float normalized_time = 60.0f * abs(ts[i]);
+			normalized_time = clamp(normalized_time, 0.0f, 2.0f);
+			offsets[i].y = y + 45.0f + (height - 45.0f) * (1.0f - 0.5f * normalized_time);
+			avg += abs(ts[i]);
+		}
+
+		avg /= float(N);
+
+		char text[128];
+		snprintf(text, sizeof(text), "%s: %.3f ms\n", tag, 1e3 * avg);
+		flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(Granite::UI::FontSize::Large), text,
+		                          { x + 10.0f, y + 10.0f, 0 }, { width - 10.0f, height - 10.0f});
+
+		flat_renderer.render_line_strip(offsets, 0.0f, N, vec4(1.0f));
+
+		offsets[0].x = x;
+		offsets[0].y = y + 45.0f + (height - 45.0f) * 0.5f;
+		offsets[1].x = x + width;
+		offsets[1].y = y + 45.0f + (height - 45.0f) * 0.5f;
+		flat_renderer.render_line_strip(offsets, 0.1f, 2, vec4(0.0f, 1.0f, 0.0f, 0.2f));
 	}
 
 	pyro_codec_parameters get_codec_parameters() override
@@ -534,11 +592,12 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	Vulkan::Program *blit = nullptr;
 	bool realtime = false;
 	double target_realtime_delay = 0.0;
+	FlatRenderer flat_renderer;
 };
 
 static void print_help()
 {
-	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--stats] [--phase-locked OFFSET]\n");
+	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--phase-locked OFFSET]\n");
 }
 
 namespace Granite
@@ -547,13 +606,18 @@ Application *application_create(int argc, char **argv)
 {
 	application_dummy();
 	Global::init(Global::MANAGER_FEATURE_EVENT_BIT | Global::MANAGER_FEATURE_AUDIO_MIXER_BIT |
+	             Global::MANAGER_FEATURE_UI_MANAGER_BIT |
+	             Global::MANAGER_FEATURE_ASSET_MANAGER_BIT |
+	             Global::MANAGER_FEATURE_FILESYSTEM_BIT |
 	             Global::MANAGER_FEATURE_THREAD_GROUP_BIT, 4);
+
+	auto file = Util::make_handle<ConstantMemoryFile>(viewer_fonts, viewer_fonts_size);
+	GRANITE_FILESYSTEM()->register_protocol("builtin", std::make_unique<BlobFilesystem>(std::move(file)));
 
 	float video_buffer = 0.5f;
 	float audio_buffer = 0.5f;
 	float target_delay = 0.1f;
 	const char *path = nullptr;
-	bool stats = false;
 	double phase_locked_offset = 0.0;
 	bool phase_locked_enable = false;
 
@@ -562,7 +626,6 @@ Application *application_create(int argc, char **argv)
 	cbs.add("--video-buffer", [&](Util::CLIParser &parser) { video_buffer = float(parser.next_double()); });
 	cbs.add("--audio-buffer", [&](Util::CLIParser &parser) { audio_buffer = float(parser.next_double()); });
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
-	cbs.add("--stats", [&](Util::CLIParser &) { stats = true; });
 	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
@@ -598,7 +661,7 @@ Application *application_create(int argc, char **argv)
 
 	try
 	{
-		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay, stats,
+		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay,
 		                                       phase_locked_offset, phase_locked_enable);
 		return app;
 	}
