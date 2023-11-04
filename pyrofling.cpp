@@ -1258,9 +1258,9 @@ struct HeartbeatHandler final : Handler
 				tv.tv_nsec + itimer.it_value.tv_nsec;
 
 		// Add larger immediate offsets, but accelerate slowly.
-		constexpr int respond_factor = 40;
+		constexpr int respond_factor = 60;
 
-		if (phase_offset_us > 0 && tick_interval_offset < 30)
+		if (phase_offset_us > 0 && tick_interval_offset < 50)
 		{
 			// Client want frame delivered later, increase interval.
 			// Offset the interval more sharply so we can respond in time.
@@ -1268,7 +1268,7 @@ struct HeartbeatHandler final : Handler
 			target_time_ns += respond_factor * timebase_ns_fraction;
 			target_interval_ns += timebase_ns_fraction;
 		}
-		else if (phase_offset_us < 0 && tick_interval_offset > -30)
+		else if (phase_offset_us < 0 && tick_interval_offset > -50)
 		{
 			// Client want frame delivered sooner, reduce interval.
 			// Offset the interval more sharply so we can respond in time.

@@ -96,6 +96,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 			poll_thread_dead = false;
 			poll_thread = std::thread(&VideoPlayerApplication::thread_main, this);
+
+			if (opts.target_realtime_audio_buffer_time > 0.10f && (phase_locked_enable || target_realtime_delay <= 0.0))
+				opts.target_realtime_audio_buffer_time = 0.10f;
 		}
 		else
 			phase_locked_enable = false;
@@ -284,16 +287,23 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 	struct
 	{
-		float pts_deltas[64];
-		float phase_offsets[64];
-		float audio_delay_buffer[64];
-		float local_frame_time[64];
-		float server_frame_time[64];
+		float pts_deltas[150];
+		float phase_offsets[150];
+		float audio_delay_buffer[150];
+		float local_frame_time[150];
+		float server_frame_time[150];
+		float ping[150];
+		float buffered_video[150];
 	} stats = {};
 
 	void update_audio_buffer_stats()
 	{
 		push_sliding_window(stats.audio_delay_buffer, decoder.get_audio_buffering_duration());
+	}
+
+	bool is_running_pyro() const
+	{
+		return poll_thread.joinable();
 	}
 
 	bool update(Vulkan::Device &device, double frame_time, double elapsed_time)
@@ -302,6 +312,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 		push_sliding_window(stats.local_frame_time, frame_time);
 		update_audio_buffer_stats();
+
+		if (is_running_pyro())
+			push_sliding_window(stats.ping, pyro.get_current_ping_delay());
 
 		// Most aggressive method, not all that great for pacing ...
 		if (realtime && (target_realtime_delay <= 0.0 || phase_locked_enable))
@@ -416,6 +429,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			}
 		}
 
+		push_sliding_window(stats.buffered_video, decoder.get_last_video_buffering_pts() - frame.pts);
+
 		if (need_acquire)
 		{
 			// When we have committed to display this video frame,
@@ -506,15 +521,16 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			flat_renderer.begin();
 
 			float y_offset = 15.0f;
-			render_sliding_window("Server pace", 15, y_offset, 320, 100, stats.server_frame_time);
-			y_offset += 120.0f;
-			render_sliding_window("Client pace", 15, y_offset, 320, 100, stats.local_frame_time);
-			y_offset += 120.0f;
-			render_sliding_window("Phase offset", 15, y_offset, 320, 100, stats.phase_offsets);
-			y_offset += 120.0f;
-			render_sliding_window("Jitter", 15, y_offset, 320, 100, stats.pts_deltas);
-			y_offset += 120.0f;
-			render_sliding_window("Audio buffer", 15, y_offset, 320, 100, stats.audio_delay_buffer);
+			render_sliding_window("Server pace", 15.0f, y_offset, 300, 100, stats.server_frame_time);
+			render_sliding_window("Client pace", 15.0f + 320.0f, y_offset, 300, 100, stats.local_frame_time);
+			y_offset += 110.0f;
+			render_sliding_window("Phase offset", 15.0f, y_offset, 300, 100, stats.phase_offsets, true);
+			render_sliding_window("Jitter", 15.0f + 320.0f, y_offset, 300, 100, stats.pts_deltas);
+			y_offset += 110.0f;
+			render_sliding_window("Audio buffer", 15.0f, y_offset, 300, 100, stats.audio_delay_buffer);
+			render_sliding_window("Video buffer", 15.0f + 320.0f, y_offset, 300, 100, stats.buffered_video);
+			y_offset += 110.0f;
+			render_sliding_window("Ping", 15.0f, y_offset, 300, 100, stats.ping);
 
 			flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
 			cmd->end_render_pass();
@@ -528,7 +544,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	}
 
 	template <size_t N>
-	void render_sliding_window(const char *tag, float x, float y, float width, float height, const float (&ts)[N])
+	void render_sliding_window(const char *tag, float x, float y, float width, float height, const float (&ts)[N],
+	                           bool is_signed = false)
 	{
 		flat_renderer.render_quad({x, y, 0.5f}, {width, height}, {0.0f, 0.0f, 0.0f, 0.5f});
 		flat_renderer.render_quad({x, y + 45.0f, 0.4f}, {width, height - 45.0f}, {0.0f, 0.0f, 0.0f, 0.5f});
@@ -539,9 +556,22 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			offsets[i].x = x + width * float(i) / float(N - 1);
 			float normalized_time = 60.0f * abs(ts[i]);
-			normalized_time = clamp(normalized_time, 0.0f, 2.0f);
-			offsets[i].y = y + 45.0f + (height - 45.0f) * (1.0f - 0.5f * normalized_time);
-			avg += abs(ts[i]);
+
+			if (is_signed)
+			{
+				normalized_time = clamp(normalized_time, -1.0f, 1.0f);
+				offsets[i].y = y + 45.0f + (height - 45.0f) * (0.5f - 0.5f * normalized_time);
+			}
+			else
+			{
+				normalized_time = clamp(normalized_time, 0.0f, 2.0f);
+				offsets[i].y = y + 45.0f + (height - 45.0f) * (1.0f - 0.5f * normalized_time);
+			}
+
+			if (is_signed)
+				avg += ts[i];
+			else
+				avg += abs(ts[i]);
 		}
 
 		avg /= float(N);

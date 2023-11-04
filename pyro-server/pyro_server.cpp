@@ -219,7 +219,7 @@ void PyroStreamConnection::write_audio_packet(int64_t pts, int64_t dts, const vo
 }
 
 void PyroStreamConnection::handle_udp_datagram(
-		PyroFling::Dispatcher &, const PyroFling::RemoteAddress &remote,
+		PyroFling::Dispatcher &dispatcher_, const PyroFling::RemoteAddress &remote,
 		const void *msg_, size_t size)
 {
 	auto *msg = static_cast<const uint8_t *>(msg_);
@@ -279,6 +279,21 @@ void PyroStreamConnection::handle_udp_datagram(
 				last_gamepad_seq = state.seq;
 			}
 			valid_gamepad_seq = true;
+		}
+		break;
+	}
+
+	case PYRO_MESSAGE_PING:
+	{
+		if (udp_remote == remote && kicked)
+		{
+			pyro_ping_state state = {};
+			memcpy(&state, msg, sizeof(state));
+			state.seq &= PYRO_PAYLOAD_PACKET_SEQ_MASK;
+			pyro_payload_header header = {};
+			header.encoded |= PYRO_PAYLOAD_KEY_FRAME_BIT | PYRO_PAYLOAD_STREAM_TYPE_BIT;
+			header.encoded |= state.seq << PYRO_PAYLOAD_PACKET_SEQ_OFFSET;
+			dispatcher_.write_udp_datagram(udp_remote, &header, sizeof(header), nullptr, 0);
 		}
 		break;
 	}

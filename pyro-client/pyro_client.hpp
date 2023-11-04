@@ -28,6 +28,8 @@ public:
 	static void set_simulate_reordering(bool enable);
 	static void set_simulate_drop(bool enable);
 
+	double get_current_ping_delay() const;
+
 private:
 	PyroFling::Socket tcp, udp;
 
@@ -58,6 +60,9 @@ private:
 	std::chrono::time_point<std::chrono::steady_clock> last_progress_time;
 	bool has_observed_keyframe = false;
 	uint16_t gamepad_seq = 0;
+	uint16_t ping_seq = 0;
+	uint64_t ping_times[256] = {};
+	double last_ping_delay = 0.0;
 
 	bool iterate();
 };

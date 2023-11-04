@@ -1,4 +1,5 @@
 #include "pyro_client.hpp"
+#include "timer.hpp"
 #include <string.h>
 #include <random>
 
@@ -92,12 +93,31 @@ bool PyroStreamClient::send_target_phase_offset(int offset_us)
 	return udp.write_message(&type, sizeof(type), &data, sizeof(data));
 }
 
+double PyroStreamClient::get_current_ping_delay() const
+{
+	return last_ping_delay;
+}
+
 bool PyroStreamClient::send_gamepad_state(const pyro_gamepad_state &state)
 {
 	auto send_state = state;
 	send_state.seq = gamepad_seq++;
 	pyro_message_type type = PYRO_MESSAGE_GAMEPAD_STATE;
-	return udp.write_message(&type, sizeof(type), &send_state, sizeof(send_state));
+	if (!udp.write_message(&type, sizeof(type), &send_state, sizeof(send_state)))
+		return false;
+
+	// Send regular ping requests to measure round-trip delay.
+	if ((gamepad_seq & 15) == 0)
+	{
+		type = PYRO_MESSAGE_PING;
+		pyro_ping_state ping_state = {};
+		ping_state.seq = ping_seq++ % 256;
+		if (!udp.write_message(&type, sizeof(type), &ping_state, sizeof(ping_state)))
+			return false;
+		ping_times[ping_state.seq] = Util::get_current_time_nsecs();
+	}
+
+	return true;
 }
 
 struct Packet
@@ -225,9 +245,18 @@ bool PyroStreamClient::iterate()
 		payload.size = udp.read_partial(&payload, sizeof(payload), &tcp);
 	}
 
-	if (payload.size <= sizeof(pyro_payload_header) || payload.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
+	if (payload.size < sizeof(pyro_payload_header) || payload.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
 		return false;
 	payload.size -= sizeof(pyro_payload_header);
+
+	// Only special packet currently supported is a PING.
+	const auto special_packet = PYRO_PAYLOAD_KEY_FRAME_BIT | PYRO_PAYLOAD_STREAM_TYPE_BIT;
+	if ((payload.header.encoded & special_packet) == special_packet)
+	{
+		uint32_t packet_seq = pyro_payload_get_packet_seq(payload.header.encoded);
+		last_ping_delay = 1e-9 * double(Util::get_current_time_nsecs() - ping_times[packet_seq % 256]);
+		return true;
+	}
 
 	// Partial packets must be full packets (for simplicity to avoid stitching payloads together).
 	if ((payload.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) == 0 && payload.size != PYRO_MAX_PAYLOAD_SIZE)
