@@ -1264,17 +1264,29 @@ struct HeartbeatHandler final : Handler
 		{
 			// Client want frame delivered later, increase interval.
 			// Offset the interval more sharply so we can respond in time.
-			tick_interval_offset++;
+			tick_interval_offset += 2;
 			target_time_ns += respond_factor * timebase_ns_fraction;
-			target_interval_ns += timebase_ns_fraction;
+			target_interval_ns += 2 * timebase_ns_fraction;
 		}
 		else if (phase_offset_us < 0 && tick_interval_offset > -50)
 		{
 			// Client want frame delivered sooner, reduce interval.
 			// Offset the interval more sharply so we can respond in time.
-			tick_interval_offset--;
+			tick_interval_offset -= 2;
 			target_time_ns -= respond_factor * timebase_ns_fraction;
+			target_interval_ns -= 2 * timebase_ns_fraction;
+		}
+
+		// When we get no messages, move towards center.
+		if (tick_interval_offset > 0)
+		{
+			tick_interval_offset--;
 			target_interval_ns -= timebase_ns_fraction;
+		}
+		else if (tick_interval_offset < 0)
+		{
+			tick_interval_offset++;
+			target_interval_ns += timebase_ns_fraction;
 		}
 
 		itimer.it_value.tv_nsec = long(target_time_ns % 1000000000);
