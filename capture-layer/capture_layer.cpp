@@ -24,6 +24,7 @@
 #include "client.hpp"
 #include <mutex>
 #include <memory>
+#include <limits>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -46,6 +47,9 @@ struct ExportableImage
 	VkImage image;
 	VkDeviceMemory memory;
 
+	uint64_t khrPresentId;
+	uint64_t pyroPresentId;
+
 	VkSemaphore acquireSemaphore;
 	VkSemaphore releaseSemaphore;
 	VkCommandPool cmdPool;
@@ -67,13 +71,17 @@ struct SurfaceState
 {
 	explicit SurfaceState(Instance *instance);
 	~SurfaceState();
-	VkResult processPresent(VkQueue queue, uint32_t index);
+	VkResult processPresent(VkQueue queue, uint32_t index, uint64_t presentId);
 	void setActiveDeviceAndSwapchain(Device *device, const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchainKHR chain);
 	void freeImage(ExportableImage &img);
 	bool initImageGroup(uint32_t count);
 	bool sendImageGroup();
 
+	VkResult waitForPresent(uint64_t presentId, uint64_t timeout);
+
 	std::unique_ptr<PyroFling::Client> client;
+	std::mutex clientLock;
+	unsigned presentWaiters = 0;
 	std::vector<ExportableImage> image;
 	PyroFling::ImageGroupMessage::WireFormat imageGroupWire = {};
 
@@ -91,16 +99,19 @@ struct SurfaceState
 	uint32_t width = 0;
 	uint32_t height = 0;
 	VkSurfaceFormatKHR format = {};
-	uint64_t image_group_serial = 0;
-	uint64_t present_id = 2;
-	uint64_t complete_present_id = 0;
-	unsigned retry_counter = 0;
+	uint64_t imageGroupSerial = 0;
+	uint64_t presentId = 0;
+	uint64_t completePresentId = 0;
+	unsigned retryCounter = 0;
 
 	void initClient(VkPhysicalDevice gpu);
 	bool handleEvent(PyroFling::Message &msg);
 	bool pollConnection();
-	bool waitConnection();
+	bool waitConnection(std::unique_lock<std::mutex> &lock);
 	bool acquire(uint32_t &index);
+
+	uint64_t completedKHRPresentId = 0;
+	bool usesPresentWait = false;
 };
 
 enum class SyncMode
@@ -268,7 +279,7 @@ struct Device
 	uint32_t queueToFamilyIndex(VkQueue queue) const;
 
 	bool presentRequiresWrap(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
-	VkResult present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index);
+	VkResult present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index, uint64_t khrPresentId);
 };
 
 #include "dispatch_wrapper.hpp"
@@ -299,7 +310,7 @@ bool SurfaceState::handleEvent(PyroFling::Message &msg)
 {
 	if (auto *acq = PyroFling::maybe_get<PyroFling::AcquireImageMessage>(msg))
 	{
-		if (acq->wire.image_group_serial != image_group_serial)
+		if (acq->wire.image_group_serial != imageGroupSerial)
 			return true;
 		if (acq->wire.index >= image.size())
 			return false;
@@ -350,7 +361,7 @@ bool SurfaceState::handleEvent(PyroFling::Message &msg)
 	}
 	else if (auto *retire = PyroFling::maybe_get<PyroFling::RetireImageMessage>(msg))
 	{
-		if (retire->wire.image_group_serial != image_group_serial)
+		if (retire->wire.image_group_serial != imageGroupSerial)
 			return true;
 
 		if (retire->wire.index >= image.size())
@@ -363,9 +374,13 @@ bool SurfaceState::handleEvent(PyroFling::Message &msg)
 	}
 	else if (auto *complete = PyroFling::maybe_get<PyroFling::FrameCompleteMessage>(msg))
 	{
-		if (complete->wire.image_group_serial != image_group_serial)
+		if (complete->wire.image_group_serial != imageGroupSerial)
 			return true;
-		complete_present_id = complete->wire.presented_id;
+		completePresentId = complete->wire.presented_id;
+
+		for (auto &img : image)
+			if (img.pyroPresentId == completePresentId && img.khrPresentId > completedKHRPresentId)
+				completedKHRPresentId = img.khrPresentId;
 	}
 	else
 		return false;
@@ -443,20 +458,26 @@ void SurfaceState::initClient(VkPhysicalDevice gpu)
 
 bool SurfaceState::pollConnection()
 {
+	std::unique_lock<std::mutex> holder{clientLock};
 	int ret;
-	while ((ret = client->wait_reply(0)) > 0)
+	while ((ret = client->wait_reply(holder, 0)) > 0)
 	{
 	}
+
+	if (ret < 0 && presentWaiters == 0)
+		client.reset();
+
 	return ret >= 0;
 }
 
-bool SurfaceState::waitConnection()
+bool SurfaceState::waitConnection(std::unique_lock<std::mutex> &lock)
 {
-	return client->wait_reply() > 0;
+	return client->wait_reply(lock) > 0;
 }
 
 bool SurfaceState::acquire(uint32_t &index)
 {
+	std::unique_lock<std::mutex> holder{clientLock};
 	index = UINT32_MAX;
 
 	do
@@ -471,23 +492,64 @@ bool SurfaceState::acquire(uint32_t &index)
 			}
 		}
 
-		if (index == UINT32_MAX && !waitConnection())
+		if (index == UINT32_MAX && !waitConnection(holder))
 			break;
 	} while (index == UINT32_MAX);
+
+	if (index == UINT32_MAX && presentWaiters == 0)
+		client.reset();
+
 	return index != UINT32_MAX;
 }
 
-VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
+VkResult SurfaceState::waitForPresent(uint64_t khrPresentId, uint64_t timeout)
+{
+	uint64_t timeout_divided = timeout / 1000000;
+
+	int timeout_ms;
+	if (timeout_divided > uint64_t(std::numeric_limits<int>::max()))
+		timeout_ms = -1;
+	else
+		timeout_ms = int(timeout_divided);
+
+	// TODO: Recompute timeout on wakeups.
+	std::unique_lock<std::mutex> holder{clientLock};
+
+	if (!client)
+		return VK_ERROR_SURFACE_LOST_KHR;
+
+	// Block any attempt to destroy client until we're done waiting.
+	// wait_reply() can temporary drop the lock to perform poll.
+	presentWaiters++;
+
+	while (completedKHRPresentId < khrPresentId)
+	{
+		int ret = client->wait_reply(holder, timeout_ms);
+		if (ret < 0)
+		{
+			// Fall-back to normal present wait.
+			presentWaiters--;
+			return VK_ERROR_SURFACE_LOST_KHR;
+		}
+		else if (ret == 0)
+			break;
+	}
+
+	presentWaiters--;
+	return completedKHRPresentId < khrPresentId ? VK_TIMEOUT : VK_SUCCESS;
+}
+
+VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t khrPresentId)
 {
 	VkResult res;
 	auto &table = *device->getTable();
 
 	if (!client)
 	{
-		if (++retry_counter >= 30)
+		if (++retryCounter >= 30)
 		{
 			initClient(activePhysicalDevice);
-			retry_counter = 0;
+			retryCounter = 0;
 		}
 	}
 
@@ -495,19 +557,13 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
 		return VK_SUCCESS;
 
 	if (!pollConnection())
-	{
-		client.reset();
 		return VK_SUCCESS;
-	}
 
 	// Blocking in present isn't great.
 	// If we implement WSI ourselves, we would deal with it more properly where acquire ties to client acquire.
 	uint32_t clientIndex;
 	if (!acquire(clientIndex))
-	{
-		client.reset();
 		return VK_SUCCESS;
-	}
 
 	auto &img = image[clientIndex];
 
@@ -617,7 +673,7 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
 	PyroFling::FileHandle release_fd{fd};
 
 	PyroFling::PresentImageMessage::WireFormat wire = {};
-	wire.image_group_serial = image_group_serial;
+	wire.image_group_serial = imageGroupSerial;
 	wire.index = clientIndex;
 	wire.vk_external_semaphore_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 
@@ -626,32 +682,49 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
 	else if (instance->getSyncMode() == SyncMode::Client)
 		wire.period = 0;
 	else
-		wire.period = presentMode == VK_PRESENT_MODE_FIFO_KHR || presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? 1 : 0;
+	{
+		wire.period = presentMode == VK_PRESENT_MODE_FIFO_KHR ||
+		              presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? 1 : 0;
+	}
 
 	wire.vk_old_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	wire.vk_new_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	wire.id = ++present_id;
-	if (!client->send_wire_message(wire, &release_fd, 1))
-	{
-		client.reset();
-		return VK_SUCCESS;
-	}
+	wire.id = ++presentId;
 
+	// Important to set these before send_wire_message to avoid theoretical race condition.
+	img.pyroPresentId = wire.id;
+	img.khrPresentId = khrPresentId;
 	img.acquired = false;
 	img.ready = false;
 	img.fencePending = true;
 
-	if (wire.period > 0)
+	if (!client->send_wire_message(wire, &release_fd, 1))
 	{
+		std::unique_lock<std::mutex> holder{clientLock};
+		// If there are concurrent WSI callers, defer destroying the client handle.
+		if (presentWaiters == 0)
+			client.reset();
+		return VK_SUCCESS;
+	}
+
+	if (khrPresentId != 0)
+		usesPresentWait = true;
+
+	if (wire.period > 0 && !usesPresentWait)
+	{
+		std::unique_lock<std::mutex> holder{clientLock};
+
 		// Ensure proper pacing.
 		// Acquire/Retire events may arrive in un-paced order, but completion events are well-paced.
 		// In 2 image mode, we basically need to block until next heartbeat completes.
+		// If app uses present ID, assumes that it paces itself with present wait.
 
-		while (complete_present_id + (image.size() - 2) < present_id)
+		while (completePresentId + (image.size() - 2) < presentId)
 		{
-			if (client->wait_reply() < 0)
+			if (client->wait_reply(holder) < 0)
 			{
-				client.reset();
+				if (presentWaiters == 0)
+					client.reset();
 				return VK_SUCCESS;
 			}
 		}
@@ -676,11 +749,11 @@ bool SurfaceState::sendImageGroup()
 			return false;
 	}
 
-	if (!(image_group_serial = client->send_wire_message(imageGroupWire, fds.data(), fds.size())))
+	if (!(imageGroupSerial = client->send_wire_message(imageGroupWire, fds.data(), fds.size())))
 		return false;
 
-	present_id = 0;
-	complete_present_id = 0;
+	presentId = 0;
+	completePresentId = 0;
 
 	for (auto &img : image)
 	{
@@ -831,6 +904,14 @@ bool SurfaceState::initImageGroup(uint32_t count)
 void SurfaceState::setActiveDeviceAndSwapchain(Device *device_, const VkSwapchainCreateInfoKHR *pCreateInfo,
                                                VkSwapchainKHR chain)
 {
+	if (presentWaiters != 0)
+	{
+		fprintf(stderr, "!!! There are active present waiters without active swapchain.\n");
+		abort();
+	}
+
+	completedKHRPresentId = 0;
+
 	if (device != device_)
 	{
 		for (auto &img : image)
@@ -923,7 +1004,7 @@ bool Device::presentRequiresWrap(VkQueue queue, const VkPresentInfoKHR *pPresent
 	return false;
 }
 
-VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index)
+VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index, uint64_t presentId)
 {
 	auto *inst = getInstance();
 	SurfaceState *surface;
@@ -933,7 +1014,7 @@ VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index
 	}
 
 	if (surface)
-		return surface->processPresent(queue, index);
+		return surface->processPresent(queue, index, presentId);
 	else
 		return VK_SUCCESS;
 }
@@ -1024,57 +1105,6 @@ static VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance instance, VkSurfa
 	layer->getTable()->DestroySurfaceKHR(instance, surface, pAllocator);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
-		VkPhysicalDevice                            physicalDevice,
-		const char*                                 pLayerName,
-		uint32_t*                                   pPropertyCount,
-		VkExtensionProperties*                      pProperties)
-{
-	if (pLayerName && strcmp(pLayerName, "VK_LAYER_pyrofling_capture") == 0)
-	{
-		*pPropertyCount = 0;
-		return VK_SUCCESS;
-	}
-
-	auto *layer = getInstanceLayer(physicalDevice);
-
-	if (layer->getSyncMode() != SyncMode::Server)
-	{
-		return layer->getTable()->EnumerateDeviceExtensionProperties(
-				physicalDevice, pLayerName, pPropertyCount, pProperties);
-	}
-
-	// The surface and display queries are all instance extensions,
-	// and thus the loader is responsible for dealing with it.
-	uint32_t count = 0;
-	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, nullptr);
-	std::vector<VkExtensionProperties> props(count);
-	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, props.data());
-
-	// When we force MAILBOX mode, present wait/id is not meaningful and will cause very jank frame pacing.
-	// Disable any dependent extension as well that is built on top of present ID/wait.
-	auto itr = std::remove_if(props.begin(), props.end(), [](const VkExtensionProperties &prop) -> bool {
-		return strcmp(prop.extensionName, VK_KHR_PRESENT_ID_EXTENSION_NAME) == 0 ||
-		       strcmp(prop.extensionName, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) == 0 ||
-		       strcmp(prop.extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) == 0;
-	});
-
-	props.erase(itr, props.end());
-
-	if (pProperties)
-	{
-		VkResult res = *pPropertyCount >= props.size() ? VK_SUCCESS : VK_INCOMPLETE;
-		*pPropertyCount = std::min<uint32_t>(*pPropertyCount, props.size());
-		memcpy(pProperties, props.data(), *pPropertyCount * sizeof(*pProperties));
-		return res;
-	}
-	else
-	{
-		*pPropertyCount = uint32_t(props.size());
-		return VK_SUCCESS;
-	}
-}
-
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo *pCreateInfo,
                                                    const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
@@ -1145,7 +1175,7 @@ static VKAPI_ATTR void VKAPI_CALL DestroyDevice(VkDevice device, const VkAllocat
 static VKAPI_ATTR VkResult VKAPI_CALL
 CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
                    const VkAllocationCallbacks *pAllocator,
-                   VkSwapchainKHR *pSwachain)
+                   VkSwapchainKHR *pSwapchain)
 {
 	auto *layer = getDeviceLayer(device);
 
@@ -1153,13 +1183,13 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	auto info = *pCreateInfo;
 	info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
-	auto result = layer->getTable()->CreateSwapchainKHR(device, &info, pAllocator, pSwachain);
+	auto result = layer->getTable()->CreateSwapchainKHR(device, &info, pAllocator, pSwapchain);
 	if (result != VK_SUCCESS)
 		return result;
 
 	auto *instance = layer->getInstance();
 	auto *surface = instance->registerSurface(pCreateInfo->surface);
-	surface->setActiveDeviceAndSwapchain(layer, pCreateInfo, *pSwachain);
+	surface->setActiveDeviceAndSwapchain(layer, pCreateInfo, *pSwapchain);
 	return VK_SUCCESS;
 }
 
@@ -1169,6 +1199,44 @@ DestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocatio
 	auto *layer = getDeviceLayer(device);
 	layer->getTable()->DestroySwapchainKHR(device, swapchain, pAllocator);
 	layer->getInstance()->unregisterSwapchain(layer, swapchain);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL
+WaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId, uint64_t timeout)
+{
+	auto *layer = getDeviceLayer(device);
+	auto *inst = layer->getInstance();
+	VkResult result = VK_SUCCESS;
+
+	SurfaceState *surface;
+	{
+		std::lock_guard<std::mutex> holder{inst->surfaceLock};
+		surface = inst->findActiveSurfaceLocked(layer, swapchain);
+	}
+
+	// In client sync mode, we always honor the client's sync.
+	bool doNormalWait = inst->getSyncMode() == SyncMode::Client || !surface;
+
+	// If client is unlocked in default mode, we want to run at full throttle, always sync to client.
+	if (inst->getSyncMode() == SyncMode::Default &&
+	    surface->presentMode != VK_PRESENT_MODE_FIFO_KHR &&
+	    surface->presentMode != VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+	{
+		doNormalWait = true;
+	}
+
+	if (!doNormalWait && surface)
+	{
+		result = surface->waitForPresent(presentId, timeout);
+		// We lost connection with server, fall back to normal present wait.
+		if (result == VK_ERROR_SURFACE_LOST_KHR)
+			doNormalWait = true;
+	}
+
+	if (doNormalWait)
+		return layer->getTable()->WaitForPresentKHR(device, swapchain, presentId, timeout);
+	else
+		return result;
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL
@@ -1194,13 +1262,16 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 			return result;
 	}
 
+	const auto *id = findChain<VkPresentIdKHR>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
+
 	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
 	{
 		VkSwapchainKHR swap = pPresentInfo->pSwapchains[i];
 		uint32_t index = pPresentInfo->pImageIndices[i];
+		uint64_t presentId = id && i < id->swapchainCount ? id->pPresentIds[i] : 0;
 
 		// We're just concerned with fatal errors here like DEVICE_LOST etc.
-		if ((result = layer->present(queue, swap, index)) != VK_SUCCESS)
+		if ((result = layer->present(queue, swap, index, presentId)) != VK_SUCCESS)
 			return result;
 	}
 
@@ -1228,7 +1299,6 @@ static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 		{ "vkCreateInstance", reinterpret_cast<PFN_vkVoidFunction>(CreateInstance) },
 		{ "vkDestroyInstance", reinterpret_cast<PFN_vkVoidFunction>(DestroyInstance) },
 		{ "vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CAPTURE_vkGetInstanceProcAddr) },
-		{ "vkEnumerateDeviceExtensionProperties", reinterpret_cast<PFN_vkVoidFunction>(EnumerateDeviceExtensionProperties) },
 		{ "vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(CreateDevice) },
 	};
 
@@ -1265,6 +1335,7 @@ static PFN_vkVoidFunction interceptDeviceCommand(const char *pName)
 	} coreDeviceCommands[] = {
 		{ "vkGetDeviceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CAPTURE_vkGetDeviceProcAddr) },
 		{ "vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(QueuePresentKHR) },
+		{ "vkWaitForPresentKHR", reinterpret_cast<PFN_vkVoidFunction>(WaitForPresentKHR) },
 		{ "vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(CreateSwapchainKHR) },
 		{ "vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySwapchainKHR) },
 		{ "vkDestroyDevice", reinterpret_cast<PFN_vkVoidFunction>(DestroyDevice) },

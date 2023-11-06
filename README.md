@@ -54,7 +54,7 @@ loop to server, unless overridden.
 
 #### `default`
 
-As explained above.[capture_layer.cpp](capture-layer%2Fcapture_layer.cpp)
+As explained above.
 
 #### `client`
 
@@ -69,9 +69,6 @@ Encoding loop is forced to be locked to server rate, but the swapchain's present
 is forced to MAILBOX. This ensures optimal frame pacing for encoded video,
 but poor pacing for the swapchain itself. This is useful when doing e.g. remote play where
 the pacing of the local display is irrelevant, and the local display does not support VRR or similar.
-
-In this mode, `KHR_present_wait` support is disabled by layer, since present wait can act very strangely with MAILBOX
-and lead to erratic frame pacing. Games should disable VSync as well.
 
 ### `PYROFLING_IMAGES=n`
 

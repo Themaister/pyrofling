@@ -28,6 +28,8 @@
 #include <stddef.h>
 #include <functional>
 #include <unordered_map>
+#include <mutex>
+#include <condition_variable>
 
 namespace PyroFling
 {
@@ -53,15 +55,19 @@ public:
 		return send_message_raw(type, nullptr, 0, &fd_, 1);
 	}
 
+	// Not thread-safe if there are concurrent threads reading from connection, unless lock is taken.
 	void set_serial_handler(uint64_t serial, SerialHandler func);
 	void set_default_serial_handler(SerialHandler func);
 	void set_event_handler(SerialHandler func);
 
-	int wait_reply(int timeout_ms = -1);
 	const FileHandle &get_file_handle() const;
-	bool roundtrip();
-	bool wait_reply_for_serial(uint64_t serial);
-	MessageType wait_plain_reply_for_serial(uint64_t serial);
+
+	// Cooperative reading of connection and event handling.
+	// Any thread calling these may call serial handlers and event handlers.
+	bool roundtrip(std::unique_lock<std::mutex> &lock);
+	int wait_reply(std::unique_lock<std::mutex> &lock, int timeout_ms = -1);
+	bool wait_reply_for_serial(std::unique_lock<std::mutex> &lock, uint64_t serial);
+	MessageType wait_plain_reply_for_serial(std::unique_lock<std::mutex> &lock, uint64_t serial);
 
 private:
 	FileHandle fd;
@@ -72,5 +78,10 @@ private:
 	SerialHandler event_handler;
 
 	bool process();
+
+	std::condition_variable read_cond;
+	bool has_socket_master = false;
+	bool socket_master_error = false;
+	uint64_t process_count = 0;
 };
 }

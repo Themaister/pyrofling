@@ -94,43 +94,98 @@ uint64_t Client::send_message_raw(MessageType type, const void *payload, size_t 
 		return 0;
 }
 
-int Client::wait_reply(int timeout_ms)
+int Client::wait_reply(std::unique_lock<std::mutex> &lock, int timeout_ms)
 {
-	struct pollfd pfd = {};
-	pfd.fd = fd.get_native_handle();
-	pfd.events = POLLIN;
+	uint64_t current_count = process_count;
+	bool self_is_socket_master = false;
+
+	while (current_count == process_count && !socket_master_error && !self_is_socket_master)
+	{
+		if (!has_socket_master)
+		{
+			self_is_socket_master = true;
+			has_socket_master = true;
+			struct pollfd pfd = {};
+			int ret;
+			lock.unlock();
+			{
+				pfd.fd = fd.get_native_handle();
+				pfd.events = POLLIN;
+
+				// While blocking, we don't want to hold the mutex.
+				// Any new thread that takes the lock will observe that we have a bus master, and it will defer itself
+				// to the condition variable path.
+				ret = ::poll(&pfd, 1, timeout_ms);
+			}
+			lock.lock();
+
+			if (ret < 0)
+				socket_master_error = true;
+
+			if (ret <= 0 || (pfd.revents & POLLIN) == 0)
+				break;
+
+			ret = process() ? 1 : -1;
+			if (ret == 1)
+				process_count++;
+			else
+				socket_master_error = true;
+		}
+		else
+		{
+			if (timeout_ms >= 0)
+			{
+				if (read_cond.wait_for(lock, std::chrono::milliseconds(timeout_ms)) == std::cv_status::timeout)
+					break;
+			}
+			else
+				read_cond.wait(lock);
+		}
+	}
+
 	int ret;
+	if (current_count != process_count)
+		ret = 1;
+	else if (socket_master_error)
+		ret = -1;
+	else
+		ret = 0;
 
-	if ((ret = ::poll(&pfd, 1, timeout_ms)) <= 0)
-		return ret;
+	if (self_is_socket_master)
+	{
+		// Wake up a new thread to become bus master.
+		has_socket_master = false;
 
-	if ((pfd.revents & POLLIN) == 0)
-		return 0;
+		if (ret != 0)
+			read_cond.notify_all();
+		else
+			read_cond.notify_one();
+	}
 
-	return process() ? 1 : -1;
+	return ret;
 }
 
-bool Client::roundtrip()
+bool Client::roundtrip(std::unique_lock<std::mutex> &lock)
 {
 	while (received_replies < send_serial)
-		if (wait_reply() <= 0)
+		if (wait_reply(lock) <= 0)
 			return false;
 
 	return true;
 }
 
-bool Client::wait_reply_for_serial(uint64_t serial)
+bool Client::wait_reply_for_serial(std::unique_lock<std::mutex> &lock, uint64_t serial)
 {
 	while (received_replies < serial)
 	{
-		if (wait_reply() <= 0)
+		if (wait_reply(lock) <= 0)
 			return false;
 	}
 
 	return true;
 }
 
-MessageType Client::wait_plain_reply_for_serial(uint64_t serial)
+MessageType Client::wait_plain_reply_for_serial(std::unique_lock<std::mutex> &lock, uint64_t serial)
 {
 	MessageType type = MessageType::Void;
 	if (!serial)
@@ -141,7 +196,7 @@ MessageType Client::wait_plain_reply_for_serial(uint64_t serial)
 		return true;
 	});
 
-	if (!wait_reply_for_serial(serial))
+	if (!wait_reply_for_serial(lock, serial))
 		return MessageType::Void;
 	return type;
 }

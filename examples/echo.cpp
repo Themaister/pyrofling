@@ -150,10 +150,13 @@ int main()
 		}
 	}
 
-	if (client.wait_plain_reply_for_serial(hello_serial) != MessageType::ServerHello)
+	std::mutex lock;
+	std::unique_lock<std::mutex> holder{lock};
+
+	if (client.wait_plain_reply_for_serial(holder, hello_serial) != MessageType::ServerHello)
 		fprintf(stderr, "Failed to wait for serial.\n");
 
-	if (!client.roundtrip())
+	if (!client.roundtrip(holder))
 		fprintf(stderr, "Failed to roundtrip.\n");
 
 	dispatcher.kill();
