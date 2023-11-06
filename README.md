@@ -43,19 +43,42 @@ server. The server can be respawned and the layer will automatically connect to 
 
 By default, `/tmp/pyrofling-socket` is used, but can be overridden if need be.
 
-### `PYROFLING_FORCE_MAILBOX=1`
+### `PYROFLING_SYNC=mode`
 
 By default, the pyrofling layer will lock its presentation loop to a heartbeat of the server
 if the application is using FIFO presentation modes.
 This ensures proper frame pacing for encoded output. This is optimal for a VRR display setup where
 the display will then end up locking to the heartbeat of the server elegantly.
+If application uses IMMEDIATE or MAILBOX presentation modes, the layer will not lock the presentation
+loop to server, unless overridden.
 
-If this environment variable is set however, the heartbeat from server is ignored and rendering will lock to
-local display refresh rate, meaning the encoded output will be somewhat more jittery.
+#### `default`
+
+As explained above.[capture_layer.cpp](capture-layer%2Fcapture_layer.cpp)
+
+#### `client`
+
+Encoding loop is completely unlocked and server will sample
+the last ready image every heartbeat cycle. This leads to more judder in the encoded video.
+Client will render at whatever frame rate it would otherwise do.
+E.g. it might render at 144 fps while encoding happens at 60 fps.
+
+#### `server`
+
+Encoding loop is forced to be locked to server rate, but the swapchain's present mode
+is forced to MAILBOX. This ensures optimal frame pacing for encoded video,
+but poor pacing for the swapchain itself. This is useful when doing e.g. remote play where
+the pacing of the local display is irrelevant, and the local display does not support VRR or similar.
+
+In this mode, `KHR_present_wait` support is disabled by layer, since present wait can act very strangely with MAILBOX
+and lead to erratic frame pacing. Games should disable VSync as well.
 
 ### `PYROFLING_IMAGES=n`
 
 Forces a certain swap chain depth between client and server. Used to improve latency in real-time scenarios.
+When `--immediate-encode` is used on server side, adding more images does not add more end-to-end latency,
+but will affect how rapidly the client can react to rate changes, and various other subtle things.
+Should generally be left alone.
 
 ## Server
 

@@ -103,6 +103,13 @@ struct SurfaceState
 	bool acquire(uint32_t &index);
 };
 
+enum class SyncMode
+{
+	Default,
+	Server,
+	Client
+};
+
 struct Instance
 {
 	void init(VkInstance instance_, const VkApplicationInfo *pApplicationInfo, PFN_vkGetInstanceProcAddr gpa_);
@@ -122,9 +129,9 @@ struct Instance
 		return gpa(instance, pName);
 	}
 
-	bool forcesMailbox() const
+	SyncMode getSyncMode() const
 	{
-		return forceMailbox;
+		return syncMode;
 	}
 
 	unsigned forcesNumImages() const
@@ -143,7 +150,7 @@ struct Instance
 	PFN_vkGetInstanceProcAddr gpa = nullptr;
 	std::string applicationName;
 	std::string engineName;
-	bool forceMailbox = false;
+	SyncMode syncMode = SyncMode::Default;
 	unsigned forceImages = 0;
 
 	std::mutex surfaceLock;
@@ -206,9 +213,14 @@ void Instance::init(VkInstance instance_, const VkApplicationInfo *pApplicationI
 	gpa = gpa_;
 	layerInitInstanceDispatchTable(instance, &table, gpa);
 
-	const char *env = getenv("PYROFLING_FORCE_MAILBOX");
+	const char *env = getenv("PYROFLING_SYNC");
 	if (env)
-		forceMailbox = strtoul(env, nullptr, 0) != 0;
+	{
+		if (strcmp(env, "server") == 0)
+			syncMode = SyncMode::Server;
+		else if (strcmp(env, "client") == 0)
+			syncMode = SyncMode::Client;
+	}
 
 	env = getenv("PYROFLING_IMAGES");
 	if (env)
@@ -608,7 +620,14 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
 	wire.image_group_serial = image_group_serial;
 	wire.index = clientIndex;
 	wire.vk_external_semaphore_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
-	wire.period = presentMode == VK_PRESENT_MODE_FIFO_KHR || presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? 1 : 0;
+
+	if (instance->getSyncMode() == SyncMode::Server)
+		wire.period = 1;
+	else if (instance->getSyncMode() == SyncMode::Client)
+		wire.period = 0;
+	else
+		wire.period = presentMode == VK_PRESENT_MODE_FIFO_KHR || presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? 1 : 0;
+
 	wire.vk_old_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	wire.vk_new_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	wire.id = ++present_id;
@@ -625,7 +644,7 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index)
 	if (wire.period > 0)
 	{
 		// Ensure proper pacing.
-		// Acquire/Retire events may arrive in unpaced order.
+		// Acquire/Retire events may arrive in un-paced order, but completion events are well-paced.
 		// In 2 image mode, we basically need to block until next heartbeat completes.
 
 		while (complete_present_id + (image.size() - 2) < present_id)
@@ -834,7 +853,7 @@ void SurfaceState::setActiveDeviceAndSwapchain(Device *device_, const VkSwapchai
 
 	presentMode = info.presentMode;
 	activeSwapchain = chain;
-	if (instance->forcesMailbox())
+	if (instance->getSyncMode() == SyncMode::Server)
 		presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
 	uint32_t count;
@@ -1005,6 +1024,57 @@ static VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance instance, VkSurfa
 	layer->getTable()->DestroySurfaceKHR(instance, surface, pAllocator);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
+		VkPhysicalDevice                            physicalDevice,
+		const char*                                 pLayerName,
+		uint32_t*                                   pPropertyCount,
+		VkExtensionProperties*                      pProperties)
+{
+	if (pLayerName && strcmp(pLayerName, "VK_LAYER_pyrofling_capture") == 0)
+	{
+		*pPropertyCount = 0;
+		return VK_SUCCESS;
+	}
+
+	auto *layer = getInstanceLayer(physicalDevice);
+
+	if (layer->getSyncMode() != SyncMode::Server)
+	{
+		return layer->getTable()->EnumerateDeviceExtensionProperties(
+				physicalDevice, pLayerName, pPropertyCount, pProperties);
+	}
+
+	// The surface and display queries are all instance extensions,
+	// and thus the loader is responsible for dealing with it.
+	uint32_t count = 0;
+	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, nullptr);
+	std::vector<VkExtensionProperties> props(count);
+	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, props.data());
+
+	// When we force MAILBOX mode, present wait/id is not meaningful and will cause very jank frame pacing.
+	// Disable any dependent extension as well that is built on top of present ID/wait.
+	auto itr = std::remove_if(props.begin(), props.end(), [](const VkExtensionProperties &prop) -> bool {
+		return strcmp(prop.extensionName, VK_KHR_PRESENT_ID_EXTENSION_NAME) == 0 ||
+		       strcmp(prop.extensionName, VK_KHR_PRESENT_WAIT_EXTENSION_NAME) == 0 ||
+		       strcmp(prop.extensionName, VK_NV_LOW_LATENCY_2_EXTENSION_NAME) == 0;
+	});
+
+	props.erase(itr, props.end());
+
+	if (pProperties)
+	{
+		VkResult res = *pPropertyCount >= props.size() ? VK_SUCCESS : VK_INCOMPLETE;
+		*pPropertyCount = std::min<uint32_t>(*pPropertyCount, props.size());
+		memcpy(pProperties, props.data(), *pPropertyCount * sizeof(*pProperties));
+		return res;
+	}
+	else
+	{
+		*pPropertyCount = uint32_t(props.size());
+		return VK_SUCCESS;
+	}
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo *pCreateInfo,
                                                    const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
@@ -1158,6 +1228,7 @@ static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 		{ "vkCreateInstance", reinterpret_cast<PFN_vkVoidFunction>(CreateInstance) },
 		{ "vkDestroyInstance", reinterpret_cast<PFN_vkVoidFunction>(DestroyInstance) },
 		{ "vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CAPTURE_vkGetInstanceProcAddr) },
+		{ "vkEnumerateDeviceExtensionProperties", reinterpret_cast<PFN_vkVoidFunction>(EnumerateDeviceExtensionProperties) },
 		{ "vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(CreateDevice) },
 	};
 
