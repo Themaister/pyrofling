@@ -59,8 +59,10 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	explicit VideoPlayerApplication(const char *video_path,
 	                                float video_buffer,
 	                                float audio_buffer, float target,
-									double phase_locked_offset_, bool phase_locked_enable_)
+									double phase_locked_offset_, bool phase_locked_enable_,
+									double deadline_, bool deadline_enable_)
 		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
+		, deadline(deadline_), deadline_enable(deadline_enable_)
 	{
 		// Debug
 		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
@@ -120,6 +122,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 		if (target_realtime_delay <= 0.0 && !phase_locked_enable)
 			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
+
+#ifdef _WIN32
+		if (deadline_enable)
+			timeBeginPeriod(1);
+#endif
 	}
 
 	bool on_key_pressed(const KeyboardEvent &e)
@@ -251,6 +258,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			poll_thread_dead = true;
 			poll_thread.join();
 		}
+
+#ifdef _WIN32
+		if (deadline_enable)
+			timeEndPeriod(1);
+#endif
 	}
 
 	std::string get_name() override
@@ -291,6 +303,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	double last_pts = 0.0;
 	double phase_locked_offset;
 	bool phase_locked_enable;
+	double deadline;
+	bool deadline_enable;
+	unsigned long long missed_deadlines = 0;
 	std::thread poll_thread;
 	std::atomic_bool poll_thread_dead;
 
@@ -350,13 +365,29 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 			// Block until we have received at least one new frame.
 			// No point duplicating presents.
-			if (!had_acquire && !decoder.acquire_video_frame(next_frame, 5000))
-				return false;
+
+			if (!had_acquire)
+			{
+				if (deadline_enable)
+				{
+					// In deadline mode, we want to keep the pace going, even when there are drops server side.
+					// Also aims to avoid bad tearing which will inevitably happen.
+					// When deadlines are close, we still want FIFO_RELAXED however just in case we barely miss vblank.
+					if (!decoder.acquire_video_frame(next_frame, int(deadline * 1e3)))
+					{
+						if (decoder.is_eof())
+							return false;
+						missed_deadlines++;
+					}
+				}
+				else if (!decoder.acquire_video_frame(next_frame, 5000))
+					return false;
+			}
 
 			if (next_frame.view)
 				shift_frame();
 
-			if (phase_locked_enable)
+			if (phase_locked_enable && frame.view)
 			{
 				double phase_offset = target_done - double(frame.done_ts) * 1e-9;
 				memmove(stats.phase_offsets, stats.phase_offsets + 1,
@@ -373,7 +404,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			// Dynamic rate control.
 			decoder.latch_audio_buffering_target(0.030);
 
-			// Measure frame jitter.
+			// Measure frame jitter. Ideally, the time delta in decode done time (client side) should
+			// equal the time delta in PTS domain (server side).
 			if (frame.view)
 			{
 				double done_ts = double(frame.done_ts) * 1e-9;
@@ -549,6 +581,16 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				y_offset += 110.0f;
 				render_sliding_window("Ping", 15.0f, y_offset, 300, 100, stats.ping);
 
+				if (deadline_enable)
+				{
+					flat_renderer.render_quad({15.0f + 320.0f, y_offset, 0.5f}, {300, 45}, {0.0f, 0.0f, 0.0f, 0.5f});
+					char text[128];
+					snprintf(text, sizeof(text), "Missed deadline: %llu\n", missed_deadlines);
+					flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(Granite::UI::FontSize::Large), text,
+					                          { 15.0f + 320.0f + 10.0f, y_offset + 10.0f, 0 },
+					                          { 300.0f - 10.0f, 45.0f - 10.0f});
+				}
+
 				flat_renderer.flush(*cmd, {}, {cmd->get_viewport().width, cmd->get_viewport().height, 1.0f});
 			}
 
@@ -646,7 +688,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 static void print_help()
 {
-	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--phase-locked OFFSET]\n");
+	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS]\n");
 }
 
 namespace Granite
@@ -669,6 +711,8 @@ Application *application_create(int argc, char **argv)
 	const char *path = nullptr;
 	double phase_locked_offset = 0.0;
 	bool phase_locked_enable = false;
+	double deadline = 0.0;
+	bool deadline_enable = false;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
@@ -676,6 +720,7 @@ Application *application_create(int argc, char **argv)
 	cbs.add("--audio-buffer", [&](Util::CLIParser &parser) { audio_buffer = float(parser.next_double()); });
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
 	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
+	cbs.add("--deadline", [&](Util::CLIParser &parser) { deadline = parser.next_double(); deadline_enable = true; });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
 
@@ -711,7 +756,8 @@ Application *application_create(int argc, char **argv)
 	try
 	{
 		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay,
-		                                       phase_locked_offset, phase_locked_enable);
+		                                       phase_locked_offset, phase_locked_enable,
+		                                       deadline, deadline_enable);
 		return app;
 	}
 	catch (const std::exception &e)
