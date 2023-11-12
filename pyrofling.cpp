@@ -849,15 +849,12 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 		// Ignore period since we're doing unlocked rendering.
 		encode_surface(surface, 0);
-
-		// Skip any encode in heartbeat handler for this frame, only trigger completion events.
-		encode_performed_out_of_band++;
 	}
 
 	bool heartbeat(uint64_t period_ns)
 	{
 		// Only relevant if we performed encode out of band.
-		if (encode_performed_out_of_band == 0 && encode_tasks[next_encode_task_slot])
+		if (!video_encode.immediate && encode_tasks[next_encode_task_slot])
 		{
 			if (!encode_tasks[next_encode_task_slot]->poll())
 			{
@@ -884,12 +881,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				ready_surface = { handler.get(), index };
 		}
 
-		// If there were no immediate mode encode tasks in flight, this is our deadline,
-		// and we must encode something.
-		if (encode_performed_out_of_band == 0)
+		if (!video_encode.immediate || !ready_surface.chain)
 			encode_surface(ready_surface, period_ns);
-		else
-			encode_performed_out_of_band--;
 		return true;
 	}
 
@@ -1050,7 +1043,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 	unsigned client_rate_multiplier = 1;
 	unsigned client_heartbeat_count = 0;
-	unsigned encode_performed_out_of_band = 0;
 
 	void set_encode_options(const Options &opts)
 	{
