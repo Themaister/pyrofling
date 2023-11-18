@@ -40,6 +40,12 @@
 #include "pad_handler.hpp"
 #include <cmath>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <timeapi.h>
+#endif
+
 using namespace Granite;
 
 template <typename T, size_t N, typename U>

@@ -85,8 +85,8 @@ VirtualGamepad::VirtualGamepad()
 
 	uinput_setup usetup = {};
 	usetup.id.bustype = BUS_USB;
-	usetup.id.vendor = 0x8998; // Dummy values.
-	usetup.id.product = 0xffee;
+	usetup.id.vendor = FAKE_VID; // Dummy values.
+	usetup.id.product = FAKE_PID;
 	strcpy(usetup.name, "PyroFling virtual gamepad");
 
 	if (ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0 || ioctl(uinput_fd, UI_DEV_CREATE) < 0)

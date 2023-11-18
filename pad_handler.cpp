@@ -6,6 +6,9 @@
 #include "xinput_windows.hpp"
 #endif
 
+#include "virtual_gamepad.hpp"
+#include <thread>
+
 namespace PyroFling
 {
 void PadHandler::dispatch(const Granite::JoypadStateEvent &e)
@@ -13,9 +16,19 @@ void PadHandler::dispatch(const Granite::JoypadStateEvent &e)
 	using namespace Granite;
 
 	pyro_gamepad_state state = {};
-	if (e.is_connected(0))
+	bool done = false;
+
+	for (unsigned i = 0, n = e.get_num_indices(); i < n && !done; i++)
 	{
-		auto &joy = e.get_state(0);
+		if (!e.is_connected(i))
+			continue;
+
+		auto &joy = e.get_state(i);
+
+		// Don't cause feedbacks when used locally.
+		if (joy.vid == VirtualGamepad::FAKE_VID && joy.pid == VirtualGamepad::FAKE_PID)
+			continue;
+
 		state.axis_lx = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftX)]);
 		state.axis_ly = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftY)]);
 		state.axis_rx = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightX)]);
@@ -48,6 +61,8 @@ void PadHandler::dispatch(const Granite::JoypadStateEvent &e)
 			state.buttons |= PYRO_PAD_SELECT_BIT;
 		if (joy.button_mask & (1 << int(JoypadKey::Mode)))
 			state.buttons |= PYRO_PAD_MODE_BIT;
+
+		done = true;
 	}
 
 	pyro->send_gamepad_state(state);
@@ -66,7 +81,7 @@ void gamepad_main_poll_loop(PyroStreamClient *client, std::atomic_bool *done)
 	}
 
 #elif defined(HAVE_XINPUT_WINDOWS)
-	XInputManager input_manager;
+	Granite::XInputManager input_manager;
 	if (!input_manager.init(&tracker, nullptr))
 	{
 		LOGE("Failed to init input manager.\n");
