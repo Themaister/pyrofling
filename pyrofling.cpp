@@ -34,6 +34,7 @@
 #include "slangmosh_encode.hpp"
 #include "pyro_server.hpp"
 #include "virtual_gamepad.hpp"
+#include "timeline_trace_file.hpp"
 #include <stdexcept>
 #include <vector>
 #include <thread>
@@ -401,6 +402,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			img.present_id = present.wire.id;
 			img.pts = Util::get_current_time_nsecs() / 1000;
 			img.state = State::PresentQueued;
+			img.event = { server.group.get_timeline_trace_file(), "PresentQueue", present.wire.index };
 
 			auto cmd = device.request_command_buffer(cmd_type);
 
@@ -505,6 +507,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			assert(images[index].state == State::PresentQueued);
 			images[index].state = State::PresentReady;
+			images[index].event = { server.group.get_timeline_trace_file(), "PresentReady", uint32_t(index) };
 
 			// If we're using immediate mode, we'll want to encode this frame right away and send it.
 			// It will be retired late.
@@ -635,6 +638,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					complete.timestamp = timestamp_completed;
 					if (!send_wire_message(async_fd, 0, complete))
 						return false;
+
+					images[scanout_index].event = {};
 				}
 
 				if (!retire_obsolete_images(complete_id))
@@ -661,6 +666,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			uint64_t present_id = 0;
 			int64_t pts = 0;
 			State state = State::ClientOwned;
+			Util::TimelineTraceFile::ScopedEvent event;
 
 			struct Deleter { void operator()(uint8_t *ptr) { Util::memalign_free(ptr); }};
 			std::unique_ptr<uint8_t, Deleter> cross_device_host_pointer;
@@ -820,6 +826,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 						if (!encoder->encode_frame(*ycbcr_pipeline, pts, compensate_audio_us))
 							LOGE("Failed to encode frame.\n");
 					});
+
+			encode_tasks[next_encode_task_slot]->set_desc("FFmpeg encode");
 
 			// Ensure ordering between encode operations.
 			if (last_encode_dependency)
@@ -1068,6 +1076,12 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		if (!gpu.context)
 		{
 			gpu.context = std::make_unique<DeviceContext>();
+
+			Vulkan::Context::SystemHandles handles = {};
+			handles.thread_group = &group;
+			handles.timeline_trace_file = group.get_timeline_trace_file();
+			gpu.context->context.set_system_handles(handles);
+
 			gpu.context->context.set_instance_factory(this);
 			if (!gpu.context->context.init_instance(nullptr, 0))
 				return false;

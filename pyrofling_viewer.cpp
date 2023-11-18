@@ -38,6 +38,7 @@
 #include "viewer_fonts.h"
 #include "ui_manager.hpp"
 #include "pad_handler.hpp"
+#include "thread_group.hpp"
 #include <cmath>
 
 #ifdef _WIN32
