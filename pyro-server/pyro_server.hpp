@@ -49,6 +49,7 @@ private:
 	uint64_t cookie;
 	uint32_t packet_seq_video = 0;
 	uint32_t packet_seq_audio = 0;
+	pyro_kick_state_flags kick_flags = 0;
 
 	union
 	{

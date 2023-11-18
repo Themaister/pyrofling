@@ -81,6 +81,8 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 
 		case PYRO_MESSAGE_KICK:
 		{
+			memcpy(&kick_flags, tcp.split.payload, sizeof(kick_flags));
+
 			if (kicked)
 			{
 				printf("REDUNDANT KICK for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
@@ -131,11 +133,14 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 			timerfd_settime(timer_fd.get_native_handle(), 0, &tv, nullptr);
 			memcpy(&progress, tcp.split.payload, sizeof(progress));
 
-			printf("PROGRESS for %s @ %s: %llu complete, %llu dropped, %llu key frames.\n",
-			       remote_addr.c_str(), remote_port.c_str(),
-			       static_cast<unsigned long long>(progress.total_received_packets),
-			       static_cast<unsigned long long>(progress.total_dropped_packets),
-			       static_cast<unsigned long long>(progress.total_received_key_frames));
+			if ((kick_flags & (PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_VIDEO_BIT)) != 0)
+			{
+				printf("PROGRESS for %s @ %s: %llu complete, %llu dropped, %llu key frames.\n",
+				       remote_addr.c_str(), remote_port.c_str(),
+				       static_cast<unsigned long long>(progress.total_received_packets),
+				       static_cast<unsigned long long>(progress.total_dropped_packets),
+				       static_cast<unsigned long long>(progress.total_received_key_frames));
+			}
 
 			needs_key_frame.store(progress.total_received_key_frames == 0, std::memory_order_relaxed);
 			break;
@@ -170,6 +175,11 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
                                         bool is_audio, bool is_key_frame)
 {
 	if (!udp_remote || !kicked)
+		return;
+
+	if (is_audio && (kick_flags & PYRO_KICK_STATE_AUDIO_BIT) == 0)
+		return;
+	if (!is_audio && (kick_flags & PYRO_KICK_STATE_VIDEO_BIT) == 0)
 		return;
 
 	auto &seq = is_audio ? packet_seq_audio : packet_seq_video;
@@ -267,7 +277,7 @@ void PyroStreamConnection::handle_udp_datagram(
 
 	case PYRO_MESSAGE_GAMEPAD_STATE:
 	{
-		if (udp_remote == remote)
+		if (udp_remote == remote && (kick_flags & PYRO_KICK_STATE_GAMEPAD_BIT) != 0)
 		{
 			pyro_gamepad_state state = {};
 			memcpy(&state, msg, sizeof(state));
@@ -404,7 +414,14 @@ const pyro_gamepad_state *PyroStreamServer::get_updated_gamepad_state()
 void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)
 {
 	// Use mode bit to take control of session. Super crude, but good enough for POC.
-	if (remote == current_gamepad_remote || !current_gamepad_remote || (state.buttons & PYRO_PAD_MODE_BIT) != 0)
+	bool button_combo_takes_control = (state.buttons & PYRO_PAD_MODE_BIT) != 0;
+	constexpr uint16_t button_combo =
+			PYRO_PAD_START_BIT | PYRO_PAD_SELECT_BIT |
+			PYRO_PAD_TL_BIT | PYRO_PAD_TR_BIT;
+	if ((state.buttons & button_combo) == button_combo)
+		button_combo_takes_control = true;
+
+	if (remote == current_gamepad_remote || !current_gamepad_remote || button_combo_takes_control)
 	{
 		current_gamepad_state = state;
 		current_gamepad_remote = remote;

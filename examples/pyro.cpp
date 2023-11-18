@@ -73,7 +73,7 @@ int main()
 	PyroStreamClient client;
 	if (!client.connect("127.0.0.1", "8080"))
 		return EXIT_FAILURE;
-	if (!client.handshake())
+	if (!client.handshake(PYRO_KICK_STATE_VIDEO_BIT | PYRO_KICK_STATE_AUDIO_BIT))
 		return EXIT_FAILURE;
 
 	PyroStreamClient::set_simulate_drop(false);

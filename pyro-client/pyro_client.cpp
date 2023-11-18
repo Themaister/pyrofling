@@ -15,7 +15,7 @@ bool PyroStreamClient::connect(const char *host, const char *port)
 	return true;
 }
 
-bool PyroStreamClient::handshake()
+bool PyroStreamClient::handshake(pyro_kick_state_flags flags)
 {
 	pyro_message_type type = PYRO_MESSAGE_HELLO;
 	if (!tcp.write(&type, sizeof(type)))
@@ -37,6 +37,8 @@ bool PyroStreamClient::handshake()
 		type = PYRO_MESSAGE_KICK;
 		if (!tcp.write(&type, sizeof(type)))
 			return false;
+		if (!tcp.write(&flags, sizeof(flags)))
+			return false;
 
 		if (!tcp.read(&type, sizeof(type)))
 			return false;
@@ -47,6 +49,7 @@ bool PyroStreamClient::handshake()
 	}
 
 	last_progress_time = std::chrono::steady_clock::now();
+	kick_flags = flags;
 	return codec.video_codec != PYRO_VIDEO_CODEC_NONE;
 }
 
@@ -116,6 +119,10 @@ bool PyroStreamClient::send_gamepad_state(const pyro_gamepad_state &state)
 			return false;
 		ping_times[ping_state.seq] = Util::get_current_time_nsecs();
 	}
+
+	// If we're a pure gamepad connection, need to keep-alive here.
+	if ((kick_flags & (PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_VIDEO_BIT)) == 0 && !check_send_progress())
+		return false;
 
 	return true;
 }
@@ -409,19 +416,26 @@ bool PyroStreamClient::iterate()
 		if ((h.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0)
 			progress.total_received_key_frames++;
 
-		auto current_time = std::chrono::steady_clock::now();
-		auto delta = current_time - last_progress_time;
-		if (std::chrono::duration_cast<std::chrono::milliseconds>(delta).count() >= 1000)
-		{
-			last_progress_time = current_time;
-			const pyro_message_type type = PYRO_MESSAGE_PROGRESS;
-			if (!tcp.write(&type, sizeof(type)))
-				return false;
-			if (!tcp.write(&progress, sizeof(progress)))
-				return false;
-		}
-
+		if (!check_send_progress())
+			return false;
 		current = stream;
+	}
+
+	return true;
+}
+
+bool PyroStreamClient::check_send_progress()
+{
+	auto current_time = std::chrono::steady_clock::now();
+	auto delta = current_time - last_progress_time;
+	if (std::chrono::duration_cast<std::chrono::milliseconds>(delta).count() >= 1000)
+	{
+		last_progress_time = current_time;
+		const pyro_message_type type = PYRO_MESSAGE_PROGRESS;
+		if (!tcp.write(&type, sizeof(type)))
+			return false;
+		if (!tcp.write(&progress, sizeof(progress)))
+			return false;
 	}
 
 	return true;

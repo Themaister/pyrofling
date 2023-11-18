@@ -11,7 +11,7 @@ class PyroStreamClient
 {
 public:
 	bool connect(const char *host, const char *port);
-	bool handshake();
+	bool handshake(pyro_kick_state_flags flags);
 
 	const pyro_codec_parameters &get_codec_parameters() const;
 	bool wait_next_packet();
@@ -32,6 +32,7 @@ public:
 
 private:
 	PyroFling::Socket tcp, udp;
+	pyro_kick_state_flags kick_flags = 0;
 
 	struct ReconstructedPacket
 	{
@@ -65,5 +66,7 @@ private:
 	double last_ping_delay = 0.0;
 
 	bool iterate();
+
+	bool check_send_progress();
 };
 }

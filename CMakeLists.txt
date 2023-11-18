@@ -71,12 +71,24 @@ if (NOT PYROFLING_LAYER_ONLY)
 	add_blob_archive_target(viewer-fonts viewer_fonts
         ${CMAKE_CURRENT_SOURCE_DIR}/Granite/assets/fonts/font.ttf fonts/font.ttf)
 
+    add_library(pad-handler STATIC pad_handler.cpp pad_handler.hpp)
+    target_include_directories(pad-handler PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(pad-handler PRIVATE ${PYROFLING_CXX_FLAGS})
+    target_link_libraries(pad-handler PUBLIC granite-input pyro-client)
+
     add_granite_application(pyrofling-viewer pyrofling_viewer.cpp)
-    target_link_libraries(pyrofling-viewer PRIVATE granite-video granite-audio pyro-client viewer-fonts)
+    target_link_libraries(pyrofling-viewer PRIVATE pad-handler granite-video granite-audio pyro-client viewer-fonts)
     if (WIN32)
             target_link_libraries(pyrofling-viewer PRIVATE winmm)
     endif()
     install(TARGETS pyrofling-viewer)
+
+    add_granite_offline_tool(pyrofling-gamepad pyrofling_gamepad.cpp)
+    target_link_libraries(pyrofling-gamepad PRIVATE pyro-client pad-handler)
+    if (WIN32)
+        target_link_libraries(pyrofling-gamepad PRIVATE winmm)
+    endif()
+    install(TARGETS pyrofling-gamepad)
 endif()
 
 if (NOT WIN32)
