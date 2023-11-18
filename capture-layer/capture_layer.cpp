@@ -47,9 +47,6 @@ struct ExportableImage
 	VkImage image;
 	VkDeviceMemory memory;
 
-	uint64_t khrPresentId;
-	uint64_t pyroPresentId;
-
 	VkSemaphore acquireSemaphore;
 	VkSemaphore releaseSemaphore;
 	VkCommandPool cmdPool;
@@ -109,6 +106,13 @@ struct SurfaceState
 	bool pollConnection();
 	bool waitConnection(std::unique_lock<std::mutex> &lock);
 	bool acquire(uint32_t &index);
+
+	struct WaitPair
+	{
+		uint64_t pyroPresentId;
+		uint64_t khrPresentId;
+	};
+	std::vector<WaitPair> waitPairs;
 
 	uint64_t completedKHRPresentId = 0;
 	bool usesPresentWait = false;
@@ -378,9 +382,14 @@ bool SurfaceState::handleEvent(PyroFling::Message &msg)
 			return true;
 		completePresentId = complete->wire.presented_id;
 
-		for (auto &img : image)
-			if (img.pyroPresentId == completePresentId && img.khrPresentId > completedKHRPresentId)
-				completedKHRPresentId = img.khrPresentId;
+		for (auto &wait : waitPairs)
+			if (wait.pyroPresentId == completePresentId && wait.khrPresentId > completedKHRPresentId)
+				completedKHRPresentId = wait.khrPresentId;
+
+		auto itr = std::remove_if(waitPairs.begin(), waitPairs.end(), [this](const WaitPair &p) {
+			return p.khrPresentId <= completedKHRPresentId;
+		});
+		waitPairs.erase(itr, waitPairs.end());
 	}
 	else
 		return false;
@@ -692,8 +701,11 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	wire.id = ++presentId;
 
 	// Important to set these before send_wire_message to avoid theoretical race condition.
-	img.pyroPresentId = wire.id;
-	img.khrPresentId = khrPresentId;
+	{
+		std::lock_guard<std::mutex> holder{clientLock};
+		waitPairs.push_back({ wire.id, khrPresentId });
+	}
+
 	img.acquired = false;
 	img.ready = false;
 	img.fencePending = true;
@@ -754,6 +766,7 @@ bool SurfaceState::sendImageGroup()
 
 	presentId = 0;
 	completePresentId = 0;
+	waitPairs.clear();
 
 	for (auto &img : image)
 	{

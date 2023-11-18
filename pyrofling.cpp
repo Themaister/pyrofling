@@ -404,6 +404,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			img.state = State::PresentQueued;
 			img.event = { server.group.get_timeline_trace_file(), "PresentQueue", present.wire.index };
 
+			// No future present can be locked in earlier than this one.
+			earliest_next_timestamp = img.target_timestamp + img.target_period;
+
 			auto cmd = device.request_command_buffer(cmd_type);
 
 			if (img.src_cross_device_buffer)
@@ -468,22 +471,11 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 		uint64_t compute_next_target_timestamp() const
 		{
-			uint64_t ts = 0;
-			for (auto &img : images)
-			{
-				if (img.state != State::ClientOwned)
-				{
-					uint64_t target_ts = img.target_timestamp + img.target_period;
-					if (target_ts > ts)
-						ts = target_ts;
-				}
-			}
-
 			// If there are no pending presentations in flight, lock-in for the next cycle.
 			// Move any target forward to next pending timestamp.
-			uint64_t next_ts = timestamp_completed + 1;
-			if (ts < next_ts)
-				ts = next_ts;
+			uint64_t ts = timestamp_completed + 1;
+			if (ts < earliest_next_timestamp)
+				ts = earliest_next_timestamp;
 
 			return ts;
 		}
@@ -511,9 +503,18 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			// If we're using immediate mode, we'll want to encode this frame right away and send it.
 			// It will be retired late.
+			timestamp_complete_mappings.push_back({ images[index].target_timestamp, images[index].present_id });
 			server.notify_async_surface({ this, int(index) });
 
-			return retire_obsolete_images();
+			// If we're doing immediate encode, every user image can be retired now.
+			// We've already blitted it.
+			if (server.video_encode.immediate)
+			{
+				images[index].event = {};
+				return retire_obsolete_images(UINT64_MAX);
+			}
+			else
+				return retire_obsolete_images();
 		}
 
 		bool handle(const FileHandle &fd, uint32_t id) override
@@ -540,38 +541,45 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			}
 		}
 
+		bool send_acquire_retire(uint32_t index)
+		{
+			auto &img = images[index];
+			// Synchronous acquire. Retire == acquire more or less.
+			AcquireImageMessage::WireFormat acquire = {};
+			acquire.index = index;
+			acquire.image_group_serial = image_group_serial;
+
+			// If there's a pending blit pass, have to handle write-after-read.
+			FileHandle fd;
+			if (img.last_read_semaphore)
+			{
+				auto h = img.last_read_semaphore->export_to_handle();
+				fd = FileHandle{h.handle};
+				acquire.vk_external_semaphore_type = h.semaphore_handle_type;
+				img.last_read_semaphore.reset();
+			}
+
+			if (!send_wire_message(async_fd, 0, acquire, &fd, fd ? 1 : 0))
+				return false;
+
+			RetireImageMessage::WireFormat retire = {};
+			retire.image_group_serial = image_group_serial;
+			retire.index = index;
+			if (!send_wire_message(async_fd, 0, retire))
+				return false;
+
+			return true;
+		}
+
 		bool retire_obsolete_images(uint64_t current_present_id)
 		{
 			for (size_t i = 0, n = images.size(); i < n; i++)
 			{
 				auto &img = images[i];
-				if ((img.state == State::PresentReady || img.state == State::PresentComplete) &&
-				    img.present_id < current_present_id)
+				if (img.state == State::PresentReady && img.present_id < current_present_id)
 				{
 					img.state = State::ClientOwned;
-
-					// Synchronous acquire. Retire == acquire more or less.
-					AcquireImageMessage::WireFormat acquire = {};
-					acquire.index = i;
-					acquire.image_group_serial = image_group_serial;
-
-					// If there's a pending blit pass, have to handle write-after-read.
-					FileHandle fd;
-					if (img.last_read_semaphore)
-					{
-						auto h = img.last_read_semaphore->export_to_handle();
-						fd = FileHandle{h.handle};
-						acquire.vk_external_semaphore_type = h.semaphore_handle_type;
-						img.last_read_semaphore.reset();
-					}
-
-					if (!send_wire_message(async_fd, 0, acquire, &fd, fd ? 1 : 0))
-						return false;
-
-					RetireImageMessage::WireFormat retire = {};
-					retire.image_group_serial = image_group_serial;
-					retire.index = i;
-					if (!send_wire_message(async_fd, 0, retire))
+					if (!send_acquire_retire(i))
 						return false;
 				}
 			}
@@ -591,7 +599,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			for (size_t i = 0, n = images.size(); i < n; i++)
 			{
 				auto &img = images[i];
-				if (img.state != State::PresentReady && img.state != State::PresentComplete)
+				if (img.state != State::PresentReady)
 					continue;
 
 				if (img.target_timestamp > ts)
@@ -624,24 +632,32 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			scanout_index = get_target_image_index_for_timestamp(timestamp_completed);
 
+			uint64_t complete_id = 0;
 			if (scanout_index >= 0)
+				images[scanout_index].event = {};
+
+			// Mark completion IDs based on current timestamp.
+			for (auto &mapping : timestamp_complete_mappings)
+				if (timestamp_completed >= mapping.timestamp && mapping.complete_id > complete_id)
+					complete_id = mapping.complete_id;
+
+			// Retire timestamps that we have processed.
+			auto itr = std::remove_if(timestamp_complete_mappings.begin(),
+			                          timestamp_complete_mappings.end(),
+			                          [this](const TimestampCompleteMapping &m) {
+				                          return m.timestamp <= timestamp_completed;
+			                          });
+			timestamp_complete_mappings.erase(itr, timestamp_complete_mappings.end());
+
+			if (complete_id)
 			{
-				uint64_t complete_id = images[scanout_index].present_id;
-
-				if (images[scanout_index].state == State::PresentReady)
-				{
-					images[scanout_index].state = State::PresentComplete;
-					FrameCompleteMessage::WireFormat complete = {};
-					complete.image_group_serial = image_group_serial;
-					complete.period_ns = time_ns;
-					complete.presented_id = complete_id;
-					complete.timestamp = timestamp_completed;
-					if (!send_wire_message(async_fd, 0, complete))
-						return false;
-
-					images[scanout_index].event = {};
-				}
-
+				FrameCompleteMessage::WireFormat complete = {};
+				complete.image_group_serial = image_group_serial;
+				complete.period_ns = time_ns;
+				complete.presented_id = complete_id;
+				complete.timestamp = timestamp_completed;
+				if (!send_wire_message(async_fd, 0, complete))
+					return false;
 				if (!retire_obsolete_images(complete_id))
 					return false;
 			}
@@ -653,8 +669,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		{
 			ClientOwned,
 			PresentQueued,
-			PresentReady,
-			PresentComplete
+			PresentReady
 		};
 
 		struct SwapchainImage
@@ -679,10 +694,18 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		DeviceContextAssociation association = {};
 		std::vector<SwapchainImage> images;
 
+		struct TimestampCompleteMapping
+		{
+			uint64_t timestamp;
+			uint64_t complete_id;
+		};
+		std::vector<TimestampCompleteMapping> timestamp_complete_mappings;
+
 		uint64_t image_group_serial = 0;
 		uint64_t timestamp_completed = 0;
 		uint64_t timestamp_stalled_count = 0;
 		uint64_t last_present_id = 0;
+		uint64_t earliest_next_timestamp = 0;
 		FileHandle async_fd;
 		FileHandle pipe_fd;
 	};
@@ -889,7 +912,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				ready_surface = { handler.get(), index };
 		}
 
-		if (!video_encode.immediate || !ready_surface.chain)
+		if (!video_encode.immediate)
 			encode_surface(ready_surface, period_ns);
 		return true;
 	}
