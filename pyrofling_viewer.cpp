@@ -57,11 +57,11 @@ static void push_sliding_window(T (&v)[N], U value)
 
 struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterface
 {
-	explicit VideoPlayerApplication(const char *video_path,
-	                                float video_buffer,
-	                                float audio_buffer, float target,
-									double phase_locked_offset_, bool phase_locked_enable_,
-									double deadline_, bool deadline_enable_)
+	VideoPlayerApplication(const char *video_path,
+	                       float video_buffer,
+	                       float audio_buffer, float target,
+	                       double phase_locked_offset_, bool phase_locked_enable_,
+	                       double deadline_, bool deadline_enable_, const char *hwdevice)
 		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
 		, deadline(deadline_), deadline_enable(deadline_enable_)
 	{
@@ -78,6 +78,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		opts.target_realtime_audio_buffer_time = audio_buffer;
 		opts.target_video_buffer_time = video_buffer;
 		opts.blocking = true;
+		opts.hwdevice = hwdevice;
 		realtime = opts.realtime;
 		target_realtime_delay = target;
 
@@ -582,7 +583,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 static void print_help()
 {
-	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] [--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS]\n");
+	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] "
+	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE]\n");
 }
 
 namespace Granite
@@ -607,6 +609,7 @@ Application *application_create(int argc, char **argv)
 	bool phase_locked_enable = false;
 	double deadline = 0.0;
 	bool deadline_enable = false;
+	const char *hwdevice = nullptr;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
@@ -615,6 +618,7 @@ Application *application_create(int argc, char **argv)
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
 	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
 	cbs.add("--deadline", [&](Util::CLIParser &parser) { deadline = parser.next_double(); deadline_enable = true; });
+	cbs.add("--hwdevice", [&](Util::CLIParser &parser) { hwdevice = parser.next_string(); });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
 
@@ -651,7 +655,7 @@ Application *application_create(int argc, char **argv)
 	{
 		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay,
 		                                       phase_locked_offset, phase_locked_enable,
-		                                       deadline, deadline_enable);
+		                                       deadline, deadline_enable, hwdevice);
 		return app;
 	}
 	catch (const std::exception &e)
