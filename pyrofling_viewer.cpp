@@ -180,6 +180,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		return "pyrofling-viewer";
 	}
 
+#if 0
 	unsigned get_default_width() override
 	{
 		return decoder.get_width();
@@ -189,6 +190,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 		return decoder.get_height();
 	}
+#endif
 
 	void shift_frame()
 	{
