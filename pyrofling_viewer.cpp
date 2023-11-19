@@ -23,6 +23,7 @@
 #include "ffmpeg_decode.hpp"
 #include "application.hpp"
 #include "application_wsi_events.hpp"
+#include "application_events.hpp"
 #include "audio_mixer.hpp"
 #include "slangmosh_decode_iface.hpp"
 #include "slangmosh_decode.hpp"
@@ -37,8 +38,8 @@
 #include "filesystem.hpp"
 #include "viewer_fonts.h"
 #include "ui_manager.hpp"
-#include "pad_handler.hpp"
 #include "thread_group.hpp"
+#include "virtual_gamepad.hpp"
 #include <cmath>
 
 #ifdef _WIN32
@@ -99,10 +100,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			decoder.set_io_interface(this);
 			video_path = nullptr;
 
-			poll_thread_dead = false;
-			poll_thread = std::thread([this]() {
-				PyroFling::gamepad_main_poll_loop(&pyro, &poll_thread_dead);
-			});
+			is_running_pyro = true;
 
 			if (opts.target_realtime_audio_buffer_time > 0.10f && (phase_locked_enable || target_realtime_delay <= 0.0))
 				opts.target_realtime_audio_buffer_time = 0.10f;
@@ -123,6 +121,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		                             on_module_created, on_module_destroyed,
 		                             Vulkan::DeviceShaderModuleReadyEvent);
 
+		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_lifecycle, on_end_lifecycle,
+									 Granite::ApplicationLifecycleEvent);
+
 		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
 
 		if (target_realtime_delay <= 0.0 && !phase_locked_enable)
@@ -134,16 +135,29 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 #endif
 	}
 
+	void on_begin_lifecycle(const Granite::ApplicationLifecycleEvent &e)
+	{
+		if (is_running_pyro && e.get_lifecycle() == Granite::ApplicationLifecycle::Running)
+		{
+			poll_thread_dead = false;
+			poll_thread = std::thread{&VideoPlayerApplication::poll_thread_main, this};
+		}
+	}
+
+	void on_end_lifecycle(const Granite::ApplicationLifecycleEvent &)
+	{
+		if (poll_thread.joinable())
+		{
+			poll_thread_dead = true;
+			poll_thread.join();
+		}
+	}
+
 	bool on_key_pressed(const KeyboardEvent &e)
 	{
 		if (e.get_key() == Key::V && e.get_key_state() == KeyState::Pressed)
 			stats.enable = !stats.enable;
 		return true;
-	}
-
-	bool enable_joypad_input_manager() override
-	{
-		return false;
 	}
 
 	~VideoPlayerApplication() override
@@ -204,6 +218,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	unsigned long long missed_deadlines = 0;
 	std::thread poll_thread;
 	std::atomic_bool poll_thread_dead;
+	bool is_running_pyro = false;
 
 	struct
 	{
@@ -222,11 +237,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		push_sliding_window(stats.audio_delay_buffer, decoder.get_audio_buffering_duration());
 	}
 
-	bool is_running_pyro() const
-	{
-		return poll_thread.joinable();
-	}
-
 	bool update(Vulkan::Device &device, double frame_time, double elapsed_time)
 	{
 		GRANITE_SCOPED_TIMELINE_EVENT("update");
@@ -234,7 +244,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		push_sliding_window(stats.local_frame_time, frame_time);
 		update_audio_buffer_stats();
 
-		if (is_running_pyro())
+		if (is_running_pyro)
 			push_sliding_window(stats.ping, pyro.get_current_ping_delay());
 
 		// Most aggressive method, not all that great for pacing ...
@@ -570,6 +580,102 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	pyro_payload_header get_payload_header() override
 	{
 		return pyro.get_payload_header();
+	}
+
+	void poll_thread_main()
+	{
+		struct PadHandler : Granite::InputTrackerHandler
+		{
+			PyroFling::PyroStreamClient *pyro = nullptr;
+			void dispatch(const Granite::TouchDownEvent &) override {}
+			void dispatch(const Granite::TouchUpEvent &) override {}
+			void dispatch(const Granite::TouchGestureEvent &) override {}
+			void dispatch(const Granite::JoypadButtonEvent &) override {}
+			void dispatch(const Granite::JoypadAxisEvent &) override {}
+			void dispatch(const Granite::KeyboardEvent &) override {}
+			void dispatch(const Granite::OrientationEvent &) override {}
+			void dispatch(const Granite::MouseButtonEvent &) override {}
+			void dispatch(const Granite::MouseMoveEvent &) override {}
+			void dispatch(const Granite::InputStateEvent &) override {}
+			void dispatch(const Granite::JoypadConnectionEvent &) override {}
+			void dispatch(const Granite::JoypadStateEvent &e) override
+			{
+				using namespace Granite;
+
+				pyro_gamepad_state state = {};
+				bool done = false;
+
+				for (unsigned i = 0, n = e.get_num_indices(); i < n && !done; i++)
+				{
+					if (!e.is_connected(i))
+						continue;
+
+					auto &joy = e.get_state(i);
+
+					// Don't cause feedbacks when used locally.
+					if (joy.vid == PyroFling::VirtualGamepad::FAKE_VID &&
+					    joy.pid == PyroFling::VirtualGamepad::FAKE_PID)
+						continue;
+
+					state.axis_lx = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftX)]);
+					state.axis_ly = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftY)]);
+					state.axis_rx = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightX)]);
+					state.axis_ry = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightY)]);
+					state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Left))) != 0 ? -1 : 0;
+					state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Right))) != 0 ? +1 : 0;
+					state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Up))) != 0 ? -1 : 0;
+					state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Down))) != 0 ? +1 : 0;
+					state.lz = uint8_t(255.0f * joy.axis[int(JoypadAxis::LeftTrigger)]);
+					state.rz = uint8_t(255.0f * joy.axis[int(JoypadAxis::RightTrigger)]);
+					if (joy.button_mask & (1 << int(JoypadKey::East)))
+						state.buttons |= PYRO_PAD_EAST_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::South)))
+						state.buttons |= PYRO_PAD_SOUTH_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::West)))
+						state.buttons |= PYRO_PAD_WEST_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::North)))
+						state.buttons |= PYRO_PAD_NORTH_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::LeftShoulder)))
+						state.buttons |= PYRO_PAD_TL_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::RightShoulder)))
+						state.buttons |= PYRO_PAD_TR_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::LeftThumb)))
+						state.buttons |= PYRO_PAD_THUMBL_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::RightThumb)))
+						state.buttons |= PYRO_PAD_THUMBR_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::Start)))
+						state.buttons |= PYRO_PAD_START_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::Select)))
+						state.buttons |= PYRO_PAD_SELECT_BIT;
+					if (joy.button_mask & (1 << int(JoypadKey::Mode)))
+						state.buttons |= PYRO_PAD_MODE_BIT;
+
+					done = true;
+				}
+
+				if (!pyro->send_gamepad_state(state))
+					dead = true;
+			}
+
+			bool dead = false;
+		};
+
+		PadHandler handler;
+		handler.pyro = &pyro;
+
+#ifdef _WIN32
+		timeBeginPeriod(1);
+#endif
+
+		while (!poll_thread_dead && !handler.dead)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(4));
+			poll_input_tracker_async(&handler);
+		}
+
+#ifdef _WIN32
+		timeEndPeriod(1);
+#endif
 	}
 
 	PyroFling::PyroStreamClient pyro;
