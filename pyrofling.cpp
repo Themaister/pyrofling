@@ -912,7 +912,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				ready_surface = { handler.get(), index };
 		}
 
-		if (!video_encode.immediate)
+		if (!video_encode.immediate || handlers.empty())
 			encode_surface(ready_surface, period_ns);
 		return true;
 	}
