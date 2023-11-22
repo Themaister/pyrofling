@@ -3,3 +3,5 @@
 /cmake-build-*
 /ffmpeg-build-*
 /build
+/build-steamrt
+/steamrt-output
