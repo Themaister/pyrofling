@@ -1,3 +1,5 @@
 .idea
 *.iml
 /cmake-build-*
+/ffmpeg-build-*
+/build
