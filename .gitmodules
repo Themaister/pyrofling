@@ -1,3 +1,6 @@
 [submodule "Granite"]
 	path = Granite
 	url = https://github.com/Themaister/Granite
+[submodule "ffmpeg"]
+	path = ffmpeg
+	url = https://github.com/ffmpeg/ffmpeg

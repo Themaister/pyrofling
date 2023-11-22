@@ -37,6 +37,11 @@ set(GRANITE_VULKAN_FOSSILIZE OFF CACHE BOOL "" FORCE)
 set(GRANITE_VULKAN_SPIRV_CROSS OFF CACHE BOOL "" FORCE)
 set(GRANITE_FFMPEG_VULKAN ON CACHE BOOL "" FORCE)
 
+if (WIN32 AND (NOT MSVC) AND (IS_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-build-msys2/output/lib))
+    message("Found pre-built FFmpeg.")
+    set(CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-build-msys2/output")
+endif()
+
 if (${CMAKE_BUILD_TYPE} MATCHES "Release")
     set(GRANITE_SHIPPING ON CACHE BOOL "" FORCE)
     message("Using GRANITE_SHIPPING build.")
