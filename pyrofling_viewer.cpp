@@ -69,6 +69,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		, deadline(deadline_), deadline_enable(deadline_enable_)
 		, target_latency(target_latency_), hwdevice(hwdevice_)
 	{
+		sent_button_mask = 0;
 		get_wsi().set_low_latency_mode(true);
 		if (video_path && !init_video_client(video_path))
 			throw std::runtime_error("Failed to init video client.");
@@ -197,6 +198,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		if (!init_video_client(drop.get_path().c_str()))
 			request_shutdown();
 
+		check_poll_thread();
+
 		// If device is ready, start video as well now, otherwise, defer until module ready event is complete.
 		if (video_active && blit)
 			begin(get_wsi().get_device());
@@ -220,17 +223,25 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 	}
 
-	void on_begin_lifecycle(const Granite::ApplicationLifecycleEvent &e)
+	void check_poll_thread()
 	{
-		if (is_running_pyro && e.get_lifecycle() == Granite::ApplicationLifecycle::Running)
+		if (is_running_pyro && running_lifetime && !poll_thread.joinable())
 		{
 			poll_thread_dead = false;
 			poll_thread = std::thread{&VideoPlayerApplication::poll_thread_main, this};
 		}
 	}
 
+	void on_begin_lifecycle(const Granite::ApplicationLifecycleEvent &e)
+	{
+		if (e.get_lifecycle() == ApplicationLifecycle::Running)
+			running_lifetime = true;
+		check_poll_thread();
+	}
+
 	void on_end_lifecycle(const Granite::ApplicationLifecycleEvent &)
 	{
+		running_lifetime = false;
 		if (poll_thread.joinable())
 		{
 			poll_thread_dead = true;
@@ -247,6 +258,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			if (!init_video_client(cliptext.c_str()))
 				request_shutdown();
+
+			check_poll_thread();
 
 			// If device is ready, start video as well now, otherwise, defer until module ready event is complete.
 			if (video_active && blit)
@@ -308,6 +321,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	bool is_running_pyro = false;
 	bool video_active = false;
 	std::string cliptext;
+	bool running_lifetime = false;
 
 	struct
 	{
@@ -631,6 +645,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					                          { 300.0f - 10.0f, 45.0f - 10.0f});
 				}
 
+				if (sent_button_mask.exchange(0, std::memory_order_relaxed))
+					flat_renderer.render_quad({ 0, 0, 0.9f }, { 16, 16 }, vec4(0.0f, 1.0f, 0.0f, 1.0f));
+
 				flat_renderer.flush(*cmd, {}, {cmd->get_viewport().width, cmd->get_viewport().height, 1.0f});
 			}
 
@@ -787,11 +804,13 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					done = true;
 				}
 
+				sent_buttons = state.buttons;
 				if (!pyro->send_gamepad_state(state))
 					dead = true;
 			}
 
 			bool dead = false;
+			uint32_t sent_buttons = 0;
 		};
 
 		PadHandler handler;
@@ -805,6 +824,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			std::this_thread::sleep_for(std::chrono::milliseconds(4));
 			poll_input_tracker_async(&handler);
+			sent_button_mask.fetch_or(handler.sent_buttons, std::memory_order_relaxed);
 		}
 
 #ifdef _WIN32
@@ -819,6 +839,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	Vulkan::Program *blit = nullptr;
 	bool realtime = false;
 	FlatRenderer flat_renderer;
+	std::atomic<uint32_t> sent_button_mask;
 };
 
 static void print_help()
