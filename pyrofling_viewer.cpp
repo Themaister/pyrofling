@@ -20,6 +20,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
+#define NOMINXMAX
 #include "ffmpeg_decode.hpp"
 #include "application.hpp"
 #include "application_wsi_events.hpp"
@@ -40,6 +41,7 @@
 #include "ui_manager.hpp"
 #include "thread_group.hpp"
 #include "virtual_gamepad.hpp"
+#include "logging.hpp"
 #include <cmath>
 
 #ifdef _WIN32
@@ -60,79 +62,162 @@ static void push_sliding_window(T (&v)[N], U value)
 struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterface
 {
 	VideoPlayerApplication(const char *video_path,
-	                       float video_buffer,
-	                       float audio_buffer, float target,
+	                       float target_latency_,
 	                       double phase_locked_offset_, bool phase_locked_enable_,
-	                       double deadline_, bool deadline_enable_, const char *hwdevice)
+	                       double deadline_, bool deadline_enable_, const char *hwdevice_)
 		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
 		, deadline(deadline_), deadline_enable(deadline_enable_)
+		, target_latency(target_latency_), hwdevice(hwdevice_)
 	{
-		// Debug
-		//PyroFling::PyroStreamClient::set_simulate_reordering(true);
-		//PyroFling::PyroStreamClient::set_simulate_drop(true);
-		////
-
 		get_wsi().set_low_latency_mode(true);
+		if (video_path && !init_video_client(video_path))
+			throw std::runtime_error("Failed to init video client.");
 
+		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
+
+		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
+		                             on_module_created, on_module_destroyed,
+		                             Vulkan::DeviceShaderModuleReadyEvent);
+
+		if (!video_active)
+		{
+			EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_file_drop, Vulkan::ApplicationWindowFileDropEvent);
+			EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_text_drop, Vulkan::ApplicationWindowTextDropEvent);
+		}
+
+#ifdef _WIN32
+		if (deadline_enable)
+			timeBeginPeriod(1);
+#endif
+	}
+
+	bool init_video_client(const char *video_path)
+	{
 		VideoDecoder::DecodeOptions opts;
 		// Crude :)
 		opts.realtime = strstr(video_path, "://") != nullptr;
-		opts.target_realtime_audio_buffer_time = audio_buffer;
-		opts.target_video_buffer_time = video_buffer;
 		opts.blocking = true;
 		opts.hwdevice = hwdevice;
 		realtime = opts.realtime;
-		target_realtime_delay = target;
 
 		if (strncmp(video_path, "pyro://", 7) == 0)
 		{
-			auto split = Util::split(video_path + 7, ":");
+			auto optsplit = Util::split(video_path + 7, "?");
+			if (optsplit.empty())
+				return false;
+
+			auto split = Util::split(optsplit.front(), ":");
 			if (split.size() != 2)
-				throw std::runtime_error("Must specify both IP and port.");
+			{
+				LOGE("Must specify both IP and port.\n");
+				return false;
+			}
+
+			if (optsplit.size() >= 2)
+			{
+				auto splitopts = Util::split(optsplit[1], "&");
+				for (auto &opt : splitopts)
+				{
+					auto pair = Util::split(opt, "=");
+					if (pair.size() == 2)
+					{
+						if (pair[0] == "phase_locked")
+						{
+							phase_locked_enable = true;
+							phase_locked_offset = strtod(pair[1].c_str(), nullptr);
+							LOGI("Override phase_locked_offset = %.3f seconds\n", phase_locked_offset);
+						}
+						else if (pair[0] == "deadline")
+						{
+							deadline_enable = true;
+							deadline = strtod(pair[1].c_str(), nullptr);
+							LOGI("Override deadline = %.3f seconds\n", deadline);
+						}
+						else if (pair[0] == "latency")
+						{
+							target_latency = strtof(pair[1].c_str(), nullptr);
+							LOGI("Target latency = %.3f seconds\n", target_latency);
+						}
+						else
+							LOGE("Invalid option: %s\n", pair[0].c_str());
+					}
+					else
+						LOGE("Invalid option format: %s\n", opt.c_str());
+				}
+			}
+
+			float target_buffer = std::max(0.1f, std::min(target_latency * 2.0f, target_latency + 0.2f));
+			opts.target_video_buffer_time = target_buffer;
+			opts.target_realtime_audio_buffer_time = target_buffer;
+
 			LOGI("Connecting to raw pyrofling %s:%s.\n",
 			     split[0].c_str(), split[1].c_str());
 
 			if (!pyro.connect(split[0].c_str(), split[1].c_str()))
-				throw std::runtime_error("Failed to connect to server.");
+			{
+				LOGE("Failed to connect to server.\n");
+				return false;
+			}
+
 			if (!pyro.handshake(PYRO_KICK_STATE_VIDEO_BIT | PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_GAMEPAD_BIT))
-				throw std::runtime_error("Failed handshake.");
+			{
+				LOGE("Failed handshake.\n");
+				return false;
+			}
 
 			decoder.set_io_interface(this);
 			video_path = nullptr;
 
 			is_running_pyro = true;
 
-			if (opts.target_realtime_audio_buffer_time > 0.10f && (phase_locked_enable || target_realtime_delay <= 0.0))
-				opts.target_realtime_audio_buffer_time = 0.10f;
+			if (target_latency <= 0.0 && !phase_locked_enable)
+				get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
 		}
 		else
 			phase_locked_enable = false;
 
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
-			throw std::runtime_error("Failed to open file");
+		{
+			LOGE("Failed to open video decoder.\n");
+			return false;
+		}
 
-		float desired_audio_rate = -1.0f;
-		if (!realtime) // We don't add a resampler ourselves, so aim for whatever sampling rate the file has.
-			desired_audio_rate = decoder.get_audio_sample_rate();
-
-		Global::init(Global::MANAGER_FEATURE_AUDIO_BACKEND_BIT, 0, desired_audio_rate);
-
-		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
-		                             on_module_created, on_module_destroyed,
-		                             Vulkan::DeviceShaderModuleReadyEvent);
+		video_active = true;
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_lifecycle, on_end_lifecycle,
-									 Granite::ApplicationLifecycleEvent);
+		                             Granite::ApplicationLifecycleEvent);
+		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_platform, on_end_platform,
+		                             Vulkan::ApplicationWSIPlatformEvent);
 
-		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
+		return true;
+	}
 
-		if (target_realtime_delay <= 0.0 && !phase_locked_enable)
-			get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
+	bool on_file_drop(const Vulkan::ApplicationWindowFileDropEvent &drop)
+	{
+		if (!init_video_client(drop.get_path().c_str()))
+			request_shutdown();
 
-#ifdef _WIN32
-		if (deadline_enable)
-			timeBeginPeriod(1);
-#endif
+		// If device is ready, start video as well now, otherwise, defer until module ready event is complete.
+		if (video_active && blit)
+			begin(get_wsi().get_device());
+
+		return false;
+	}
+
+	bool on_text_drop(const Vulkan::ApplicationWindowTextDropEvent &drop)
+	{
+		cliptext = drop.get_text();
+		return true;
+	}
+
+	void on_begin_platform(const Vulkan::ApplicationWSIPlatformEvent &e)
+	{
+		if (!video_active)
+			e.get_platform().begin_drop_event();
+	}
+
+	void on_end_platform(const Vulkan::ApplicationWSIPlatformEvent &)
+	{
 	}
 
 	void on_begin_lifecycle(const Granite::ApplicationLifecycleEvent &e)
@@ -157,6 +242,16 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 		if (e.get_key() == Key::V && e.get_key_state() == KeyState::Pressed)
 			stats.enable = !stats.enable;
+		if (e.get_key() == Key::Return && e.get_key_state() == KeyState::Pressed &&
+		    !video_active && !cliptext.empty())
+		{
+			if (!init_video_client(cliptext.c_str()))
+				request_shutdown();
+
+			// If device is ready, start video as well now, otherwise, defer until module ready event is complete.
+			if (video_active && blit)
+				begin(get_wsi().get_device());
+		}
 		return true;
 	}
 
@@ -179,18 +274,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 		return "pyrofling-viewer";
 	}
-
-#if 0
-	unsigned get_default_width() override
-	{
-		return decoder.get_width();
-	}
-
-	unsigned get_default_height() override
-	{
-		return decoder.get_height();
-	}
-#endif
 
 	void shift_frame()
 	{
@@ -217,10 +300,14 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	bool phase_locked_enable;
 	double deadline;
 	bool deadline_enable;
+	float target_latency;
+	const char *hwdevice;
 	unsigned long long missed_deadlines = 0;
 	std::thread poll_thread;
 	std::atomic_bool poll_thread_dead;
 	bool is_running_pyro = false;
+	bool video_active = false;
+	std::string cliptext;
 
 	struct
 	{
@@ -250,7 +337,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			push_sliding_window(stats.ping, pyro.get_current_ping_delay());
 
 		// Most aggressive method, not all that great for pacing ...
-		if (realtime && (target_realtime_delay <= 0.0 || phase_locked_enable))
+		if (realtime && (target_latency <= 0.0 || phase_locked_enable))
 		{
 			double target_done = double(Util::get_current_time_nsecs()) * 1e-9 + phase_locked_offset;
 			bool had_acquire = false;
@@ -338,7 +425,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			{
 				// Based on the video PTS.
 				// Aim for 100ms of buffering to absorb network jank.
-				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, target_realtime_delay);
+				target_pts = decoder.latch_estimated_video_playback_timestamp(elapsed_time, target_latency);
 			}
 			else
 			{
@@ -404,9 +491,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			LOGE("Failed to begin device context.\n");
 		if (!decoder.play())
 			LOGE("Failed to begin playback.\n");
-
-		Blit::Shaders<> blit_shaders(device, layout, 0);
-		blit = device.request_program(blit_shaders.quad, blit_shaders.blit);
 	}
 
 	void end()
@@ -419,7 +503,13 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 	void on_module_created(const Vulkan::DeviceShaderModuleReadyEvent &e)
 	{
-		begin(e.get_device());
+		auto &device = e.get_device();
+		Vulkan::ResourceLayout layout;
+		Blit::Shaders<> blit_shaders(device, layout, 0);
+		blit = device.request_program(blit_shaders.quad, blit_shaders.blit);
+
+		if (video_active)
+			begin(e.get_device());
 	}
 
 	void on_module_destroyed(const Vulkan::DeviceShaderModuleReadyEvent &)
@@ -427,8 +517,41 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		end();
 	}
 
+	void render_frame_waiting()
+	{
+		auto &device = get_wsi().get_device();
+		auto cmd = device.request_command_buffer();
+
+		auto rp = device.get_swapchain_render_pass(Vulkan::SwapchainRenderPass::Depth);
+		rp.clear_color[0].float32[0] = 0.01f;
+		rp.clear_color[0].float32[1] = 0.02f;
+		rp.clear_color[0].float32[2] = 0.03f;
+		cmd->begin_render_pass(rp);
+		flat_renderer.begin();
+
+		char buffer[1024];
+		if (cliptext.empty())
+			snprintf(buffer, sizeof(buffer), "Drop file in window or CTRL + V path!");
+		else
+			snprintf(buffer, sizeof(buffer), "\"%s\" - Enter to start\n", cliptext.c_str());
+
+		flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large), buffer,
+		                          {}, { cmd->get_viewport().width, cmd->get_viewport().height },
+		                          vec4(1.0f), Font::Alignment::Center);
+		flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
+		cmd->end_render_pass();
+
+		device.submit(cmd);
+	}
+
 	void render_frame(double frame_time, double elapsed_time) override
 	{
+		if (!video_active)
+		{
+			render_frame_waiting();
+			return;
+		}
+
 		auto &device = get_wsi().get_device();
 
 		if (!update(device, frame_time, elapsed_time))
@@ -686,13 +809,12 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	bool need_acquire = false;
 	Vulkan::Program *blit = nullptr;
 	bool realtime = false;
-	double target_realtime_delay = 0.0;
 	FlatRenderer flat_renderer;
 };
 
 static void print_help()
 {
-	LOGI("pyrofling-viewer [--video-buffer SECONDS] [--audio-buffer SECONDS] "
+	LOGI("pyrofling-viewer "
 	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE]\n");
 }
 
@@ -702,6 +824,7 @@ Application *application_create(int argc, char **argv)
 {
 	application_dummy();
 	Global::init(Global::MANAGER_FEATURE_EVENT_BIT | Global::MANAGER_FEATURE_AUDIO_MIXER_BIT |
+	             Global::MANAGER_FEATURE_AUDIO_BACKEND_BIT |
 	             Global::MANAGER_FEATURE_UI_MANAGER_BIT |
 	             Global::MANAGER_FEATURE_ASSET_MANAGER_BIT |
 	             Global::MANAGER_FEATURE_FILESYSTEM_BIT |
@@ -710,9 +833,7 @@ Application *application_create(int argc, char **argv)
 	auto file = Util::make_handle<ConstantMemoryFile>(viewer_fonts, viewer_fonts_size);
 	GRANITE_FILESYSTEM()->register_protocol("builtin", std::make_unique<BlobFilesystem>(std::move(file)));
 
-	float video_buffer = 0.5f;
-	float audio_buffer = 0.5f;
-	float target_delay = 0.1f;
+	float target_delay = 0.0f;
 	const char *path = nullptr;
 	double phase_locked_offset = 0.0;
 	bool phase_locked_enable = false;
@@ -722,8 +843,6 @@ Application *application_create(int argc, char **argv)
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
-	cbs.add("--video-buffer", [&](Util::CLIParser &parser) { video_buffer = float(parser.next_double()); });
-	cbs.add("--audio-buffer", [&](Util::CLIParser &parser) { audio_buffer = float(parser.next_double()); });
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
 	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
 	cbs.add("--deadline", [&](Util::CLIParser &parser) { deadline = parser.next_double(); deadline_enable = true; });
@@ -741,28 +860,10 @@ Application *application_create(int argc, char **argv)
 		print_help();
 		exit(EXIT_SUCCESS);
 	}
-	else if (!path)
-	{
-		LOGI("Path required.\n");
-		print_help();
-		return nullptr;
-	}
-
-	if (video_buffer < target_delay * 2.0f)
-	{
-		LOGW("Video buffer (%.3f) is less than twice the target delay (%.3f), expect jank!\n",
-			 video_buffer, target_delay);
-	}
-
-	if (audio_buffer < target_delay * 2.0f)
-	{
-		LOGW("Audio buffer (%.3f) is less than twice the target delay (%.3f), expect jank!\n",
-		     audio_buffer, target_delay);
-	}
 
 	try
 	{
-		auto *app = new VideoPlayerApplication(path, video_buffer, audio_buffer, target_delay,
+		auto *app = new VideoPlayerApplication(path, target_delay,
 		                                       phase_locked_offset, phase_locked_enable,
 		                                       deadline, deadline_enable, hwdevice);
 		return app;
