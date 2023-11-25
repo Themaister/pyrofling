@@ -85,6 +85,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_text_drop, Vulkan::ApplicationWindowTextDropEvent);
 		}
 
+		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_platform, on_end_platform,
+		                             Vulkan::ApplicationWSIPlatformEvent);
 #ifdef _WIN32
 		if (deadline_enable)
 			timeBeginPeriod(1);
@@ -109,6 +111,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			auto split = Util::split(optsplit.front(), ":");
 			if (split.size() != 2)
 			{
+				if (platform_alive)
+				{
+					get_platform().show_message_box("Must specify both IP and port.\n",
+					                                Vulkan::WSIPlatform::MessageType::Error);
+				}
 				LOGE("Must specify both IP and port.\n");
 				return false;
 			}
@@ -155,12 +162,19 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 			if (!pyro.connect(split[0].c_str(), split[1].c_str()))
 			{
+				if (platform_alive)
+				{
+					get_platform().show_message_box("Failed to connect to server.\n",
+					                                Vulkan::WSIPlatform::MessageType::Error);
+				}
 				LOGE("Failed to connect to server.\n");
 				return false;
 			}
 
 			if (!pyro.handshake(PYRO_KICK_STATE_VIDEO_BIT | PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_GAMEPAD_BIT))
 			{
+				if (platform_alive)
+					get_platform().show_message_box("Failed handshake.\n", Vulkan::WSIPlatform::MessageType::Error);
 				LOGE("Failed handshake.\n");
 				return false;
 			}
@@ -178,6 +192,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 		{
+			if (platform_alive)
+				get_platform().show_message_box("Failed to open video decoder.\n", Vulkan::WSIPlatform::MessageType::Error);
 			LOGE("Failed to open video decoder.\n");
 			return false;
 		}
@@ -186,8 +202,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_lifecycle, on_end_lifecycle,
 		                             Granite::ApplicationLifecycleEvent);
-		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_platform, on_end_platform,
-		                             Vulkan::ApplicationWSIPlatformEvent);
 
 		return true;
 	}
@@ -212,12 +226,14 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 	void on_begin_platform(const Vulkan::ApplicationWSIPlatformEvent &e)
 	{
+		platform_alive = true;
 		if (!video_active)
 			e.get_platform().begin_drop_event();
 	}
 
 	void on_end_platform(const Vulkan::ApplicationWSIPlatformEvent &)
 	{
+		platform_alive = false;
 	}
 
 	void on_begin_lifecycle(const Granite::ApplicationLifecycleEvent &e)
@@ -308,6 +324,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	bool is_running_pyro = false;
 	bool video_active = false;
 	std::string cliptext;
+	bool platform_alive = false;
 
 	struct
 	{
@@ -488,9 +505,20 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		FFmpegDecode::Shaders<> shaders(device, layout, 0);
 
 		if (!decoder.begin_device_context(&device, shaders))
+		{
+			if (platform_alive)
+				get_platform().show_message_box("Failed to begin device context.\n", Vulkan::WSIPlatform::MessageType::Error);
 			LOGE("Failed to begin device context.\n");
+		}
 		if (!decoder.play())
+		{
+			if (platform_alive)
+			{
+				get_platform().show_message_box("Failed to begin playback.\n",
+				                                Vulkan::WSIPlatform::MessageType::Error);
+			}
 			LOGE("Failed to begin playback.\n");
+		}
 	}
 
 	void end()
@@ -555,7 +583,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		auto &device = get_wsi().get_device();
 
 		if (!update(device, frame_time, elapsed_time))
+		{
+			if (platform_alive)
+				get_platform().show_message_box("Lost connection with server.", Vulkan::WSIPlatform::MessageType::Info);
 			request_shutdown();
+		}
 
 		auto cmd = device.request_command_buffer();
 
