@@ -38,7 +38,7 @@ PyroStreamConnection::PyroStreamConnection(
 
 bool PyroStreamConnection::requires_idr()
 {
-	return needs_key_frame.load(std::memory_order_relaxed);
+	return (kick_flags & PYRO_KICK_STATE_VIDEO_BIT) != 0 && needs_key_frame.load(std::memory_order_relaxed);
 }
 
 bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
