@@ -141,6 +141,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 							target_latency = strtof(pair[1].c_str(), nullptr);
 							LOGI("Target latency = %.3f seconds\n", target_latency);
 						}
+						else if (pair[0] == "debug")
+						{
+							pyro.set_debug_log(pair[1].c_str());
+							LOGI("Setting debug file: %s\n", pair[1].c_str());
+						}
 						else
 							LOGE("Invalid option: %s\n", pair[0].c_str());
 					}

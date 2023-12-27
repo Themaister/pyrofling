@@ -163,6 +163,28 @@ void PyroStreamClient::set_simulate_reordering(bool)
 }
 #endif
 
+void PyroStreamClient::set_debug_log(const char *path)
+{
+	debug_log.reset(fopen(path, "w"));
+}
+
+void PyroStreamClient::write_debug_header(const pyro_payload_header &header)
+{
+	if (!debug_log)
+		return;
+
+	uint32_t packet_seq = pyro_payload_get_packet_seq(header.encoded);
+	uint32_t packet_subseq = pyro_payload_get_subpacket_seq(header.encoded);
+	bool packet_key = (header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0;
+	bool stream_type = (header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
+	bool packet_begin = (header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) != 0;
+	bool packet_done = (header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) != 0;
+
+	fprintf(debug_log.get(), "SEQ %04x | SUBSEQ %04x | KEY %d | TYPE %d |%s%s\n",
+	        packet_seq, packet_subseq, int(packet_key), int(stream_type), packet_begin ? " [BEGIN]" : "",
+	        packet_done ? " [DONE] " : "");
+}
+
 bool PyroStreamClient::iterate()
 {
 	Packet payload;
@@ -255,6 +277,8 @@ bool PyroStreamClient::iterate()
 	if (payload.size < sizeof(pyro_payload_header) || payload.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
 		return false;
 	payload.size -= sizeof(pyro_payload_header);
+
+	write_debug_header(payload.header);
 
 	// Only special packet currently supported is a PING.
 	const auto special_packet = PYRO_PAYLOAD_KEY_FRAME_BIT | PYRO_PAYLOAD_STREAM_TYPE_BIT;
@@ -398,6 +422,8 @@ bool PyroStreamClient::iterate()
 				return false;
 			}
 
+			if (debug_log && delta > 1)
+				fprintf(debug_log.get(), "DROP\n");
 			progress.total_dropped_packets += delta - 1;
 		}
 

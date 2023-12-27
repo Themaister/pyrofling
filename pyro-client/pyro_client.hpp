@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <vector>
 #include <chrono>
+#include <memory>
+#include <stdio.h>
 
 namespace PyroFling
 {
@@ -27,12 +29,18 @@ public:
 	// Purely for debugging.
 	static void set_simulate_reordering(bool enable);
 	static void set_simulate_drop(bool enable);
+	void set_debug_log(const char *path);
 
 	double get_current_ping_delay() const;
 
 private:
 	PyroFling::Socket tcp, udp;
 	pyro_kick_state_flags kick_flags = 0;
+
+	struct FileDeleter { void operator()(FILE *fp) { if (fp) fclose(fp); }};
+	std::unique_ptr<FILE, FileDeleter> debug_log;
+
+	void write_debug_header(const pyro_payload_header &header);
 
 	struct ReconstructedPacket
 	{
