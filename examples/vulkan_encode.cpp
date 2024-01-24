@@ -102,7 +102,7 @@ H264VideoSession::H264VideoSession(
 	session_info.pictureFormat = fmt;
 	session_info.referencePictureFormat = fmt;
 	session_info.pStdHeaderVersion = &caps.video_caps.stdHeaderVersion;
-	//session_info.flags = VK_VIDEO_SESSION_CREATE_ALLOW_ENCODE_PARAMETER_OPTIMIZATIONS_BIT_KHR;
+	session_info.flags = VK_VIDEO_SESSION_CREATE_ALLOW_ENCODE_PARAMETER_OPTIMIZATIONS_BIT_KHR;
 
 	if (table.vkCreateVideoSessionKHR(device.get_device(), &session_info, nullptr, &session) != VK_SUCCESS)
 	{
@@ -323,13 +323,169 @@ static void reset_rate_control(CommandBuffer &cmd, const H264VideoSession &sess,
 	video_coding_info.videoSessionParameters = params.params;
 
 	VkVideoCodingControlInfoKHR ctrl_info = { VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR };
-	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR;
+	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR |
+	                  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR;
+
+	VkVideoEncodeRateControlInfoKHR rate_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_INFO_KHR };
+	rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
+	ctrl_info.pNext = &rate_info;
 
 	// Can specify rate control / quality level here. TODO.
 
 	table.vkCmdBeginVideoCodingKHR(cmd.get_command_buffer(), &video_coding_info);
 	table.vkCmdControlVideoCodingKHR(cmd.get_command_buffer(), &ctrl_info);
 	table.vkCmdEndVideoCodingKHR(cmd.get_command_buffer(), &end_coding_info);
+}
+
+static void encode_frame(FILE *file, Device &device, const Image &input, const Image &dpb,
+						 const Buffer &encode_buffer,
+						 const H264VideoSession &session, const H264VideoSessionParameters &params,
+						 VkQueryPool query_pool, uint32_t frame_index)
+{
+	auto &table = device.get_device_table();
+	auto cmd = device.request_command_buffer(CommandBuffer::Type::VideoEncode);
+
+	VkVideoBeginCodingInfoKHR video_coding_info = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
+	VkVideoEndCodingInfoKHR end_coding_info = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
+	video_coding_info.videoSession = session.session;
+	video_coding_info.videoSessionParameters = params.params;
+
+	bool is_idr = frame_index == 0;
+
+	VkVideoPictureResourceInfoKHR setup_slot_pic =
+		{ VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
+	setup_slot_pic.imageViewBinding = dpb.get_view().get_view();
+	setup_slot_pic.codedExtent = { dpb.get_width(), dpb.get_height() };
+	setup_slot_pic.baseArrayLayer = (frame_index & 1);
+
+	VkVideoPictureResourceInfoKHR setup_reference_slot_pic =
+		{ VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
+	setup_reference_slot_pic.imageViewBinding = dpb.get_view().get_view();
+	setup_reference_slot_pic.codedExtent = { dpb.get_width(), dpb.get_height() };
+	setup_reference_slot_pic.baseArrayLayer = setup_slot_pic.baseArrayLayer ^ 1;
+
+	VkVideoReferenceSlotInfoKHR init_slots[2] = {};
+
+	init_slots[0].sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+	init_slots[0].slotIndex = -1;
+	init_slots[0].pPictureResource = &setup_slot_pic;
+
+	init_slots[1].sType = VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR;
+	init_slots[1].slotIndex = 0;
+	init_slots[1].pPictureResource = &setup_reference_slot_pic;
+
+	video_coding_info.referenceSlotCount = is_idr ? 1 : 2;
+	video_coding_info.pReferenceSlots = init_slots;
+
+	table.vkCmdResetQueryPool(cmd->get_command_buffer(), query_pool, 0, 1);
+	table.vkCmdBeginVideoCodingKHR(cmd->get_command_buffer(), &video_coding_info);
+	{
+		VkVideoEncodeInfoKHR encode_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_INFO_KHR };
+		encode_info.srcPictureResource.sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
+		encode_info.srcPictureResource.baseArrayLayer = 0;
+		encode_info.srcPictureResource.codedExtent = { input.get_width(), input.get_height() };
+		encode_info.srcPictureResource.imageViewBinding = input.get_view().get_view();
+
+		VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
+		VkVideoEncodeH264NaluSliceInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
+		StdVideoEncodeH264SliceHeader slice_header = {};
+		StdVideoEncodeH264PictureInfo pic = {};
+
+		StdVideoEncodeH264ReferenceListsInfo ref_lists = {};
+		for (uint32_t i = 0; i < STD_VIDEO_H264_MAX_NUM_LIST_REF; i++)
+		{
+			ref_lists.RefPicList0[i] = is_idr ? STD_VIDEO_H264_NO_REFERENCE_PICTURE : 0;
+			ref_lists.RefPicList1[i] = STD_VIDEO_H264_NO_REFERENCE_PICTURE;
+		}
+
+		slice_header.first_mb_in_slice = 0;
+		slice_header.slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
+		slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
+
+		pic.primary_pic_type = is_idr ? STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P;
+		pic.flags.IdrPicFlag = is_idr ? 1 : 0;
+		pic.flags.is_reference = 1;
+		pic.idr_pic_id = 0; // ?
+		pic.pRefLists = &ref_lists;
+
+		slice.pStdSliceHeader = &slice_header;
+
+		h264_src_info.naluSliceEntryCount = 1;
+		h264_src_info.pNaluSliceEntries = &slice;
+		h264_src_info.pStdPictureInfo = &pic;
+		h264_src_info.pNext = encode_info.pNext;
+		encode_info.pNext = &h264_src_info;
+
+		// Setup DPB entry for reconstructed IDR frame
+		VkVideoReferenceSlotInfoKHR setup_slot =
+			{ VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
+		setup_slot.pPictureResource = &setup_slot_pic;
+		VkVideoEncodeH264DpbSlotInfoKHR h264_dpb_slot =
+			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_DPB_SLOT_INFO_KHR };
+		StdVideoEncodeH264ReferenceInfo h264_ref = {};
+		h264_dpb_slot.pStdReferenceInfo = &h264_ref;
+		h264_ref.primary_pic_type = is_idr ? STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P;
+		h264_ref.FrameNum = frame_index & ((1u << (params.sps.log2_max_frame_num_minus4 + 4)) - 1u);
+		h264_ref.PicOrderCnt = int(frame_index & ((1u << (params.sps.log2_max_pic_order_cnt_lsb_minus4 + 4)) - 1u));
+		setup_slot.pNext = &h264_dpb_slot;
+		encode_info.pSetupReferenceSlot = &setup_slot;
+
+		VkVideoReferenceSlotInfoKHR ref_slot =
+			{ VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
+		VkVideoEncodeH264DpbSlotInfoKHR h264_ref_slot =
+			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_DPB_SLOT_INFO_KHR };
+		StdVideoEncodeH264ReferenceInfo h264_prev_ref = {};
+
+		if (!is_idr)
+		{
+			ref_slot.pPictureResource = &setup_reference_slot_pic;
+			ref_slot.slotIndex = 0;
+			h264_ref_slot.pStdReferenceInfo = &h264_prev_ref;
+			ref_slot.pNext = &h264_ref_slot;
+
+			h264_prev_ref.FrameNum =
+					(frame_index - 1) &
+					((1u << (params.sps.log2_max_frame_num_minus4 + 4)) - 1u);
+			h264_prev_ref.PicOrderCnt =
+					int((frame_index - 1) &
+					    ((1u << (params.sps.log2_max_pic_order_cnt_lsb_minus4 + 4)) - 1u));
+
+			h264_prev_ref.primary_pic_type = frame_index == 1 ?
+					STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P;
+
+			encode_info.pReferenceSlots = &ref_slot;
+			encode_info.referenceSlotCount = 1;
+		}
+
+		encode_info.dstBuffer = encode_buffer.get_buffer();
+		encode_info.dstBufferOffset = 0;
+		encode_info.dstBufferRange = encode_buffer.get_create_info().size;
+
+		table.vkCmdBeginQuery(cmd->get_command_buffer(), query_pool, 0, 0);
+		table.vkCmdEncodeVideoKHR(cmd->get_command_buffer(), &encode_info);
+		table.vkCmdEndQuery(cmd->get_command_buffer(), query_pool, 0);
+	}
+	table.vkCmdEndVideoCodingKHR(cmd->get_command_buffer(), &end_coding_info);
+
+	cmd->barrier(VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR, VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR,
+	             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+	Fence fence;
+	device.submit(cmd, &fence);
+	fence->wait();
+
+	uint32_t query_data[3] = {};
+	table.vkGetQueryPoolResults(device.get_device(), query_pool, 0, 1, sizeof(query_data),
+	                            query_data, sizeof(query_data),
+	                            VK_QUERY_RESULT_WITH_STATUS_BIT_KHR);
+
+	LOGI("Offset = %u, Bytes = %u, Status = %u\n", query_data[0], query_data[1], query_data[2]);
+
+	if (file && query_data[2] == VK_QUERY_RESULT_STATUS_COMPLETE_KHR)
+	{
+		auto *payload = static_cast<const uint8_t *>(device.map_host_buffer(encode_buffer, MEMORY_ACCESS_READ_BIT));
+		fwrite(payload + query_data[0], query_data[1], 1, file);
+	}
 }
 
 int main()
@@ -374,10 +530,12 @@ int main()
 	// Can avoid with video maint1.
 	dpb_info.pnext = &profile.profile_list;
 	auto dpb_layers = dev.create_image(dpb_info);
+	dev.set_name(*dpb_layers, "dpb_layers");
 
 	dpb_info.layers = 1;
 	dpb_info.usage = VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	auto encode_input = dev.create_image(dpb_info);
+	dev.set_name(*encode_input, "encode_input");
 	///
 
 	H264VideoSession sess(dev, profile, caps, WIDTH, HEIGHT, fmt);
@@ -419,7 +577,7 @@ int main()
 			for (uint32_t x = 0; x < dpb_info.width / 2; x++)
 			{
 				uint8_t c = ((x ^ y) & 0x10) << 3;
-				chroma[y * dpb_info.width / 2 + x] = c;
+				chroma[y * dpb_info.width / 2 + x] = uint16_t(c) * 0x101;
 			}
 		}
 
@@ -427,10 +585,13 @@ int main()
 		                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 		                           dev.get_queue_info().family_indices[QUEUE_INDEX_VIDEO_ENCODE]);
 
+		Fence fence;
 		Semaphore sem;
-		dev.submit(cmd, nullptr, 1, &sem);
+		dev.submit(cmd, &fence, 1, &sem);
 		dev.add_wait_semaphore(CommandBuffer::Type::VideoEncode, std::move(sem),
 							   VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR, true);
+
+		fence->wait();
 	}
 
 	auto cmd = dev.request_command_buffer(CommandBuffer::Type::VideoEncode);
@@ -451,29 +612,13 @@ int main()
 	                           VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR,
 	                           VK_ACCESS_2_VIDEO_ENCODE_READ_BIT_KHR);
 
+	dev.submit(cmd);
+
 	BufferCreateInfo buf_info;
 	buf_info.usage = VK_BUFFER_USAGE_VIDEO_ENCODE_DST_BIT_KHR;
 	buf_info.size = 1024 * 1024;
 	buf_info.domain = BufferDomain::CachedHost;
 	auto encode_buf = dev.create_buffer(buf_info);
-
-	VkVideoBeginCodingInfoKHR video_coding_info = { VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR };
-	VkVideoEndCodingInfoKHR end_coding_info = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
-	video_coding_info.videoSession = sess.session;
-	video_coding_info.videoSessionParameters = params.params;
-
-	VkVideoPictureResourceInfoKHR setup_slot_pic =
-		{ VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR };
-	setup_slot_pic.imageViewBinding = dpb_layers->get_view().get_view();
-	setup_slot_pic.codedExtent = { dpb_info.width, dpb_info.height };
-	setup_slot_pic.baseArrayLayer = 0;
-
-	VkVideoReferenceSlotInfoKHR init_slot = { VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
-	init_slot.slotIndex = -1;
-	init_slot.pPictureResource = &setup_slot_pic;
-
-	video_coding_info.referenceSlotCount = 1;
-	video_coding_info.pReferenceSlots = &init_slot;
 
 	VkQueryPoolCreateInfo pool_info = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
 	VkQueryPoolVideoEncodeFeedbackCreateInfoKHR feedback_pool_info =
@@ -488,87 +633,17 @@ int main()
 	if (table.vkCreateQueryPool(dev.get_device(), &pool_info, nullptr, &query_pool) != VK_SUCCESS)
 		return EXIT_FAILURE;
 
-	table.vkCmdResetQueryPool(cmd->get_command_buffer(), query_pool, 0, 1);
-	table.vkCmdBeginVideoCodingKHR(cmd->get_command_buffer(), &video_coding_info);
-	{
-		VkVideoEncodeInfoKHR encode_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_INFO_KHR };
-		encode_info.srcPictureResource.sType = VK_STRUCTURE_TYPE_VIDEO_PICTURE_RESOURCE_INFO_KHR;
-		encode_info.srcPictureResource.baseArrayLayer = 0;
-		encode_info.srcPictureResource.codedExtent = { dpb_info.width, dpb_info.height };
-		encode_info.srcPictureResource.imageViewBinding = encode_input->get_view().get_view();
+	FILE *file = fopen("/tmp/test.h264", "wb");
+	if (file)
+		fwrite(params.encoded_params.data(), params.encoded_params.size(), 1, file);
 
-		VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
-		VkVideoEncodeH264NaluSliceInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
-		StdVideoEncodeH264SliceHeader slice_header = {};
-		StdVideoEncodeH264PictureInfo pic = {};
-
-		slice_header.first_mb_in_slice = 0;
-		slice_header.slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
-		slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
-
-		pic.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
-		pic.flags.IdrPicFlag = 1;
-		pic.flags.is_reference = 1;
-
-		slice.pStdSliceHeader = &slice_header;
-
-		h264_src_info.generatePrefixNalu = VK_FALSE;
-		h264_src_info.naluSliceEntryCount = 1;
-		h264_src_info.pNaluSliceEntries = &slice;
-		h264_src_info.pStdPictureInfo = &pic;
-		h264_src_info.pNext = encode_info.pNext;
-		encode_info.pNext = &h264_src_info;
-
-		// Setup DPB entry for reconstructed IDR frame
-		VkVideoReferenceSlotInfoKHR setup_slot =
-			{ VK_STRUCTURE_TYPE_VIDEO_REFERENCE_SLOT_INFO_KHR };
-
-		StdVideoEncodeH264ReferenceInfo h264_ref = {};
-		VkVideoEncodeH264DpbSlotInfoKHR h264_dpb_slot =
-			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_DPB_SLOT_INFO_KHR };
-		h264_dpb_slot.pStdReferenceInfo = &h264_ref;
-		setup_slot.pNext = &h264_dpb_slot;
-
-		h264_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
-
-		setup_slot.pPictureResource = &setup_slot_pic;
-		encode_info.pSetupReferenceSlot = &setup_slot;
-
-		encode_info.dstBuffer = encode_buf->get_buffer();
-		encode_info.dstBufferOffset = 0;
-		encode_info.dstBufferRange = 1024 * 1024;
-
-		table.vkCmdBeginQuery(cmd->get_command_buffer(), query_pool, 0, 0);
-		table.vkCmdEncodeVideoKHR(cmd->get_command_buffer(), &encode_info);
-		table.vkCmdEndQuery(cmd->get_command_buffer(), query_pool, 0);
-	}
-	table.vkCmdEndVideoCodingKHR(cmd->get_command_buffer(), &end_coding_info);
-
-	cmd->barrier(VK_PIPELINE_STAGE_2_VIDEO_ENCODE_BIT_KHR, VK_ACCESS_2_VIDEO_ENCODE_WRITE_BIT_KHR,
-				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
-
-	Fence fence;
-	dev.submit(cmd, &fence);
-	fence->wait();
-	fence.reset();
-
-	uint32_t query_data[3] = {};
-	table.vkGetQueryPoolResults(dev.get_device(), query_pool, 0, 1, sizeof(query_data),
-	                            query_data, sizeof(query_data),
-	                            VK_QUERY_RESULT_WITH_STATUS_BIT_KHR);
-
-	LOGI("Offset = %u, Bytes = %u, Status = %u\n", query_data[0], query_data[1], query_data[2]);
+	encode_frame(file, dev, *encode_input, *dpb_layers, *encode_buf, sess, params, query_pool, 0);
+	encode_frame(file, dev, *encode_input, *dpb_layers, *encode_buf, sess, params, query_pool, 1);
 
 	table.vkDestroyQueryPool(dev.get_device(), query_pool, nullptr);
 
-	FILE *file = fopen("/tmp/test.h264", "wb");
 	if (file)
-	{
-		fwrite(params.encoded_params.data(), params.encoded_params.size(), 1, file);
-		auto *payload = static_cast<const uint8_t *>(dev.map_host_buffer(*encode_buf, MEMORY_ACCESS_READ_BIT));
-		fwrite(payload + query_data[0], query_data[1], 1, file);
 		fclose(file);
-	}
 
 	return EXIT_SUCCESS;
 }
