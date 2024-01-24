@@ -8,6 +8,7 @@ struct H264Profile
 	VkVideoProfileInfoKHR profile_info = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR };
 	VkVideoEncodeH264ProfileInfoKHR h264_profile = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_KHR };
 	VkVideoProfileListInfoKHR profile_list = { VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR };
+	VkVideoEncodeUsageInfoKHR usage_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_USAGE_INFO_KHR };
 
 	H264Profile();
 };
@@ -57,6 +58,11 @@ H264Profile::H264Profile()
 
 	h264_profile.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_HIGH;
 	profile_info.pNext = &h264_profile;
+
+	usage_info.tuningMode = VK_VIDEO_ENCODE_TUNING_MODE_HIGH_QUALITY_KHR;
+	usage_info.videoContentHints = VK_VIDEO_ENCODE_CONTENT_RENDERED_BIT_KHR;
+	usage_info.videoUsageHints = VK_VIDEO_ENCODE_USAGE_RECORDING_BIT_KHR;
+	h264_profile.pNext = &usage_info;
 
 	profile_list.pProfiles = &profile_info;
 	profile_list.profileCount = 1;
@@ -312,7 +318,23 @@ static VkFormat get_h264_8bit_encode_format(const Device &device, uint32_t width
 	return fmt;
 }
 
-static void reset_rate_control(CommandBuffer &cmd, const H264VideoSession &sess, const H264VideoSessionParameters &params)
+struct H264RateControl
+{
+	VkVideoEncodeRateControlInfoKHR rate_info =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_INFO_KHR };
+	VkVideoEncodeH264RateControlInfoKHR h264_rate_control =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR };
+	VkVideoEncodeH264RateControlLayerInfoKHR h264_layer =
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR };
+	VkVideoEncodeRateControlLayerInfoKHR layer =
+			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_LAYER_INFO_KHR };
+};
+
+static void reset_rate_control(CommandBuffer &cmd,
+							   H264RateControl &rate,
+							   const EncoderCaps &caps,
+							   const H264VideoSession &sess,
+							   const H264VideoSessionParameters &params)
 {
 	auto &dev = cmd.get_device();
 	auto &table = dev.get_device_table();
@@ -326,11 +348,43 @@ static void reset_rate_control(CommandBuffer &cmd, const H264VideoSession &sess,
 	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_RESET_BIT_KHR |
 	                  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR;
 
-	VkVideoEncodeRateControlInfoKHR rate_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_INFO_KHR };
-	rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
-	ctrl_info.pNext = &rate_info;
+	rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
+	ctrl_info.pNext = &rate.rate_info;
 
-	// Can specify rate control / quality level here. TODO.
+#if 0
+	if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR)
+		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR;
+	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR)
+		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR;
+	else
+		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
+
+
+	rate.h264_rate_control.consecutiveBFrameCount = 0;
+	rate.h264_rate_control.idrPeriod = UINT32_MAX;
+	rate.h264_rate_control.gopFrameCount = UINT32_MAX;
+	rate.h264_rate_control.temporalLayerCount = 1;
+	rate.rate_info.pNext = &rate.h264_rate_control;
+	rate.rate_info.virtualBufferSizeInMs = 100;
+	rate.rate_info.initialVirtualBufferSizeInMs = 0;
+	rate.rate_info.layerCount = 1;
+	rate.rate_info.pLayers = &rate.layer;
+
+	rate.h264_layer.useMinQp = VK_TRUE;
+	rate.h264_layer.useMaxQp = VK_TRUE;
+	rate.h264_layer.minQp.qpI = 18;
+	rate.h264_layer.maxQp.qpI = 34;
+	rate.h264_layer.minQp.qpP = 22;
+	rate.h264_layer.maxQp.qpP = 38;
+	rate.h264_layer.minQp.qpB = 24;
+	rate.h264_layer.maxQp.qpB = 40;
+
+	rate.layer.frameRateNumerator = 24;
+	rate.layer.frameRateDenominator = 1;
+	rate.layer.averageBitrate = 3 * 1000 * 1000;
+	rate.layer.maxBitrate = 6 * 1000 * 1000;
+	rate.layer.pNext = &rate.h264_layer;
+#endif
 
 	table.vkCmdBeginVideoCodingKHR(cmd.get_command_buffer(), &video_coding_info);
 	table.vkCmdControlVideoCodingKHR(cmd.get_command_buffer(), &ctrl_info);
@@ -340,7 +394,8 @@ static void reset_rate_control(CommandBuffer &cmd, const H264VideoSession &sess,
 static void encode_frame(FILE *file, Device &device, const Image &input, const Image &dpb,
 						 const Buffer &encode_buffer,
 						 const H264VideoSession &session, const H264VideoSessionParameters &params,
-						 VkQueryPool query_pool, uint32_t frame_index)
+						 const H264RateControl &rate,
+						 VkQueryPool query_pool, uint32_t frame_index, uint32_t &idr_num)
 {
 	auto &table = device.get_device_table();
 	auto cmd = device.request_command_buffer(CommandBuffer::Type::VideoEncode);
@@ -356,6 +411,8 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	VkVideoEndCodingInfoKHR end_coding_info = { VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR };
 	video_coding_info.videoSession = session.session;
 	video_coding_info.videoSessionParameters = params.params;
+
+	video_coding_info.pNext = &rate.rate_info;
 
 	bool is_idr = frame_index == 0;
 
@@ -392,13 +449,17 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 
 	VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
 	VkVideoEncodeH264NaluSliceInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
+
+	// For disabled.
+	slice.constantQp = 24;
+
 	StdVideoEncodeH264SliceHeader slice_header = {};
 	StdVideoEncodeH264PictureInfo pic = {};
 
 	StdVideoEncodeH264ReferenceListsInfo ref_lists = {};
 	for (uint32_t i = 0; i < STD_VIDEO_H264_MAX_NUM_LIST_REF; i++)
 	{
-		ref_lists.RefPicList0[i] = is_idr ? STD_VIDEO_H264_NO_REFERENCE_PICTURE : ((frame_index - 1u) & 1u);
+		ref_lists.RefPicList0[i] = is_idr ? STD_VIDEO_H264_NO_REFERENCE_PICTURE : reference_slot_pic.baseArrayLayer;
 		ref_lists.RefPicList1[i] = STD_VIDEO_H264_NO_REFERENCE_PICTURE;
 	}
 
@@ -407,9 +468,11 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
 
 	pic.primary_pic_type = is_idr ? STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P;
+
 	pic.flags.IdrPicFlag = is_idr ? 1 : 0;
 	pic.flags.is_reference = 1;
-	pic.idr_pic_id = 0; // ?
+	if (is_idr)
+		pic.idr_pic_id = idr_num++;
 	pic.pRefLists = &ref_lists;
 
 	slice.pStdSliceHeader = &slice_header;
@@ -456,8 +519,10 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 				int((frame_index - 1u) &
 				    ((1u << (params.sps.log2_max_pic_order_cnt_lsb_minus4 + 4)) - 1u));
 
+		// Does this matter?
 		h264_prev_ref.primary_pic_type = frame_index == 1 ?
-		                                 STD_VIDEO_H264_PICTURE_TYPE_IDR : STD_VIDEO_H264_PICTURE_TYPE_P;
+		                                 STD_VIDEO_H264_PICTURE_TYPE_IDR :
+		                                 STD_VIDEO_H264_PICTURE_TYPE_P;
 
 		encode_info.pReferenceSlots = &prev_ref_slot;
 		encode_info.referenceSlotCount = 1;
@@ -526,6 +591,8 @@ static bool upload_file(FILE *file, Device &device, const Image &image, uint32_t
 		device.submit_discard(cmd);
 		return false;
 	}
+
+	memset(chroma, 0x80, image.get_width() * image.get_height() / 2);
 
 	cmd->image_barrier_release(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_VIDEO_ENCODE_SRC_KHR,
 	                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -605,10 +672,11 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 
 	auto &table = dev.get_device_table();
+	H264RateControl rate;
 
 	{
 		auto cmd = dev.request_command_buffer(CommandBuffer::Type::VideoEncode);
-		reset_rate_control(*cmd, sess, params);
+		reset_rate_control(*cmd, rate, caps, sess, params);
 		cmd->image_barrier(*dpb_layers, VK_IMAGE_LAYOUT_UNDEFINED,
 		                   VK_IMAGE_LAYOUT_VIDEO_ENCODE_DPB_KHR,
 		                   VK_PIPELINE_STAGE_NONE, VK_ACCESS_NONE,
@@ -643,9 +711,16 @@ int main(int argc, char **argv)
 		fwrite(params.encoded_params.data(), params.encoded_params.size(), 1, output_file);
 
 	uint32_t frame_count = 0;
+	uint32_t idr_num = 0;
+
 	while (upload_file(input_file, dev, *encode_input, WIDTH, HEIGHT))
 	{
-		encode_frame(output_file, dev, *encode_input, *dpb_layers, *encode_buf, sess, params, query_pool, frame_count++);
+		encode_frame(output_file, dev,
+					 *encode_input, *dpb_layers, *encode_buf,
+					 sess, params, rate,
+					 query_pool, frame_count, idr_num);
+
+		frame_count += 1;
 		dev.next_frame_context();
 	}
 
