@@ -303,10 +303,12 @@ static VkFormat get_h264_8bit_encode_format(const Device &device, uint32_t width
 	VkFormatProperties3 props3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
 	device.get_format_properties(fmt, &props3);
 
+#if 0
 	if ((props3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR) == 0)
 		return VK_FORMAT_UNDEFINED;
 	if ((props3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR) == 0)
 		return VK_FORMAT_UNDEFINED;
+#endif
 
 	VkImageFormatProperties2 props2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
 	device.get_image_format_properties(fmt, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
@@ -335,8 +337,7 @@ struct H264RateControl
 			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_LAYER_INFO_KHR };
 };
 
-static constexpr uint32_t IDR_PERIOD = 256;
-static constexpr uint32_t GOP_FRAMES = 64;
+static constexpr uint32_t IDR_PERIOD = 4096;
 
 static void reset_rate_control(CommandBuffer &cmd,
 							   H264RateControl &rate,
@@ -376,7 +377,7 @@ static void reset_rate_control(CommandBuffer &cmd,
 	{
 		rate.h264_rate_control.consecutiveBFrameCount = 0;
 		rate.h264_rate_control.idrPeriod = IDR_PERIOD;
-		rate.h264_rate_control.gopFrameCount = GOP_FRAMES;
+		rate.h264_rate_control.gopFrameCount = IDR_PERIOD;
 		rate.h264_rate_control.temporalLayerCount = 1;
 		rate.h264_rate_control.flags = VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
 		                               VK_VIDEO_ENCODE_H264_RATE_CONTROL_ATTEMPT_HRD_COMPLIANCE_BIT_KHR;
@@ -475,9 +476,11 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	encode_info.srcPictureResource.imageViewBinding = input.get_view().get_view();
 
 	VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
-	VkVideoEncodeH264NaluSliceInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
+	VkVideoEncodeH264NaluSliceInfoKHR slice[3] = {};
+	for (auto &s : slice)
+		s.sType = VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR;
 
-	StdVideoEncodeH264SliceHeader slice_header = {};
+	StdVideoEncodeH264SliceHeader slice_header[3] = {};
 	StdVideoEncodeH264PictureInfo pic = {};
 
 	StdVideoEncodeH264ReferenceListsInfo ref_lists = {};
@@ -487,19 +490,55 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 		ref_lists.RefPicList1[i] = STD_VIDEO_H264_NO_REFERENCE_PICTURE;
 	}
 
-	slice_header.first_mb_in_slice = 0;
-	slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
-
 	pic.flags.IdrPicFlag = is_idr ? 1 : 0;
 	pic.flags.is_reference = 1;
 	if (is_idr)
 		pic.idr_pic_id = idr_num++;
 	pic.pRefLists = &ref_lists;
 
-	slice.pStdSliceHeader = &slice_header;
+	constexpr unsigned H264MacroBlockSize = 16;
+	unsigned num_mb_x = input.get_width() / H264MacroBlockSize;
+	unsigned num_mb_y = input.get_height() / H264MacroBlockSize;
+	unsigned mb_y = delta_frame % num_mb_y;
 
-	h264_src_info.naluSliceEntryCount = 1;
-	h264_src_info.pNaluSliceEntries = &slice;
+	for (unsigned i = 0; i < 3; i++)
+	{
+		slice[i].pStdSliceHeader = &slice_header[i];
+		slice_header[i].cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
+		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+			slice[i].constantQp = 28;
+	}
+
+	if (is_idr)
+	{
+		h264_src_info.naluSliceEntryCount = 1;
+		slice_header[0].slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
+	}
+	else if (mb_y == 0)
+	{
+		h264_src_info.naluSliceEntryCount = 2;
+		slice_header[0].slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
+		slice_header[1].slice_type = STD_VIDEO_H264_SLICE_TYPE_P;
+		slice_header[1].first_mb_in_slice = num_mb_x;
+	}
+	else if (mb_y == num_mb_y - 1)
+	{
+		h264_src_info.naluSliceEntryCount = 2;
+		slice_header[0].slice_type = STD_VIDEO_H264_SLICE_TYPE_P;
+		slice_header[1].slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
+		slice_header[1].first_mb_in_slice = mb_y * num_mb_x;
+	}
+	else
+	{
+		h264_src_info.naluSliceEntryCount = 3;
+		slice_header[0].slice_type = STD_VIDEO_H264_SLICE_TYPE_P;
+		slice_header[1].slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
+		slice_header[2].slice_type = STD_VIDEO_H264_SLICE_TYPE_P;
+		slice_header[1].first_mb_in_slice = mb_y * num_mb_x;
+		slice_header[2].first_mb_in_slice = (mb_y + 1) * num_mb_x;
+	}
+
+	h264_src_info.pNaluSliceEntries = slice;
 	h264_src_info.pStdPictureInfo = &pic;
 	h264_src_info.pNext = encode_info.pNext;
 	encode_info.pNext = &h264_src_info;
@@ -516,26 +555,13 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	if (is_idr)
 	{
 		h264_reconstructed_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_IDR;
-		slice_header.slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
 		pic.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_IDR;
-		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
-			slice.constantQp = 18;
-	}
-	else if (delta_frame % GOP_FRAMES == 0)
-	{
-		h264_reconstructed_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
-		slice_header.slice_type = STD_VIDEO_H264_SLICE_TYPE_I;
-		pic.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
-		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
-			slice.constantQp = 22;
 	}
 	else
 	{
-		h264_reconstructed_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
-		slice_header.slice_type = STD_VIDEO_H264_SLICE_TYPE_P;
-		pic.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
-		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
-			slice.constantQp = 24;
+		// There are always some I slices.
+		h264_reconstructed_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
+		pic.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
 	}
 
 	h264_reconstructed_ref.FrameNum = delta_frame & ((1u << (params.sps.log2_max_frame_num_minus4 + 4)) - 1u);
@@ -567,10 +593,8 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 		// Does this matter?
 		if (prev_delta_frame == 0)
 			h264_prev_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_IDR;
-		else if (prev_delta_frame % GOP_FRAMES == 0)
-			h264_prev_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
 		else
-			h264_prev_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
+			h264_prev_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_I;
 
 		encode_info.pReferenceSlots = &prev_ref_slot;
 		encode_info.referenceSlotCount = 1;
