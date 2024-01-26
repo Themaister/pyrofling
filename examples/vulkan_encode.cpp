@@ -303,10 +303,12 @@ static VkFormat get_h264_8bit_encode_format(const Device &device, uint32_t width
 	VkFormatProperties3 props3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
 	device.get_format_properties(fmt, &props3);
 
+#if 0
 	if ((props3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR) == 0)
 		return VK_FORMAT_UNDEFINED;
 	if ((props3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_VIDEO_ENCODE_DPB_BIT_KHR) == 0)
 		return VK_FORMAT_UNDEFINED;
+#endif
 
 	VkImageFormatProperties2 props2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
 	device.get_image_format_properties(fmt, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
@@ -362,12 +364,12 @@ static void reset_rate_control(CommandBuffer &cmd,
 	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR;
 	ctrl_info.pNext = &rate.rate_info;
 
-	if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
-		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
-	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR)
+	if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR)
 		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR;
 	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR)
 		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR;
+	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
 	else
 		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
 
@@ -379,7 +381,8 @@ static void reset_rate_control(CommandBuffer &cmd,
 		rate.h264_rate_control.gopFrameCount = GOP_FRAMES;
 		rate.h264_rate_control.temporalLayerCount = 1;
 		rate.h264_rate_control.flags = VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
-		                               VK_VIDEO_ENCODE_H264_RATE_CONTROL_ATTEMPT_HRD_COMPLIANCE_BIT_KHR;
+		                               VK_VIDEO_ENCODE_H264_RATE_CONTROL_ATTEMPT_HRD_COMPLIANCE_BIT_KHR |
+									   VK_VIDEO_ENCODE_H264_RATE_CONTROL_REFERENCE_PATTERN_FLAT_BIT_KHR;
 
 		rate.rate_info.pNext = &rate.h264_rate_control;
 		rate.rate_info.virtualBufferSizeInMs = 100;
@@ -389,16 +392,20 @@ static void reset_rate_control(CommandBuffer &cmd,
 
 		rate.h264_layer.useMinQp = VK_TRUE;
 		rate.h264_layer.useMaxQp = VK_TRUE;
+		rate.h264_layer.useMaxFrameSize = VK_TRUE;
 		rate.h264_layer.minQp.qpI = 18;
 		rate.h264_layer.maxQp.qpI = 34;
 		rate.h264_layer.minQp.qpP = 22;
 		rate.h264_layer.maxQp.qpP = 38;
 		rate.h264_layer.minQp.qpB = 24;
 		rate.h264_layer.maxQp.qpB = 40;
+		rate.h264_layer.maxFrameSize.frameBSize = 1000000;
+		rate.h264_layer.maxFrameSize.frameISize = 1000000;
+		rate.h264_layer.maxFrameSize.framePSize = 1000000;
 
 		rate.layer.frameRateNumerator = 24;
 		rate.layer.frameRateDenominator = 1;
-		rate.layer.averageBitrate = 20 * 1000 * 1000;
+		rate.layer.averageBitrate = 10 * 1000 * 1000;
 		rate.layer.maxBitrate = 20 * 1000 * 1000;
 		rate.layer.pNext = &rate.h264_layer;
 	}
@@ -477,10 +484,12 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	VkVideoEncodeH264PictureInfoKHR h264_src_info = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PICTURE_INFO_KHR };
 	VkVideoEncodeH264NaluSliceInfoKHR slice = { VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_NALU_SLICE_INFO_KHR };
 
+	StdVideoEncodeH264WeightTable weights = {};
 	StdVideoEncodeH264SliceHeader slice_header = {};
 	StdVideoEncodeH264PictureInfo pic = {};
 
 	StdVideoEncodeH264ReferenceListsInfo ref_lists = {};
+	ref_lists.num_ref_idx_l0_active_minus1 = 0;
 	for (uint32_t i = 0; i < STD_VIDEO_H264_MAX_NUM_LIST_REF; i++)
 	{
 		ref_lists.RefPicList0[i] = i || is_idr ? STD_VIDEO_H264_NO_REFERENCE_PICTURE : ((frame_index - 1) & 1);
@@ -489,6 +498,8 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 
 	slice_header.first_mb_in_slice = 0;
 	slice_header.cabac_init_idc = STD_VIDEO_H264_CABAC_INIT_IDC_0;
+	slice_header.disable_deblocking_filter_idc = STD_VIDEO_H264_DISABLE_DEBLOCKING_FILTER_IDC_DISABLED;
+	slice_header.pWeightTable = &weights;
 
 	pic.flags.IdrPicFlag = is_idr ? 1 : 0;
 	pic.flags.is_reference = 1;
@@ -533,6 +544,7 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	{
 		h264_reconstructed_ref.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
 		slice_header.slice_type = STD_VIDEO_H264_SLICE_TYPE_P;
+		slice_header.flags.num_ref_idx_active_override_flag = 1;
 		pic.primary_pic_type = STD_VIDEO_H264_PICTURE_TYPE_P;
 		if (rate.rate_info.rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
 			slice.constantQp = 24;
@@ -609,7 +621,7 @@ static void encode_frame(FILE *file, Device &device, const Image &input, const I
 	}
 }
 
-static bool upload_file(FILE *file, Device &device, const Image &image, uint32_t width, uint32_t height)
+static bool upload_file(Device &device, const Image &image, uint32_t width, uint32_t height)
 {
 	auto cmd = device.request_command_buffer(CommandBuffer::Type::AsyncTransfer);
 
@@ -626,19 +638,13 @@ static bool upload_file(FILE *file, Device &device, const Image &image, uint32_t
 			cmd->update_image(image, {}, { width / 2, height / 2, 1 },
 			                  0, 0, { VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 }));
 
-	// TODO: Fill in padding region.
+	for (uint32_t y = 0; y < height; y++)
+		for (uint32_t x = 0; x < width; x++)
+			luma[y * width + x] = 0x50;
 
-	if (fread(luma, width * height, 1, file) == 0)
-	{
-		device.submit_discard(cmd);
-		return false;
-	}
-
-	if (fread(chroma, width * height / 2, 1, file) == 0)
-	{
-		device.submit_discard(cmd);
-		return false;
-	}
+	for (uint32_t y = 0; y < height / 2; y++)
+		for (uint32_t x = 0; x < width / 2; x++)
+			chroma[y * width / 2 + x] = (y ^ x) & 0x10 ? 0x40 : 0xb0;
 
 	cmd->image_barrier_release(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_VIDEO_ENCODE_SRC_KHR,
 	                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -657,13 +663,6 @@ static bool upload_file(FILE *file, Device &device, const Image &image, uint32_t
 
 int main(int argc, char **argv)
 {
-	if (argc != 2)
-		return EXIT_FAILURE;
-
-	FILE *input_file = fopen(argv[1], "rb");
-	if (!input_file)
-		return EXIT_FAILURE;
-
 	if (!Vulkan::Context::init_loader(nullptr))
 		return EXIT_FAILURE;
 
@@ -679,8 +678,8 @@ int main(int argc, char **argv)
 	if (!dev.get_device_features().supports_video_encode_h264)
 		return EXIT_FAILURE;
 
-	constexpr uint32_t WIDTH = 1280;
-	constexpr uint32_t HEIGHT = 720;
+	constexpr uint32_t WIDTH = 640;
+	constexpr uint32_t HEIGHT = 640;
 	constexpr uint32_t LAYERS = 1;
 
 	VkFormat fmt = get_h264_8bit_encode_format(dev, WIDTH, HEIGHT, LAYERS);
@@ -768,7 +767,7 @@ int main(int argc, char **argv)
 	uint32_t frame_count = 0;
 	uint32_t idr_num = 0;
 
-	while (upload_file(input_file, dev, *encode_input, WIDTH, HEIGHT))
+	if (upload_file(dev, *encode_input, WIDTH, HEIGHT))
 	{
 		encode_frame(output_file, dev,
 					 *encode_input, dpb_layers, *encode_buf,
@@ -783,8 +782,6 @@ int main(int argc, char **argv)
 
 	if (output_file)
 		fclose(output_file);
-	if (input_file)
-		fclose(input_file);
 
 	return EXIT_SUCCESS;
 }
