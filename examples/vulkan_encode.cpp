@@ -759,7 +759,7 @@ int main(int argc, char **argv)
 	if (table.vkCreateQueryPool(dev.get_device(), &pool_info, nullptr, &query_pool) != VK_SUCCESS)
 		return EXIT_FAILURE;
 
-	FILE *output_file = fopen("/tmp/test.h264", "wb");
+	FILE *output_file = fopen("test.h264", "wb");
 	if (output_file)
 		fwrite(params.encoded_params.data(), params.encoded_params.size(), 1, output_file);
 
