@@ -362,12 +362,12 @@ static void reset_rate_control(CommandBuffer &cmd,
 	ctrl_info.flags = VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR;
 	ctrl_info.pNext = &rate.rate_info;
 
-	if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
-		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
-	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR)
+	if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR)
 		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_VBR_BIT_KHR;
 	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR)
 		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR;
+	else if (caps.encode_caps.rateControlModes & VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR)
+		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
 	else
 		rate.rate_info.rateControlMode = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR;
 
@@ -378,12 +378,10 @@ static void reset_rate_control(CommandBuffer &cmd,
 		rate.h264_rate_control.idrPeriod = IDR_PERIOD;
 		rate.h264_rate_control.gopFrameCount = GOP_FRAMES;
 		rate.h264_rate_control.temporalLayerCount = 1;
-		rate.h264_rate_control.flags = VK_VIDEO_ENCODE_H264_RATE_CONTROL_REGULAR_GOP_BIT_KHR |
-		                               VK_VIDEO_ENCODE_H264_RATE_CONTROL_ATTEMPT_HRD_COMPLIANCE_BIT_KHR;
 
 		rate.rate_info.pNext = &rate.h264_rate_control;
-		rate.rate_info.virtualBufferSizeInMs = 100;
-		rate.rate_info.initialVirtualBufferSizeInMs = 0;
+		rate.rate_info.virtualBufferSizeInMs = 1000;
+		rate.rate_info.initialVirtualBufferSizeInMs = 1000;
 		rate.rate_info.layerCount = 1;
 		rate.rate_info.pLayers = &rate.layer;
 
