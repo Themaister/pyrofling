@@ -1,6 +1,7 @@
 #pragma once
 #include "pyro_protocol.h"
 #include "simple_socket.hpp"
+#include "lt_decode.hpp"
 #include <stddef.h>
 #include <vector>
 #include <chrono>
@@ -9,6 +10,35 @@
 
 namespace PyroFling
 {
+class ReconstructedPacket
+{
+public:
+	void prepare_decode(const pyro_payload_header &header);
+	void add_payload_data(const void *data, size_t size);
+	void add_fec_data(uint32_t subseq, const void *data, size_t size);
+
+	void reset();
+	bool is_complete() const;
+	bool is_reset() const;
+	bool is_fec_recovered() const;
+	size_t get_packet_size() const;
+	const void *get_packet_data() const;
+	const pyro_payload_header &get_payload_header() const;
+
+	uint32_t packet_seq = 0;
+
+private:
+	std::vector<uint8_t> buffer;
+	std::vector<uint8_t> fec_buffer;
+	HybridLT::Decoder decoder;
+	bool is_done = false;
+	bool is_error = false;
+	bool fec_recovered = false;
+	int subpacket_seq_accum = 0;
+	uint32_t last_subpacket_raw_seq = 0;
+	pyro_payload_header current_header = {};
+};
+
 class PyroStreamClient
 {
 public:
@@ -42,21 +72,6 @@ private:
 
 	void write_debug_header(const pyro_payload_header &header);
 
-	struct ReconstructedPacket
-	{
-		std::vector<uint8_t> buffer;
-		std::vector<bool> subseq_flags;
-		uint32_t num_done_subseqs = 0;
-		bool has_done_bit = false;
-		uint32_t packet_seq = 0;
-		int subpacket_seq_accum = 0;
-		uint32_t last_subpacket_raw_seq = 0;
-		pyro_payload_header payload = {};
-
-		void reset();
-		bool is_complete() const;
-	};
-
 	uint32_t last_completed_video_seq = UINT32_MAX;
 	uint32_t last_completed_audio_seq = UINT32_MAX;
 	pyro_progress_report progress = {};
@@ -67,7 +82,6 @@ private:
 	pyro_codec_parameters codec = {};
 
 	std::chrono::time_point<std::chrono::steady_clock> last_progress_time;
-	bool has_observed_keyframe = false;
 	uint16_t gamepad_seq = 0;
 	uint16_t ping_seq = 0;
 	uint64_t ping_times[256] = {};

@@ -2,6 +2,7 @@
 #include "pyro_protocol.h"
 #include "listener.hpp"
 #include "intrusive.hpp"
+#include "lt_encode.hpp"
 #include <atomic>
 #include <mutex>
 
@@ -45,6 +46,7 @@ private:
 	pyro_progress_report progress = {};
 	std::string remote_addr, remote_port;
 	std::atomic<bool> needs_key_frame;
+	HybridLT::Encoder encoder;
 
 	uint64_t cookie;
 	uint32_t packet_seq_video = 0;

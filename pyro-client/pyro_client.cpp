@@ -5,6 +5,118 @@
 
 namespace PyroFling
 {
+void ReconstructedPacket::reset()
+{
+	buffer.clear();
+	last_subpacket_raw_seq = 0;
+	subpacket_seq_accum = 0;
+	packet_seq = 0;
+}
+
+bool ReconstructedPacket::is_fec_recovered() const
+{
+	return fec_recovered;
+}
+
+void ReconstructedPacket::prepare_decode(const pyro_payload_header &header)
+{
+	// Copy payload data into correct offset.
+	uint32_t subpacket_seq = pyro_payload_get_subpacket_seq(header.encoded);
+
+	if (buffer.empty())
+	{
+		current_header = header;
+		is_done = false;
+
+		// Set a reasonable upper bound.
+		size_t buffer_size = (header.payload_size + PYRO_MAX_PAYLOAD_SIZE - 1) & ~(PYRO_MAX_PAYLOAD_SIZE - 1);
+		buffer_size = std::min<size_t>(buffer_size, 128 * 1024 * PYRO_MAX_PAYLOAD_SIZE);
+		buffer.resize(buffer_size);
+
+		// Bound by 16-bit FEC count.
+		fec_buffer.resize(header.num_fec_blocks * PYRO_MAX_PAYLOAD_SIZE);
+
+		decoder.set_block_size(PYRO_MAX_PAYLOAD_SIZE);
+		decoder.begin_decode(header.pts_lo, buffer.data(), buffer.size(), header.num_fec_blocks, header.num_xor_blocks);
+
+		subpacket_seq_accum = 0;
+		last_subpacket_raw_seq = 0;
+		fec_recovered = false;
+	}
+
+	if ((header.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) == 0)
+	{
+		subpacket_seq_accum += pyro_payload_get_subpacket_seq_delta(subpacket_seq, last_subpacket_raw_seq);
+		last_subpacket_raw_seq = subpacket_seq;
+
+		// Error: we received bogus out-of-order sequences.
+		// Check: subsequence 0 must have a BEGIN flag.
+		// Check: subsequence != 0 must not have a BEGIN flag.
+		if (subpacket_seq_accum < 0 ||
+		    (subpacket_seq_accum == 0 && (header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) == 0) ||
+		    (subpacket_seq_accum != 0 && (header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) != 0))
+		{
+			is_error = true;
+		}
+	}
+}
+
+bool ReconstructedPacket::is_reset() const
+{
+	return buffer.empty();
+}
+
+bool ReconstructedPacket::is_complete() const
+{
+	return is_done && !is_error;
+}
+
+const pyro_payload_header &ReconstructedPacket::get_payload_header() const
+{
+	return current_header;
+}
+
+const void *ReconstructedPacket::get_packet_data() const
+{
+	return buffer.data();
+}
+
+size_t ReconstructedPacket::get_packet_size() const
+{
+	return current_header.payload_size;
+}
+
+void ReconstructedPacket::add_payload_data(const void *data, size_t size)
+{
+	if (is_done || is_error)
+		return;
+
+	size_t offset = subpacket_seq_accum * PYRO_MAX_PAYLOAD_SIZE;
+	if (offset < buffer.size())
+	{
+		memcpy(buffer.data() + offset, data, size);
+		if (size != PYRO_MAX_PAYLOAD_SIZE)
+			memset(buffer.data() + offset + size, 0, PYRO_MAX_PAYLOAD_SIZE - size);
+
+		is_done = decoder.push_raw_block(subpacket_seq_accum);
+	}
+}
+
+void ReconstructedPacket::add_fec_data(uint32_t subseq, const void *data, size_t size)
+{
+	if (is_done || is_error)
+		return;
+
+	size_t offset = subseq * PYRO_MAX_PAYLOAD_SIZE;
+	if (offset < fec_buffer.size())
+	{
+		memcpy(fec_buffer.data() + offset, data, size);
+		is_done = decoder.push_fec_block(subseq, fec_buffer.data() + offset);
+		if (is_done)
+			fec_recovered = true;
+	}
+}
+
 bool PyroStreamClient::connect(const char *host, const char *port)
 {
 	if (!tcp.connect(PyroFling::Socket::Proto::TCP, host, port))
@@ -55,12 +167,12 @@ bool PyroStreamClient::handshake(pyro_kick_state_flags flags)
 
 const void *PyroStreamClient::get_packet_data() const
 {
-	return current ? current->buffer.data() : nullptr;
+	return current ? current->get_packet_data() : nullptr;
 }
 
 size_t PyroStreamClient::get_packet_size() const
 {
-	return current ? current->buffer.size() : 0;
+	return current ? current->get_packet_size() : 0;
 }
 
 const pyro_codec_parameters &PyroStreamClient::get_codec_parameters() const
@@ -68,25 +180,9 @@ const pyro_codec_parameters &PyroStreamClient::get_codec_parameters() const
 	return codec;
 }
 
-void PyroStreamClient::ReconstructedPacket::reset()
-{
-	buffer.clear();
-	subseq_flags.clear();
-	last_subpacket_raw_seq = 0;
-	subpacket_seq_accum = 0;
-	num_done_subseqs = 0;
-	has_done_bit = false;
-	packet_seq = 0;
-}
-
-bool PyroStreamClient::ReconstructedPacket::is_complete() const
-{
-	return num_done_subseqs == subseq_flags.size() && has_done_bit;
-}
-
 const pyro_payload_header &PyroStreamClient::get_payload_header() const
 {
-	return current->payload;
+	return current->get_payload_header();
 }
 
 bool PyroStreamClient::send_target_phase_offset(int offset_us)
@@ -178,11 +274,11 @@ void PyroStreamClient::write_debug_header(const pyro_payload_header &header)
 	bool packet_key = (header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0;
 	bool stream_type = (header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
 	bool packet_begin = (header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) != 0;
-	bool packet_done = (header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) != 0;
+	bool packet_fec = (header.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0;
 
 	fprintf(debug_log.get(), "SEQ %04x | SUBSEQ %04x | KEY %d | TYPE %d |%s%s\n",
 	        packet_seq, packet_subseq, int(packet_key), int(stream_type), packet_begin ? " [BEGIN]" : "",
-	        packet_done ? " [DONE] " : "");
+	        packet_fec ? " [FEC] " : "");
 }
 
 bool PyroStreamClient::iterate()
@@ -204,8 +300,8 @@ bool PyroStreamClient::iterate()
 			       pyro_payload_get_subpacket_seq(sim.header.encoded));
 			if (sim.header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT)
 				printf(" [BEGIN]");
-			if (sim.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT)
-				printf(" [DONE]");
+			if (sim.header.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT)
+				printf(" [FEC]");
 			if (sim.header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT)
 				printf(" [KEY]");
 			printf("\n");
@@ -261,8 +357,8 @@ bool PyroStreamClient::iterate()
 			       pyro_payload_get_subpacket_seq(payload.header.encoded));
 			if (payload.header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT)
 				printf(" [BEGIN]");
-			if (payload.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT)
-				printf(" [DONE]");
+			if (payload.header.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT)
+				printf(" [FEC]");
 			if (payload.header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT)
 				printf(" [KEY]");
 			printf("\n");
@@ -289,15 +385,17 @@ bool PyroStreamClient::iterate()
 		return true;
 	}
 
-	// Partial packets must be full packets (for simplicity to avoid stitching payloads together).
-	if ((payload.header.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) == 0 && payload.size != PYRO_MAX_PAYLOAD_SIZE)
-		return false;
-
 	bool is_audio = (payload.header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
 
 	auto *stream_base = is_audio ? &audio[0] : &video[0];
 	auto &last_completed_seq = is_audio ? last_completed_audio_seq : last_completed_video_seq;
 	auto &h = payload.header;
+
+	if ((h.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0 && is_audio)
+	{
+		// Invalid.
+		return true;
+	}
 
 	uint32_t packet_seq = pyro_payload_get_packet_seq(h.encoded);
 
@@ -313,29 +411,58 @@ bool PyroStreamClient::iterate()
 	if (last_completed_seq != UINT32_MAX && pyro_payload_get_packet_seq_delta(packet_seq, last_completed_seq) <= 0)
 		return true;
 
+	// Only accept FEC packets if we have received real data packets for a
+	// pending stream that needs FEC to actually recover.
+	// Otherwise, we risk pushing packets against a sequence we have actually completed and throw away data we
+	// don't want to throw away.
+	if ((h.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0)
+	{
+		bool wants_fec = false;
+		for (auto &s : video)
+		{
+			if (packet_seq == s.packet_seq && !s.is_reset() && !s.is_complete())
+			{
+				wants_fec = true;
+				break;
+			}
+		}
+
+		if (!wants_fec)
+		{
+			// If we don't risk killing any existing decode streams, just go ahead.
+			wants_fec = true;
+			for (auto &s : video)
+				wants_fec = wants_fec && s.is_reset();
+		}
+
+		if (!wants_fec)
+			return true;
+	}
+
 	ReconstructedPacket *stream;
-	if (packet_seq == stream_base[0].packet_seq || stream_base[0].buffer.empty())
+	if (packet_seq == stream_base[0].packet_seq || stream_base[0].is_reset())
 	{
 		// Trivial case.
 		stream = &stream_base[0];
 		stream->packet_seq = packet_seq;
 	}
-	else if (packet_seq == stream_base[1].packet_seq && !stream_base[1].buffer.empty())
+	else if (packet_seq == stream_base[1].packet_seq && !stream_base[1].is_reset())
 	{
 		// Trivially keep appending to existing packet.
 		stream = &stream_base[1];
 		stream->packet_seq = packet_seq;
 	}
 	else if (pyro_payload_get_packet_seq_delta(packet_seq, stream_base[0].packet_seq) == 1 &&
-	         stream_base[1].buffer.empty())
+	         stream_base[1].is_reset())
 	{
 		// We're working on stream[0], but we started to receive packets for seq + 1.
 		// This is fine, just start working on stream[1].
 		stream = &stream_base[1];
 		stream->packet_seq = packet_seq;
+		stream->reset();
 	}
 	else if (pyro_payload_get_packet_seq_delta(packet_seq, stream_base[0].packet_seq) == -1 &&
-	         stream_base[1].buffer.empty())
+	         stream_base[1].is_reset())
 	{
 		// We're working on stream[0], but we got packets for stream[-1].
 		// Shift the window so that they become stream 1 and 0 respectively.
@@ -357,47 +484,20 @@ bool PyroStreamClient::iterate()
 		stream->packet_seq = packet_seq;
 	}
 
-	// Copy payload data into correct offset.
-	uint32_t subpacket_seq = pyro_payload_get_subpacket_seq(h.encoded);
-	stream->subpacket_seq_accum += pyro_payload_get_subpacket_seq_delta(subpacket_seq, stream->last_subpacket_raw_seq);
-	stream->last_subpacket_raw_seq = subpacket_seq;
+	stream->prepare_decode(h);
 
-	// Error case, we received bogus out-of-order sequences.
-	if (stream->subpacket_seq_accum < 0)
-		return true;
-
-	// Locally, allow maximum packet size: 128 MiB.
-	if (stream->subpacket_seq_accum > 128 * 1024)
-		return true;
-
-	// Error, subsequence 0 must be BEGIN flag.
-	if (stream->subpacket_seq_accum == 0 && (h.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) == 0)
-		return true;
-
-	// Error, subsequence != 0 must not be BEGIN flag.
-	if (stream->subpacket_seq_accum != 0 && (h.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) != 0)
-		return true;
-
-	if ((h.encoded & PYRO_PAYLOAD_PACKET_DONE_BIT) != 0)
+	if ((h.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0)
 	{
-		stream->buffer.resize(stream->subpacket_seq_accum * PYRO_MAX_PAYLOAD_SIZE + payload.size);
-		stream->has_done_bit = true;
-		stream->subseq_flags.resize(stream->subpacket_seq_accum + 1);
+		// FEC blocks must be MAX_PAYLOAD_SIZE.
+		if (payload.size != PYRO_MAX_PAYLOAD_SIZE)
+			return false;
+
+		uint32_t subpacket_seq = pyro_payload_get_subpacket_seq(h.encoded);
+		stream->add_fec_data(subpacket_seq, payload.buffer, payload.size);
 	}
 	else
 	{
-		stream->buffer.resize(std::max<size_t>(
-				stream->buffer.size(), (stream->subpacket_seq_accum + 1) * PYRO_MAX_PAYLOAD_SIZE));
-		stream->subseq_flags.resize(std::max<size_t>(
-				stream->subseq_flags.size(), (stream->subpacket_seq_accum + 1)));
-	}
-
-	if (!stream->subseq_flags[stream->subpacket_seq_accum])
-	{
-		stream->subseq_flags[stream->subpacket_seq_accum] = true;
-		stream->num_done_subseqs++;
-		memcpy(stream->buffer.data() + stream->subpacket_seq_accum * PYRO_MAX_PAYLOAD_SIZE,
-		       payload.buffer, payload.size);
+		stream->add_payload_data(payload.buffer, payload.size);
 	}
 
 	if (stream->is_complete())
@@ -428,8 +528,13 @@ bool PyroStreamClient::iterate()
 		}
 
 		last_completed_seq = stream->packet_seq;
-		stream->payload = payload.header;
 		progress.total_received_packets++;
+
+		if (stream->is_fec_recovered())
+		{
+			fprintf(debug_log.get(), "RECOVERED SEQ %u\n", stream->packet_seq);
+			progress.total_recovered_packets++;
+		}
 
 #ifdef PYRO_DEBUG_REORDER
 		if ((h.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) == 0)

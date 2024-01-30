@@ -46,6 +46,7 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 	// Timeout, cancel everything.
 	if (id)
 	{
+		printf("TIMEOUT for %s @ %s\n", remote_addr.c_str(), remote_port.c_str());
 		dispatcher.cancel_connection(this, 0);
 		return false;
 	}
@@ -119,7 +120,7 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 
 			// Start timeout.
 			struct itimerspec tv = {};
-			tv.it_value.tv_sec = 5;
+			tv.it_value.tv_sec = 15;
 			timerfd_settime(timer_fd.get_native_handle(), 0, &tv, nullptr);
 
 			break;
@@ -129,17 +130,18 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 		{
 			// Re-start timeout.
 			struct itimerspec tv = {};
-			tv.it_value.tv_sec = 5;
+			tv.it_value.tv_sec = 15;
 			timerfd_settime(timer_fd.get_native_handle(), 0, &tv, nullptr);
 			memcpy(&progress, tcp.split.payload, sizeof(progress));
 
 			if ((kick_flags & (PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_VIDEO_BIT)) != 0)
 			{
-				printf("PROGRESS for %s @ %s: %llu complete, %llu dropped, %llu key frames.\n",
+				printf("PROGRESS for %s @ %s: %llu complete, %llu dropped, %llu key frames, %llu FEC recovered.\n",
 				       remote_addr.c_str(), remote_port.c_str(),
 				       static_cast<unsigned long long>(progress.total_received_packets),
 				       static_cast<unsigned long long>(progress.total_dropped_packets),
-				       static_cast<unsigned long long>(progress.total_received_key_frames));
+				       static_cast<unsigned long long>(progress.total_received_key_frames),
+					   static_cast<unsigned long long>(progress.total_recovered_packets));
 			}
 
 			needs_key_frame.store(progress.total_received_key_frames == 0, std::memory_order_relaxed);
@@ -184,6 +186,18 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 
 	auto &seq = is_audio ? packet_seq_audio : packet_seq_video;
 
+	// ~25% FEC overhead. TODO: Make configurable.
+	uint32_t num_data_blocks = (size + PYRO_MAX_PAYLOAD_SIZE - 1) / PYRO_MAX_PAYLOAD_SIZE;
+	uint32_t num_fec_blocks = num_data_blocks / 4 + 1;
+	uint32_t num_xor_blocks = std::min<uint32_t>(num_data_blocks / 2, 64u);
+
+	// For small packets, just send a single full-XOR FEC block which can recover exactly one error.
+	if (num_data_blocks < 8)
+	{
+		num_xor_blocks = num_data_blocks;
+		num_fec_blocks = 1;
+	}
+
 	pyro_payload_header header = {};
 	header.pts_lo = uint32_t(pts);
 	header.pts_hi = uint32_t(pts >> 32);
@@ -191,27 +205,60 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 	header.encoded |= is_audio ? PYRO_PAYLOAD_STREAM_TYPE_BIT : 0;
 	header.encoded |= is_key_frame ? PYRO_PAYLOAD_KEY_FRAME_BIT : 0;
 	header.encoded |= seq << PYRO_PAYLOAD_PACKET_SEQ_OFFSET;
+	header.payload_size = size;
+
+	if (!is_audio)
+	{
+		header.num_xor_blocks = num_xor_blocks;
+		header.num_fec_blocks = num_fec_blocks;
+	}
+
 	uint32_t subseq = 0;
 
 	auto *data = static_cast<const uint8_t *>(data_);
-	for (size_t i = 0; i < size; i += PYRO_MAX_PAYLOAD_SIZE, data += PYRO_MAX_PAYLOAD_SIZE)
+	for (size_t i = 0; i < size; i += PYRO_MAX_PAYLOAD_SIZE)
 	{
-		header.encoded &= ~(PYRO_PAYLOAD_PACKET_BEGIN_BIT | PYRO_PAYLOAD_PACKET_DONE_BIT);
+		header.encoded &= ~PYRO_PAYLOAD_PACKET_BEGIN_BIT;
 		if (i == 0)
 			header.encoded |= PYRO_PAYLOAD_PACKET_BEGIN_BIT;
-		if (i + PYRO_MAX_PAYLOAD_SIZE >= size)
-			header.encoded |= PYRO_PAYLOAD_PACKET_DONE_BIT;
 
 		header.encoded &= ~(PYRO_PAYLOAD_SUBPACKET_SEQ_MASK << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET);
 		header.encoded |= subseq << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;
 
 		if (dispatcher.write_udp_datagram(udp_remote, &header, sizeof(header),
-		                                  data, std::min<size_t>(PYRO_MAX_PAYLOAD_SIZE, size - i)) < 0)
+		                                  data + i, std::min<size_t>(PYRO_MAX_PAYLOAD_SIZE, size - i)) < 0)
 		{
 			fprintf(stderr, "Error writing UDP datagram. Congested buffers?\n");
 		}
 
 		subseq = (subseq + 1) & PYRO_PAYLOAD_SUBPACKET_SEQ_MASK;
+	}
+
+	if (!is_audio)
+	{
+		uint8_t xor_data[PYRO_MAX_PAYLOAD_SIZE];
+
+		header.encoded &= ~PYRO_PAYLOAD_PACKET_BEGIN_BIT;
+		header.encoded |= PYRO_PAYLOAD_PACKET_FEC_BIT;
+
+		encoder.flush();
+		encoder.seed(header.pts_lo);
+		encoder.set_block_size(PYRO_MAX_PAYLOAD_SIZE);
+
+		for (uint32_t i = 0; i < num_fec_blocks; i++)
+		{
+			encoder.generate(xor_data, data, size, num_xor_blocks);
+
+			header.encoded &= ~(PYRO_PAYLOAD_SUBPACKET_SEQ_MASK << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET);
+			header.encoded |= i << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;
+
+			if (dispatcher.write_udp_datagram(
+					udp_remote, &header, sizeof(header),
+					xor_data, sizeof(xor_data)) < 0)
+			{
+				fprintf(stderr, "Error writing UDP datagram. Congested buffers?\n");
+			}
+		}
 	}
 
 	seq = (seq + 1) & PYRO_PAYLOAD_PACKET_SEQ_MASK;
