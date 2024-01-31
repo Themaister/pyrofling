@@ -89,7 +89,7 @@ void build_lookup_table(uint16_t *table, const double *accum_density, unsigned c
 
 void LTDist::build_entry(unsigned num_blocks)
 {
-	constexpr double c = 0.3;
+	const double c = std::max(0.2, 1.0 / double(num_blocks));
 	constexpr double delta = 0.5;
 	double rho[MaxK_over_S];
 	double tau[MaxK_over_S];

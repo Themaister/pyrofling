@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <random>
 #include <array>
+#include <string.h>
 
 using namespace LT;
 
@@ -78,32 +79,54 @@ static int test_encoder()
 	encoder.set_block_size(sizeof(uint32_t));
 	decoder.set_block_size(sizeof(uint32_t));
 
-	const std::array<uint32_t, 15> buf = { 5, 9, 10, 14, 19, 80, 19, 2, 3, 90, 400, 800, 1000, 2000, 4000 };
+	std::default_random_engine rnd{2000};
+	std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
-	std::array<uint32_t, buf.size()> output;
-	encoder.begin_encode(1234, buf.data(), sizeof(buf));
+	for (unsigned iter = 0; iter < 1000; iter++)
+	{
+		std::array<uint32_t, 10> buf;
+		for (auto &e: buf)
+			e = uint32_t(rnd());
 
-	std::array<uint32_t, 32> encoded;
-	for (auto &e : encoded)
-		encoder.generate_block(&e);
-	auto received = encoded;
+		auto seed = rnd();
 
-	decoder.begin_decode(1234, output.data(), output.size() * sizeof(output.front()), encoded.size());
+		std::array<uint32_t, buf.size()> output;
+		encoder.begin_encode(seed, buf.data(), sizeof(buf));
 
-	size_t seq;
-	for (seq = 0; seq < 32; seq++)
-		if (decoder.push_block(seq, &received[seq]))
-			break;
+		std::array<uint32_t, 1000> encoded;
+		for (auto &e: encoded)
+			encoder.generate_block(&e);
+		auto received = encoded;
+
+		decoder.begin_decode(seed, output.data(), output.size() * sizeof(output.front()), encoded.size());
+
+		size_t seq;
+		size_t non_dropped = 0;
+		for (seq = 0; seq < encoded.size(); seq++)
+		{
+			if (dist(rnd) < 0.0f)
+				continue;
+
+			non_dropped++;
+			if (decoder.push_block(seq, &received[seq]))
+				break;
+		}
+
+		if (memcmp(output.data(), buf.data(), buf.size() * sizeof(buf.front())) != 0)
+			return 1;
+
+		printf("Succeeded after %zu packets!\n", non_dropped);
+	}
 
 	return 0;
 }
 
 int main()
 {
-	if (test_distribution() < 0)
+	if (test_distribution() != 0)
 		return 1;
 
-	if (test_encoder() < 0)
+	if (test_encoder() != 0)
 		return 1;
 
 	return 0;

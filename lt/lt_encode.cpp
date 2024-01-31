@@ -28,12 +28,9 @@ void Encoder::generate_block(void *data_)
 	uint32_t num_blocks = sample_degree_distribution(
 			rnd() & DistributionMask, get_degree_distribution(input_blocks));
 
-	printf("Encode NumBlocks = %u\n", num_blocks);
-
 	assert(num_blocks <= input_blocks);
 
 	uint32_t block_index = uint32_t(rnd()) % input_blocks;
-	printf("  BlockIndex = %u\n", block_index);
 	// Pick random block.
 
 	if (block_index + 1 == input_blocks)
@@ -57,7 +54,6 @@ void Encoder::generate_block(void *data_)
 			block_index = uint32_t(rnd()) % unused_input_blocks;
 			auto &idx = l[block_index];
 			unused_input_blocks--;
-			printf("  BlockIndex = %u\n", idx);
 
 			if (idx + 1 == input_blocks)
 				xor_block(data, input_data + block_size * idx, input_size - block_index * block_size);

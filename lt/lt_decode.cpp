@@ -23,7 +23,6 @@ static void xor_block(uint8_t * __restrict a, const uint8_t * __restrict b, size
 static unsigned select_n_from(std::default_random_engine &rnd, uint16_t *indices, unsigned K)
 {
 	unsigned num_blocks = sample_degree_distribution(rnd() & DistributionMask, get_degree_distribution(K));
-	printf("Decode NumBlocks %u\n", num_blocks);
 	assert(num_blocks <= K);
 	assert(K <= MaxNumBlocks);
 
@@ -37,7 +36,6 @@ static unsigned select_n_from(std::default_random_engine &rnd, uint16_t *indices
 		auto &idx = l[block_index];
 		K--;
 		indices[i] = idx;
-		printf("  BlockIndex %u\n", indices[i]);
 		idx = l[K];
 	}
 
@@ -98,7 +96,10 @@ void Decoder::drain_ready_block(EncodedLink &block)
 {
 	// Redundant block.
 	if (block.num_indices == 0)
+	{
+		printf("Redundant block.\n");
 		return;
+	}
 
 	assert(block.num_indices == 1);
 	assert(block.data);
@@ -139,6 +140,16 @@ bool Decoder::push_block(size_t seq, void *data)
 		ready_encoded_links.push_back(seq);
 
 	drain_ready_blocks();
-	return decoded_blocks == output_blocks;
+	bool ret = decoded_blocks == output_blocks;
+
+#ifndef NDEBUG
+	if (ret)
+	{
+		for (auto &b : encoded_blocks)
+			assert(b.num_indices == 0);
+	}
+#endif
+
+	return ret;
 }
 }
