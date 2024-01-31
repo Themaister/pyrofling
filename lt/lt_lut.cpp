@@ -26,24 +26,21 @@ uint16_t *LTDist::get(unsigned num_blocks)
 {
 	assert(num_blocks <= MaxNumBlocks);
 	assert(num_blocks != 0);
-	return table.get() + (num_blocks - 1) * DistributionTableEntries;
+	return table.get() + (num_blocks - 1) * NumDistributionTableEntries;
 }
 
 LTDist::LTDist()
 {
-	table.reset(new uint16_t[MaxNumBlocks * DistributionTableEntries]);
+	table.reset(new uint16_t[MaxNumBlocks * NumDistributionTableEntries]);
 	for (unsigned i = 1; i <= MaxNumBlocks; i++)
 		build_entry(i);
 }
 
 void build_lookup_table(uint16_t *table, const double *accum_density, unsigned count)
 {
-	table[0] = 1u << NumFractionalBits;
-	table[DistributionTableEntries - 1] = count << NumFractionalBits;
-
-	for (unsigned i = 1; i < DistributionTableEntries; i++)
+	for (unsigned i = 0; i < NumDistributionTableEntries - 1; i++)
 	{
-		double target_integrated_density = double(i) / double(DistributionTableEntries - 1);
+		double target_integrated_density = double(i) / double(NumDistributionTableEntries - 1);
 		auto itr = std::upper_bound(accum_density, accum_density + count, target_integrated_density);
 		double upper = *itr;
 		double lower = 0.0;
@@ -64,6 +61,27 @@ void build_lookup_table(uint16_t *table, const double *accum_density, unsigned c
 		double frac = (target_integrated_density - lower) / (upper - lower);
 		table[i] = ((uint32_t(itr - accum_density) + 1) << NumFractionalBits) +
 		           uint32_t(std::round(frac * double(1u << NumFractionalBits)));
+
+		if (i + 2 == NumDistributionTableEntries)
+		{
+			// If probability of last element is < 1 / 2^n,
+			// we'll have to carefully emit the last lerp bin so interpolation works out and we hit the threshold
+			// at the right fractional offset.
+			if (itr != accum_density + count - 1)
+			{
+				double l = (upper - target_integrated_density) / (1.0 - target_integrated_density);
+				// Solve equation for x: lerp(frac, x, l) == 1
+				// (1 - l) * frac + x * l == 1
+				// x = (1 - (1 - l) * frac) / l
+				double x = (1.0 - (1.0 - l) * frac) / l;
+				table[i + 1] = ((uint32_t(itr - accum_density) + 1) << NumFractionalBits) +
+				               uint32_t(std::round(x * double(1u << NumFractionalBits)));
+			}
+			else
+			{
+				table[i + 1] = (count + 1) << NumFractionalBits;
+			}
+		}
 	}
 }
 
