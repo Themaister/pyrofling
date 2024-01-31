@@ -10,7 +10,7 @@ namespace LT
 {
 
 // Empiric observation.
-static constexpr unsigned MaxK_over_S = 16;
+static constexpr unsigned MaxK_over_S = MaxXorBlocks;
 
 struct LTDist
 {

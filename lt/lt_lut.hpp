@@ -8,6 +8,10 @@ static constexpr unsigned NumDistributionTableBits = 8;
 static constexpr unsigned NumFractionalBits = 8;
 static constexpr unsigned NumDistributionTableEntries = (1u << NumDistributionTableBits) + 1u;
 static constexpr unsigned MaxNumBlocks = 1024;
+static constexpr uint32_t DistributionMask = (1u << (NumDistributionTableBits + NumFractionalBits)) - 1u;
+
+// Empiric observation based on MaxNumBlocks.
+static constexpr unsigned MaxXorBlocks = 16;
 
 const uint16_t *get_degree_distribution(unsigned num_blocks);
 

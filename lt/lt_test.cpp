@@ -1,7 +1,10 @@
 #include "lt_lut.hpp"
+#include "lt_encode.hpp"
+#include "lt_decode.hpp"
 #include <cmath>
 #include <initializer_list>
 #include <random>
+#include <array>
 
 using namespace LT;
 
@@ -41,7 +44,7 @@ static bool validate_accum(uint16_t *lut, std::initializer_list<double> accum)
 	return true;
 }
 
-int main()
+static int test_distribution()
 {
 	uint16_t lut[NumDistributionTableEntries];
 	if (!validate_accum(lut, { 0.0, 0.1, 1.0 }))
@@ -58,12 +61,50 @@ int main()
 	for (unsigned i = 0; i < 1000000; i++)
 	{
 		uint32_t v = rnd();
-		v &= (1u << (NumFractionalBits + NumDistributionTableBits)) - 1u;
+		v &= DistributionMask;
 		counts[sample_degree_distribution(v, lut) - 1]++;
 	}
 
 	for (unsigned i = 0; i < 6; i++)
 		printf("Ratio: %.3f %%\n", 100.0 * double(counts[i]) / 1e6);
+
+	return 0;
+}
+
+static int test_encoder()
+{
+	Encoder encoder;
+	Decoder decoder;
+	encoder.set_block_size(sizeof(uint32_t));
+	decoder.set_block_size(sizeof(uint32_t));
+
+	const std::array<uint32_t, 15> buf = { 5, 9, 10, 14, 19, 80, 19, 2, 3, 90, 400, 800, 1000, 2000, 4000 };
+
+	std::array<uint32_t, buf.size()> output;
+	encoder.begin_encode(1234, buf.data(), sizeof(buf));
+
+	std::array<uint32_t, 32> encoded;
+	for (auto &e : encoded)
+		encoder.generate_block(&e);
+	auto received = encoded;
+
+	decoder.begin_decode(1234, output.data(), output.size() * sizeof(output.front()), encoded.size());
+
+	size_t seq;
+	for (seq = 0; seq < 32; seq++)
+		if (decoder.push_block(seq, &received[seq]))
+			break;
+
+	return 0;
+}
+
+int main()
+{
+	if (test_distribution() < 0)
+		return 1;
+
+	if (test_encoder() < 0)
+		return 1;
 
 	return 0;
 }
