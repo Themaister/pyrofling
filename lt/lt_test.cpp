@@ -82,9 +82,11 @@ static int test_encoder()
 	std::default_random_engine rnd{2000};
 	std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
+	double total_non_dropped = 0.0;
+
 	for (unsigned iter = 0; iter < 1000; iter++)
 	{
-		std::array<uint32_t, 10> buf;
+		std::array<uint32_t, 400> buf;
 		for (auto &e: buf)
 			e = uint32_t(rnd());
 
@@ -104,7 +106,7 @@ static int test_encoder()
 		size_t non_dropped = 0;
 		for (seq = 0; seq < encoded.size(); seq++)
 		{
-			if (dist(rnd) < 0.0f)
+			if (dist(rnd) < 0.05f)
 				continue;
 
 			non_dropped++;
@@ -115,8 +117,11 @@ static int test_encoder()
 		if (memcmp(output.data(), buf.data(), buf.size() * sizeof(buf.front())) != 0)
 			return 1;
 
+		total_non_dropped += non_dropped;
 		printf("Succeeded after %zu packets!\n", non_dropped);
 	}
+
+	printf("Average non-dropped: %.3f\n", total_non_dropped / 1000);
 
 	return 0;
 }
