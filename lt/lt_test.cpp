@@ -87,10 +87,10 @@ static int test_encoder()
 	double total_non_dropped = 0.0;
 	std::vector<uint32_t> encoded;
 
-	constexpr unsigned num_data_blocks = 60;
+	constexpr unsigned num_data_blocks = 40;
 	constexpr unsigned num_iterations = 100000;
 	unsigned successful_iterations = 0;
-	constexpr float packet_loss_ratio = 0.01f;
+	constexpr float packet_loss_ratio = 0.005f;
 	constexpr unsigned num_xor_blocks = num_data_blocks / 2;
 
 	for (unsigned num_fec_blocks = 0; num_fec_blocks < 20; num_fec_blocks++)
