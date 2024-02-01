@@ -22,46 +22,37 @@ static void xor_block(uint8_t * __restrict a, const uint8_t * __restrict b, size
 		a[i] ^= b[i];
 }
 
-void Encoder::generate_block(void *data_)
+void Encoder::generate_block(void *data_, unsigned num_xor_blocks)
 {
 	auto *data = static_cast<uint8_t *>(data_);
-	uint32_t num_blocks = sample_degree_distribution(
-			rnd() & DistributionMask, get_degree_distribution(input_blocks));
+	assert(num_xor_blocks <= input_blocks);
 
-	assert(num_blocks <= input_blocks);
+	uint32_t unused_input_blocks = input_blocks;
+	uint32_t l[MaxNumBlocks];
+	for (uint32_t i = 0; i < input_blocks; i++)
+		l[i] = i;
 
-	uint32_t block_index = uint32_t(rnd()) % input_blocks;
-	// Pick random block.
-
-	if (block_index + 1 == input_blocks)
-		memcpy(data, input_data + block_index * block_size, input_size - block_index * block_size);
-	else
-		memcpy(data, input_data + block_index * block_size, block_size);
-
-	if (num_blocks > 1)
+	for (uint32_t i = 0; i < num_xor_blocks; i++)
 	{
-		// Pick N random blocks and XOR them together.
-		uint32_t unused_input_blocks = input_blocks - 1;
-		num_blocks--;
+		uint32_t block_index = uint32_t(rnd()) % unused_input_blocks;
+		auto &idx = l[block_index];
 
-		uint32_t l[MaxNumBlocks];
-		for (uint32_t i = 0; i < input_blocks; i++)
-			l[i] = i;
-		l[block_index] = unused_input_blocks;
-
-		for (uint32_t i = 0; i < num_blocks; i++)
+		if (i == 0)
 		{
-			block_index = uint32_t(rnd()) % unused_input_blocks;
-			auto &idx = l[block_index];
-			unused_input_blocks--;
-
 			if (idx + 1 == input_blocks)
-				xor_block(data, input_data + block_size * idx, input_size - block_index * block_size);
+				memcpy(data, input_data + block_size * idx, input_size - idx * block_size);
+			else
+				memcpy(data, input_data + block_size * idx, block_size);
+		}
+		else
+		{
+			if (idx + 1 == input_blocks)
+				xor_block(data, input_data + block_size * idx, input_size - idx * block_size);
 			else
 				xor_block(data, input_data + block_size * idx, block_size);
-
-			idx = l[unused_input_blocks];
 		}
+
+		idx = l[--unused_input_blocks];
 	}
 }
 

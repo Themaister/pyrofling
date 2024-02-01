@@ -9,6 +9,7 @@
 
 using namespace LT;
 
+#if 0
 static uint32_t p_to_fixed(double p)
 {
 	constexpr auto FixedMultiplier = double(1u << (NumFractionalBits + NumDistributionTableBits));
@@ -71,6 +72,7 @@ static int test_distribution()
 
 	return 0;
 }
+#endif
 
 static int test_encoder()
 {
@@ -83,53 +85,91 @@ static int test_encoder()
 	std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
 	double total_non_dropped = 0.0;
+	std::vector<uint32_t> encoded;
 
-	for (unsigned iter = 0; iter < 1000; iter++)
+	constexpr unsigned num_data_blocks = 60;
+	constexpr unsigned num_iterations = 100000;
+	unsigned successful_iterations = 0;
+	constexpr float packet_loss_ratio = 0.01f;
+	constexpr unsigned num_xor_blocks = num_data_blocks / 2;
+
+	for (unsigned num_fec_blocks = 0; num_fec_blocks < 20; num_fec_blocks++)
 	{
-		std::array<uint32_t, 400> buf;
-		for (auto &e: buf)
-			e = uint32_t(rnd());
-
-		auto seed = rnd();
-
-		std::array<uint32_t, buf.size()> output;
-		encoder.begin_encode(seed, buf.data(), sizeof(buf));
-
-		std::array<uint32_t, 1000> encoded;
-		for (auto &e: encoded)
-			encoder.generate_block(&e);
-		auto received = encoded;
-
-		decoder.begin_decode(seed, output.data(), output.size() * sizeof(output.front()), encoded.size());
-
-		size_t seq;
-		size_t non_dropped = 0;
-		for (seq = 0; seq < encoded.size(); seq++)
+		successful_iterations = 0;
+		total_non_dropped = 0.0;
+		printf("FEC blocks = %u\n", num_fec_blocks);
+		for (unsigned iter = 0; iter < num_iterations; iter++)
 		{
-			if (dist(rnd) < 0.05f)
+			std::array<uint32_t, num_data_blocks> buf;
+			encoded.clear();
+
+			for (auto &e: buf)
+			{
+				e = uint32_t(rnd());
+				encoded.push_back(e);
+			}
+
+			auto seed = rnd();
+
+			encoder.begin_encode(seed, buf.data(), buf.size() * sizeof(buf.front()));
+
+			for (unsigned i = 0; i < num_fec_blocks; i++)
+			{
+				uint32_t fec;
+				encoder.generate_block(&fec, num_xor_blocks);
+				encoded.push_back(fec);
+			}
+
+			auto received = encoded;
+			decoder.begin_decode(seed, received.data(), buf.size() * sizeof(buf.front()),
+			                     num_fec_blocks, num_xor_blocks);
+
+			size_t seq;
+			size_t non_dropped = 0;
+			for (seq = 0; seq < encoded.size(); seq++)
+			{
+				if (dist(rnd) < packet_loss_ratio)
+				{
+					received[seq] = 0xdeadca7;
+					continue;
+				}
+
+				non_dropped++;
+
+				if (seq < num_data_blocks)
+				{
+					if (decoder.push_raw_block(seq))
+						break;
+				}
+				else
+				{
+					if (decoder.push_fec_block(seq - num_data_blocks, &received[seq]))
+						break;
+				}
+			}
+
+			if (seq == encoded.size())
 				continue;
 
-			non_dropped++;
-			if (decoder.push_block(seq, &received[seq]))
-				break;
+			if (memcmp(received.data(), buf.data(), buf.size() * sizeof(buf.front())) != 0)
+				return 1;
+
+			total_non_dropped += double(non_dropped);
+			successful_iterations++;
 		}
 
-		if (memcmp(output.data(), buf.data(), buf.size() * sizeof(buf.front())) != 0)
-			return 1;
-
-		total_non_dropped += non_dropped;
-		printf("Succeeded after %zu packets!\n", non_dropped);
+		printf("  %u packets with UDP loss rate %.2f %% -> combined packet fail rate: %.3f %%\n",
+		       num_data_blocks, packet_loss_ratio * 100.0f,
+		       100.0 * double(num_iterations - successful_iterations) / double(num_iterations));
 	}
-
-	printf("Average non-dropped: %.3f\n", total_non_dropped / 1000);
 
 	return 0;
 }
 
 int main()
 {
-	if (test_distribution() != 0)
-		return 1;
+	//if (test_distribution() != 0)
+	//	return 1;
 
 	if (test_encoder() != 0)
 		return 1;

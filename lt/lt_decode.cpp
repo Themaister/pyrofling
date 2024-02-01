@@ -19,43 +19,43 @@ static void xor_block(uint8_t * __restrict a, const uint8_t * __restrict b, size
 		a[i] ^= b[i];
 }
 
-// Random select N unique elements in range [0, K) where N is random over the range [1, K].
-static unsigned select_n_from(std::default_random_engine &rnd, uint16_t *indices, unsigned K)
+// Random select N unique elements in range [0, num_data_blocks).
+static unsigned select_n_from(std::default_random_engine &rnd,
+							  unsigned num_xor_blocks, uint16_t *indices, unsigned num_data_blocks)
 {
-	unsigned num_blocks = sample_degree_distribution(rnd() & DistributionMask, get_degree_distribution(K));
-	assert(num_blocks <= K);
-	assert(K <= MaxNumBlocks);
+	assert(num_xor_blocks <= num_data_blocks);
+	assert(num_data_blocks <= MaxNumBlocks);
 
 	uint32_t l[MaxNumBlocks];
-	for (uint32_t i = 0; i < K; i++)
+	for (uint32_t i = 0; i < num_data_blocks; i++)
 		l[i] = i;
 
-	for (uint32_t i = 0; i < num_blocks; i++)
+	for (uint32_t i = 0; i < num_xor_blocks; i++)
 	{
-		uint32_t block_index = uint32_t(rnd()) % K;
+		uint32_t block_index = uint32_t(rnd()) % num_data_blocks;
 		auto &idx = l[block_index];
-		K--;
 		indices[i] = idx;
-		idx = l[K];
+		idx = l[--num_data_blocks];
 	}
 
-	return num_blocks;
+	return num_xor_blocks;
 }
 
 void Decoder::seed_block(EncodedLink &block)
 {
-	block.num_indices = select_n_from(rnd, block.indices, output_blocks);
+	block.num_indices = select_n_from(rnd, num_xor_blocks, block.indices, output_blocks);
 }
 
-void Decoder::begin_decode(uint64_t seed, void *data, size_t size, size_t max_seq_blocks)
+void Decoder::begin_decode(uint64_t seed, void *data, size_t size,
+                           unsigned max_fec_blocks, unsigned num_xor_blocks_)
 {
 	rnd.seed(seed);
 	output_data = static_cast<uint8_t *>(data);
-	output_size = size;
 	assert(size % block_size == 0);
 	output_blocks = size / block_size;
 	encoded_blocks.clear();
-	encoded_blocks.resize(max_seq_blocks);
+	encoded_blocks.resize(max_fec_blocks);
+	num_xor_blocks = num_xor_blocks_;
 	decoded_blocks = 0;
 	decoded_block_mask.clear();
 	decoded_block_mask.resize(output_blocks);
@@ -65,7 +65,7 @@ void Decoder::begin_decode(uint64_t seed, void *data, size_t size, size_t max_se
 		seed_block(b);
 }
 
-void Decoder::mark_decoded_block(size_t index)
+void Decoder::propagate_decoded_block(unsigned index)
 {
 	for (size_t i = 0, n = encoded_blocks.size(); i < n; i++)
 	{
@@ -92,27 +92,31 @@ void Decoder::mark_decoded_block(size_t index)
 	}
 }
 
+bool Decoder::mark_decoded_block(unsigned index)
+{
+	if (decoded_block_mask[index])
+		return false;
+
+	decoded_block_mask[index] = true;
+	decoded_blocks++;
+	return true;
+}
+
 void Decoder::drain_ready_block(EncodedLink &block)
 {
 	// Redundant block.
 	if (block.num_indices == 0)
-	{
-		printf("Redundant block.\n");
 		return;
-	}
 
 	assert(block.num_indices == 1);
 	assert(block.data);
 	size_t decoded_index = block.indices[0];
 	block.num_indices = 0;
 
-	if (!decoded_block_mask[decoded_index])
+	if (mark_decoded_block(decoded_index))
 	{
-		decoded_block_mask[decoded_index] = true;
-		decoded_blocks++;
-
 		memcpy(output_data + block_size * decoded_index, block.data, block_size);
-		mark_decoded_block(decoded_index);
+		propagate_decoded_block(decoded_index);
 	}
 }
 
@@ -126,10 +130,10 @@ void Decoder::drain_ready_blocks()
 	}
 }
 
-bool Decoder::push_block(size_t seq, void *data)
+bool Decoder::push_fec_block(unsigned index, void *data)
 {
-	assert(seq < encoded_blocks.size());
-	auto &block = encoded_blocks[seq];
+	assert(index < encoded_blocks.size());
+	auto &block = encoded_blocks[index];
 	block.data = static_cast<uint8_t *>(data);
 
 	for (unsigned i = 0; i < block.num_resolved_indices; i++)
@@ -137,8 +141,26 @@ bool Decoder::push_block(size_t seq, void *data)
 	block.num_resolved_indices = 0;
 
 	if (block.num_indices == 1)
-		ready_encoded_links.push_back(seq);
+		ready_encoded_links.push_back(index);
 
+	drain_ready_blocks();
+	bool ret = decoded_blocks == output_blocks;
+
+#ifndef NDEBUG
+	if (ret)
+	{
+		for (auto &b : encoded_blocks)
+			assert(b.num_indices == 0);
+	}
+#endif
+
+	return ret;
+}
+
+bool Decoder::push_raw_block(unsigned index)
+{
+	if (mark_decoded_block(index))
+		propagate_decoded_block(index);
 	drain_ready_blocks();
 	bool ret = decoded_blocks == output_blocks;
 

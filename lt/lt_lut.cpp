@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <stdio.h>
 
+#if 0
 namespace LT
 {
 
@@ -143,3 +144,4 @@ const uint16_t *get_degree_distribution(unsigned num_blocks)
 	return dist.get(num_blocks);
 }
 }
+#endif

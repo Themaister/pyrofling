@@ -10,16 +10,19 @@ class Decoder
 {
 public:
 	void set_block_size(size_t size);
-	void begin_decode(uint64_t seed, void *data, size_t size, size_t max_seq_blocks);
-	bool push_block(size_t seq, void *data);
+	void begin_decode(uint64_t seed, void *data, size_t size,
+	                  unsigned max_fec_blocks, unsigned num_xor_blocks);
+	bool push_fec_block(unsigned index, void *data);
+	// Mark that data in begin_decode now contains valid data, back-propagate through XOR blocks.
+	bool push_raw_block(unsigned index);
 
 private:
 	std::default_random_engine rnd;
 	size_t block_size = 0;
 	uint8_t *output_data = nullptr;
-	size_t output_size = 0;
-	size_t output_blocks = 0;
-	size_t decoded_blocks = 0;
+	unsigned output_blocks = 0;
+	unsigned decoded_blocks = 0;
+	unsigned num_xor_blocks = 0;
 
 	struct EncodedLink
 	{
@@ -35,6 +38,7 @@ private:
 	void seed_block(EncodedLink &block);
 	void drain_ready_blocks();
 	void drain_ready_block(EncodedLink &block);
-	void mark_decoded_block(size_t index);
+	bool mark_decoded_block(unsigned index);
+	void propagate_decoded_block(unsigned index);
 };
 }

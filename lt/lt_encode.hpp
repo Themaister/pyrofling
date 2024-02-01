@@ -11,7 +11,7 @@ class Encoder
 public:
 	void set_block_size(size_t size);
 	void begin_encode(uint64_t seed, const void *data, size_t size);
-	void generate_block(void *data);
+	void generate_block(void *data, unsigned num_xor_blocks);
 
 private:
 	std::default_random_engine rnd;
