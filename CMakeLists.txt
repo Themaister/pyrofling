@@ -59,6 +59,11 @@ add_library(granite-application-interface-query STATIC pyrofling_app_query.cpp)
 
 add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
+if (GRANITE_SANITIZE_ADDRESS)
+    set(PYROFLING_CXX_FLAGS ${PYROFLING_CXX_FLAGS} -fsanitize=address)
+    set(PYROFLING_LINK_FLAGS "${PYROFLING_LINK_FLAGS} -fsanitize=address")
+endif()
+
 add_subdirectory(proto)
 
 add_library(pyrofling-socket STATIC simple_socket.cpp simple_socket.hpp)
@@ -79,6 +84,7 @@ if (NOT PYROFLING_LAYER_ONLY)
         target_link_libraries(pyrofling PRIVATE
                 pyro-protocol pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio pyro-server)
         install(TARGETS pyrofling)
+        set_target_properties(pyrofling PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
     endif()
 
 	add_blob_archive_target(viewer-fonts viewer_fonts
@@ -89,6 +95,7 @@ if (NOT PYROFLING_LAYER_ONLY)
     if (WIN32)
             target_link_libraries(pyrofling-viewer PRIVATE winmm)
     endif()
+    set_target_properties(pyrofling-viewer PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
     install(TARGETS pyrofling-viewer)
 
     add_granite_offline_tool(pyrofling-gamepad pyrofling_gamepad.cpp)
