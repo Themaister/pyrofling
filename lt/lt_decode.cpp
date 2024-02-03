@@ -4,6 +4,10 @@
 #include <assert.h>
 #include <string.h>
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
+
 namespace HybridLT
 {
 void Decoder::set_block_size(size_t size)
@@ -78,10 +82,23 @@ void Decoder::reserve_indices(size_t num_indices)
 	index_buffer_offset = 0;
 }
 
+#ifdef _MSC_VER
+static inline unsigned find_lsb(uint32_t x)
+{
+	unsigned long result;
+	if (_BitScanForward(&result, x))
+		return result;
+	else
+		return 32;
+}
+#elif defined(__GNUC__)
 static inline unsigned find_lsb(uint32_t v)
 {
 	return __builtin_ctz(v);
 }
+#else
+#error "Missing impl for find_lsb."
+#endif
 
 void Decoder::propagate_decoded_block(unsigned output_index)
 {
