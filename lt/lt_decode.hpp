@@ -24,26 +24,29 @@ private:
 	unsigned decoded_blocks = 0;
 	unsigned num_xor_blocks = 0;
 
-	std::unique_ptr<uint16_t []> index_buffer;
+	std::unique_ptr<uint32_t []> index_buffer;
 	size_t index_buffer_capacity = 0;
 	size_t index_buffer_offset = 0;
 	void reserve_indices(size_t num_indices);
 
+	uint32_t *output_to_fec_mask = nullptr;
+	unsigned num_u32_masks_per_output = 0;
+
 	struct EncodedLink
 	{
 		uint8_t *data = nullptr;
-		uint16_t *indices = nullptr;
-		unsigned num_indices = 0;
-		uint16_t *resolved_indices = nullptr;
+		unsigned output_index = 0;
+		unsigned num_unresolved_indices = 0;
+		uint32_t *resolved_indices = nullptr;
 		unsigned num_resolved_indices = 0;
 	};
 	std::vector<unsigned> ready_encoded_links;
 	std::vector<EncodedLink> encoded_blocks;
 	std::vector<bool> decoded_block_mask;
-	void seed_block(EncodedLink &block);
+	void seed_block(unsigned fec_index);
 	void drain_ready_blocks();
 	void drain_ready_block(EncodedLink &block);
 	bool mark_decoded_block(unsigned index);
-	void propagate_decoded_block(unsigned index);
+	void propagate_decoded_block(unsigned output_index);
 };
 }

@@ -17,17 +17,22 @@ static void xor_block(uint8_t * __restrict a, const uint8_t * __restrict b, size
 		a[i] ^= b[i];
 }
 
-void Decoder::seed_block(EncodedLink &block)
+void Decoder::seed_block(unsigned fec_index)
 {
-	block.indices = index_buffer.get() + index_buffer_offset;
-	index_buffer_offset += output_blocks;
+	auto &block = encoded_blocks[fec_index];
 	block.resolved_indices = index_buffer.get() + index_buffer_offset;
 	index_buffer_offset += output_blocks;
 
 	shuffler.begin(output_blocks, num_xor_blocks);
+	block.output_index = 0;
 	for (unsigned i = 0; i < num_xor_blocks; i++)
-		block.indices[i] = shuffler.pick();
-	block.num_indices = num_xor_blocks;
+	{
+		unsigned output_index = shuffler.pick();
+		block.output_index ^= output_index;
+		auto *fec_mask = output_to_fec_mask + output_index * num_u32_masks_per_output;
+		fec_mask[fec_index / 32] |= 1u << (fec_index & 31);
+	}
+	block.num_unresolved_indices = num_xor_blocks;
 }
 
 void Decoder::begin_decode(uint64_t seed, void *data, size_t size,
@@ -36,20 +41,26 @@ void Decoder::begin_decode(uint64_t seed, void *data, size_t size,
 	output_data = static_cast<uint8_t *>(data);
 	assert(size % block_size == 0);
 	output_blocks = size / block_size;
-	encoded_blocks.clear();
-	encoded_blocks.resize(max_fec_blocks);
 	num_xor_blocks = num_xor_blocks_;
 	decoded_blocks = 0;
 	decoded_block_mask.clear();
 	decoded_block_mask.resize(output_blocks);
 	ready_encoded_links.clear();
 
-	reserve_indices(max_fec_blocks * 2 * output_blocks);
+	num_u32_masks_per_output = (max_fec_blocks + 31) / 32;
+
+	reserve_indices(max_fec_blocks * output_blocks + num_u32_masks_per_output * output_blocks);
+	output_to_fec_mask = index_buffer.get();
+	memset(output_to_fec_mask, 0, num_u32_masks_per_output * output_blocks * sizeof(uint32_t));
+	index_buffer_offset += num_u32_masks_per_output * output_blocks;
 
 	shuffler.seed(seed);
 	shuffler.flush();
-	for (auto &b : encoded_blocks)
-		seed_block(b);
+
+	encoded_blocks.clear();
+	encoded_blocks.resize(max_fec_blocks);
+	for (unsigned i = 0; i < max_fec_blocks; i++)
+		seed_block(i);
 }
 
 void Decoder::reserve_indices(size_t num_indices)
@@ -61,29 +72,41 @@ void Decoder::reserve_indices(size_t num_indices)
 		while (index_buffer_capacity < num_indices)
 			index_buffer_capacity *= 2;
 
-		index_buffer.reset(new uint16_t[index_buffer_capacity]);
+		index_buffer.reset(new uint32_t[index_buffer_capacity]);
 	}
 
 	index_buffer_offset = 0;
 }
 
-void Decoder::propagate_decoded_block(unsigned index)
+static inline unsigned find_lsb(uint32_t v)
 {
-	for (size_t i = 0, n = encoded_blocks.size(); i < n; i++)
+	return __builtin_ctz(v);
+}
+
+void Decoder::propagate_decoded_block(unsigned output_index)
+{
+	uint32_t *fec_mask = output_to_fec_mask + output_index * num_u32_masks_per_output;
+	for (unsigned i = 0; i < num_u32_masks_per_output; i++)
 	{
-		auto &block = encoded_blocks[i];
-		auto itr = std::find(block.indices, block.indices + block.num_indices, uint16_t(index));
-		if (itr != block.indices + block.num_indices)
+		uint32_t &mask = fec_mask[i];
+		while (mask)
 		{
-			*itr = block.indices[--block.num_indices];
+			unsigned bit = find_lsb(mask);
+			mask &= ~(1u << bit);
+
+			unsigned fec_index = i * 32u + bit;
+			auto &block = encoded_blocks[fec_index];
 
 			if (block.data)
-				xor_block(block.data, output_data + block_size * index, block_size);
+				xor_block(block.data, output_data + block_size * output_index, block_size);
 			else
-				block.resolved_indices[block.num_resolved_indices++] = uint16_t(index);
+				block.resolved_indices[block.num_resolved_indices++] = output_index;
 
-			if (block.num_indices == 1 && block.data)
-				ready_encoded_links.push_back(i);
+			block.output_index ^= output_index;
+
+			assert(block.num_unresolved_indices != 0);
+			if (--block.num_unresolved_indices == 1 && block.data)
+				ready_encoded_links.push_back(fec_index);
 		}
 	}
 }
@@ -101,18 +124,17 @@ bool Decoder::mark_decoded_block(unsigned index)
 void Decoder::drain_ready_block(EncodedLink &block)
 {
 	// Redundant block.
-	if (block.num_indices == 0)
+	if (block.num_unresolved_indices == 0)
 		return;
 
-	assert(block.num_indices == 1);
+	assert(block.num_unresolved_indices == 1);
 	assert(block.data);
-	size_t decoded_index = block.indices[0];
-	block.num_indices = 0;
+	assert(block.output_index < output_blocks);
 
-	if (mark_decoded_block(decoded_index))
+	if (mark_decoded_block(block.output_index))
 	{
-		memcpy(output_data + block_size * decoded_index, block.data, block_size);
-		propagate_decoded_block(decoded_index);
+		memcpy(output_data + block_size * block.output_index, block.data, block_size);
+		propagate_decoded_block(block.output_index);
 	}
 }
 
@@ -136,7 +158,7 @@ bool Decoder::push_fec_block(unsigned index, void *data)
 		xor_block(block.data, output_data + block_size * block.resolved_indices[i], block_size);
 	block.num_resolved_indices = 0;
 
-	if (block.num_indices == 1)
+	if (block.num_unresolved_indices == 1)
 		ready_encoded_links.push_back(index);
 
 	drain_ready_blocks();
@@ -146,7 +168,7 @@ bool Decoder::push_fec_block(unsigned index, void *data)
 	if (ret)
 	{
 		for (auto &b : encoded_blocks)
-			assert(b.num_indices == 0);
+			assert(b.num_unresolved_indices == 0);
 	}
 #endif
 
@@ -164,7 +186,7 @@ bool Decoder::push_raw_block(unsigned index)
 	if (ret)
 	{
 		for (auto &b : encoded_blocks)
-			assert(b.num_indices == 0);
+			assert(b.num_unresolved_indices == 0);
 	}
 #endif
 
