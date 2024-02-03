@@ -2,9 +2,9 @@
 #include <random>
 #include <vector>
 #include <stddef.h>
-#include "lt_lut.hpp"
+#include "lt_shuffle.hpp"
 
-namespace LT
+namespace HybridLT
 {
 class Decoder
 {
@@ -17,19 +17,24 @@ public:
 	bool push_raw_block(unsigned index);
 
 private:
-	std::default_random_engine rnd;
+	Shuffler shuffler;
 	size_t block_size = 0;
 	uint8_t *output_data = nullptr;
 	unsigned output_blocks = 0;
 	unsigned decoded_blocks = 0;
 	unsigned num_xor_blocks = 0;
 
+	std::unique_ptr<uint16_t []> index_buffer;
+	size_t index_buffer_capacity = 0;
+	size_t index_buffer_offset = 0;
+	void reserve_indices(size_t num_indices);
+
 	struct EncodedLink
 	{
 		uint8_t *data = nullptr;
-		uint16_t indices[MaxXorBlocks];
+		uint16_t *indices = nullptr;
 		unsigned num_indices = 0;
-		uint16_t resolved_indices[MaxXorBlocks];
+		uint16_t *resolved_indices = nullptr;
 		unsigned num_resolved_indices = 0;
 	};
 	std::vector<unsigned> ready_encoded_links;

@@ -66,7 +66,7 @@ target_include_directories(pyrofling-socket PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(pyrofling-socket PRIVATE ${PYROFLING_CXX_FLAGS})
 target_link_libraries(pyrofling-socket PRIVATE pyro-protocol)
 
-add_subdirectory(lt)
+add_subdirectory(lt EXCLUDE_FROM_ALL)
 
 if (NOT WIN32)
     add_subdirectory(pyro-server)

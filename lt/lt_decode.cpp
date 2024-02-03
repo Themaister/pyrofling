@@ -1,12 +1,10 @@
 #include "lt_decode.hpp"
-#include "lt_lut.hpp"
+#include "lt_shuffle.hpp"
 #include <algorithm>
 #include <assert.h>
 #include <string.h>
 
-// See David J. C. MacKay - Information Theory, Inference and Learning Algorithms - Chapter 50 (2004) for details.
-
-namespace LT
+namespace HybridLT
 {
 void Decoder::set_block_size(size_t size)
 {
@@ -19,37 +17,22 @@ static void xor_block(uint8_t * __restrict a, const uint8_t * __restrict b, size
 		a[i] ^= b[i];
 }
 
-// Random select N unique elements in range [0, num_data_blocks).
-static unsigned select_n_from(std::default_random_engine &rnd,
-							  unsigned num_xor_blocks, uint16_t *indices, unsigned num_data_blocks)
-{
-	assert(num_xor_blocks <= num_data_blocks);
-	assert(num_data_blocks <= MaxNumBlocks);
-
-	uint32_t l[MaxNumBlocks];
-	for (uint32_t i = 0; i < num_data_blocks; i++)
-		l[i] = i;
-
-	for (uint32_t i = 0; i < num_xor_blocks; i++)
-	{
-		uint32_t block_index = uint32_t(rnd()) % num_data_blocks;
-		auto &idx = l[block_index];
-		indices[i] = idx;
-		idx = l[--num_data_blocks];
-	}
-
-	return num_xor_blocks;
-}
-
 void Decoder::seed_block(EncodedLink &block)
 {
-	block.num_indices = select_n_from(rnd, num_xor_blocks, block.indices, output_blocks);
+	block.indices = index_buffer.get() + index_buffer_offset;
+	index_buffer_offset += output_blocks;
+	block.resolved_indices = index_buffer.get() + index_buffer_offset;
+	index_buffer_offset += output_blocks;
+
+	shuffler.begin(output_blocks, num_xor_blocks);
+	for (unsigned i = 0; i < num_xor_blocks; i++)
+		block.indices[i] = shuffler.pick();
+	block.num_indices = num_xor_blocks;
 }
 
 void Decoder::begin_decode(uint64_t seed, void *data, size_t size,
                            unsigned max_fec_blocks, unsigned num_xor_blocks_)
 {
-	rnd.seed(seed);
 	output_data = static_cast<uint8_t *>(data);
 	assert(size % block_size == 0);
 	output_blocks = size / block_size;
@@ -61,8 +44,27 @@ void Decoder::begin_decode(uint64_t seed, void *data, size_t size,
 	decoded_block_mask.resize(output_blocks);
 	ready_encoded_links.clear();
 
+	reserve_indices(max_fec_blocks * 2 * output_blocks);
+
+	shuffler.seed(seed);
+	shuffler.flush();
 	for (auto &b : encoded_blocks)
 		seed_block(b);
+}
+
+void Decoder::reserve_indices(size_t num_indices)
+{
+	if (index_buffer_capacity < num_indices)
+	{
+		if (index_buffer_capacity == 0)
+			index_buffer_capacity = 1;
+		while (index_buffer_capacity < num_indices)
+			index_buffer_capacity *= 2;
+
+		index_buffer.reset(new uint16_t[index_buffer_capacity]);
+	}
+
+	index_buffer_offset = 0;
 }
 
 void Decoder::propagate_decoded_block(unsigned index)
@@ -76,15 +78,9 @@ void Decoder::propagate_decoded_block(unsigned index)
 			*itr = block.indices[--block.num_indices];
 
 			if (block.data)
-			{
 				xor_block(block.data, output_data + block_size * index, block_size);
-			}
 			else
-			{
-				// If we don't have data for this block yet, defer it.
-				assert(block.num_resolved_indices < MaxXorBlocks);
 				block.resolved_indices[block.num_resolved_indices++] = uint16_t(index);
-			}
 
 			if (block.num_indices == 1 && block.data)
 				ready_encoded_links.push_back(i);

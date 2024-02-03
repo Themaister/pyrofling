@@ -3,21 +3,20 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <random>
+#include "lt_shuffle.hpp"
 
-namespace LT
+namespace HybridLT
 {
 class Encoder
 {
 public:
 	void set_block_size(size_t size);
-	void begin_encode(uint64_t seed, const void *data, size_t size);
-	void generate_block(void *data, unsigned num_xor_blocks);
+	void seed(uint64_t seed);
+	void flush();
+	void generate(void *xor_data, const void *input_data, size_t size, unsigned num_xor_blocks);
 
 private:
-	std::default_random_engine rnd;
+	Shuffler shuffler;
 	size_t block_size = 0;
-	const uint8_t *input_data = nullptr;
-	size_t input_size = 0;
-	size_t input_blocks = 0;
 };
 }

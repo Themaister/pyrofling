@@ -1,4 +1,4 @@
-#include "lt_lut.hpp"
+#include "lt_shuffle.hpp"
 #include "lt_encode.hpp"
 #include "lt_decode.hpp"
 #include <cmath>
@@ -7,7 +7,7 @@
 #include <array>
 #include <string.h>
 
-using namespace LT;
+using namespace HybridLT;
 
 #if 0
 static uint32_t p_to_fixed(double p)
@@ -88,12 +88,12 @@ static int test_encoder()
 	std::vector<uint32_t> encoded;
 
 	constexpr unsigned num_data_blocks = 40;
-	constexpr unsigned num_iterations = 100000;
+	constexpr unsigned num_iterations = 10000;
 	unsigned successful_iterations = 0;
-	constexpr float packet_loss_ratio = 0.005f;
+	constexpr unsigned num_lost_packets = 5;
 	constexpr unsigned num_xor_blocks = num_data_blocks / 2;
 
-	for (unsigned num_fec_blocks = 0; num_fec_blocks < 20; num_fec_blocks++)
+	for (unsigned num_fec_blocks = 0; num_fec_blocks < 40; num_fec_blocks++)
 	{
 		successful_iterations = 0;
 		total_non_dropped = 0.0;
@@ -111,12 +111,13 @@ static int test_encoder()
 
 			auto seed = rnd();
 
-			encoder.begin_encode(seed, buf.data(), buf.size() * sizeof(buf.front()));
+			encoder.seed(seed);
+			encoder.flush();
 
 			for (unsigned i = 0; i < num_fec_blocks; i++)
 			{
 				uint32_t fec;
-				encoder.generate_block(&fec, num_xor_blocks);
+				encoder.generate(&fec, buf.data(), buf.size() * sizeof(buf.front()), num_xor_blocks);
 				encoded.push_back(fec);
 			}
 
@@ -128,7 +129,7 @@ static int test_encoder()
 			size_t non_dropped = 0;
 			for (seq = 0; seq < encoded.size(); seq++)
 			{
-				if (dist(rnd) < packet_loss_ratio)
+				if (seq < num_lost_packets)
 				{
 					received[seq] = 0xdeadca7;
 					continue;
@@ -158,8 +159,8 @@ static int test_encoder()
 			successful_iterations++;
 		}
 
-		printf("  %u packets with UDP loss rate %.2f %% -> combined packet fail rate: %.3f %%\n",
-		       num_data_blocks, packet_loss_ratio * 100.0f,
+		printf("  %u packets with %u lost packets -> combined packet fail rate: %.3f %%\n",
+		       num_data_blocks, num_lost_packets,
 		       100.0 * double(num_iterations - successful_iterations) / double(num_iterations));
 	}
 

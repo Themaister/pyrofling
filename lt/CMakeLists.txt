@@ -1,4 +1,4 @@
-add_library(lt-codec lt_decode.cpp lt_decode.hpp lt_encode.cpp lt_encode.hpp lt_lut.cpp lt_lut.hpp)
+add_library(lt-codec lt_decode.cpp lt_decode.hpp lt_encode.cpp lt_encode.hpp lt_shuffle.cpp lt_shuffle.hpp)
 target_include_directories(lt-codec PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(lt-codec PRIVATE ${PYROFLING_CXX_FLAGS})
 
