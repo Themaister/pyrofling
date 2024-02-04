@@ -559,7 +559,11 @@ bool PyroStreamClient::iterate()
 
 			if (delta > 1)
 				LOG("  %d packet drops\n", delta - 1);
-			progress.total_dropped_packets += delta - 1;
+
+			if (is_audio)
+				progress.total_dropped_audio_packets += delta - 1;
+			else
+				progress.total_dropped_video_packets += delta - 1;
 		}
 
 		last_completed_seq = stream->packet_seq;

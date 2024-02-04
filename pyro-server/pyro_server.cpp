@@ -136,10 +136,11 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 
 			if ((kick_flags & (PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_VIDEO_BIT)) != 0)
 			{
-				printf("PROGRESS for %s @ %s: %llu complete, %llu dropped, %llu key frames, %llu FEC recovered.\n",
+				printf("PROGRESS for %s @ %s: %llu complete, %llu dropped video, %llu dropped audio, %llu key frames, %llu FEC recovered.\n",
 				       remote_addr.c_str(), remote_port.c_str(),
 				       static_cast<unsigned long long>(progress.total_received_packets),
-				       static_cast<unsigned long long>(progress.total_dropped_packets),
+				       static_cast<unsigned long long>(progress.total_dropped_video_packets),
+				       static_cast<unsigned long long>(progress.total_dropped_audio_packets),
 				       static_cast<unsigned long long>(progress.total_received_key_frames),
 					   static_cast<unsigned long long>(progress.total_recovered_packets));
 			}

@@ -57,7 +57,8 @@ struct pyro_progress_report
 {
 	uint64_t total_received_packets;
 	uint64_t total_recovered_packets;
-	uint64_t total_dropped_packets;
+	uint64_t total_dropped_video_packets;
+	uint64_t total_dropped_audio_packets;
 	uint64_t total_received_key_frames;
 };
 
