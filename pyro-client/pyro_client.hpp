@@ -87,6 +87,9 @@ private:
 	uint64_t ping_times[256] = {};
 	double last_ping_delay = 0.0;
 
+	ReconstructedPacket *get_stream_packet(ReconstructedPacket *stream_base,
+	                                       uint32_t packet_seq);
+
 	bool iterate();
 
 	bool check_send_progress();

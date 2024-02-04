@@ -2,6 +2,7 @@
 #include "timer.hpp"
 #include <string.h>
 #include <random>
+#include <assert.h>
 
 namespace PyroFling
 {
@@ -37,7 +38,8 @@ void ReconstructedPacket::prepare_decode(const pyro_payload_header &header)
 		fec_buffer.resize(header.num_fec_blocks * PYRO_MAX_PAYLOAD_SIZE);
 
 		decoder.set_block_size(PYRO_MAX_PAYLOAD_SIZE);
-		decoder.begin_decode(header.pts_lo, buffer.data(), buffer.size(), header.num_fec_blocks, header.num_xor_blocks);
+		decoder.begin_decode(header.pts_lo, buffer.data(), buffer.size(), header.num_fec_blocks,
+		                     header.num_xor_blocks_even, header.num_xor_blocks_odd);
 
 		subpacket_seq_accum = 0;
 		last_subpacket_raw_seq = 0;
@@ -266,20 +268,101 @@ void PyroStreamClient::set_debug_log(const char *path)
 
 void PyroStreamClient::write_debug_header(const pyro_payload_header &header)
 {
-	if (!debug_log)
+	bool stream_type = (header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
+	if (stream_type || !debug_log)
 		return;
 
 	uint32_t packet_seq = pyro_payload_get_packet_seq(header.encoded);
 	uint32_t packet_subseq = pyro_payload_get_subpacket_seq(header.encoded);
 	bool packet_key = (header.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0;
-	bool stream_type = (header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) != 0;
 	bool packet_begin = (header.encoded & PYRO_PAYLOAD_PACKET_BEGIN_BIT) != 0;
 	bool packet_fec = (header.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0;
 
-	fprintf(debug_log.get(), "SEQ %04x | SUBSEQ %04x | KEY %d | TYPE %d |%s%s\n",
-	        packet_seq, packet_subseq, int(packet_key), int(stream_type), packet_begin ? " [BEGIN]" : "",
+	uint32_t num_packets = (header.payload_size + PYRO_MAX_PAYLOAD_SIZE - 1) / PYRO_MAX_PAYLOAD_SIZE;
+
+	fprintf(debug_log.get(), "SIZE %06u | SEQ %04x | SUBSEQ %u / %u | KEY %d | TYPE %s |%s%s\n",
+			header.payload_size,
+	        packet_seq, packet_subseq, num_packets,
+			int(packet_key), stream_type ? "AUDIO" : "VIDEO", packet_begin ? " [BEGIN]" : "",
 	        packet_fec ? " [FEC] " : "");
 }
+
+ReconstructedPacket *
+PyroStreamClient::get_stream_packet(ReconstructedPacket *stream_base, uint32_t packet_seq)
+{
+	unsigned num_active_packets = 0;
+	if (!stream_base[0].is_reset())
+	{
+		num_active_packets++;
+		if (!stream_base[1].is_reset())
+			num_active_packets++;
+	}
+	else
+		assert(stream_base[1].is_reset());
+
+	ReconstructedPacket *stream = nullptr;
+
+	if (num_active_packets == 0)
+	{
+		// Trivial case, start a new packet.
+		stream = &stream_base[0];
+		stream->reset();
+		stream->packet_seq = packet_seq;
+		return stream;
+	}
+
+	for (unsigned i = 0; i < num_active_packets && !stream; i++)
+		if (!stream_base[i].is_reset() && stream_base[i].packet_seq == packet_seq)
+			stream = &stream_base[i];
+
+	if (stream)
+		return stream;
+
+	// Need to start a new stream. Figure out where to insert it.
+	unsigned i;
+	for (i = 0; i < num_active_packets; i++)
+		if (pyro_payload_get_packet_seq_delta(packet_seq, stream_base[i].packet_seq) < 0)
+			break;
+
+	bool swap_packets = false;
+
+	if (i == 0)
+	{
+		if (num_active_packets == 1)
+			swap_packets = true;
+		else
+			return nullptr;
+	}
+	else if (i == 1)
+	{
+		if (num_active_packets == 2)
+		{
+			// Age out packet[0]
+			i = 0;
+		}
+	}
+	else if (i == 2)
+	{
+		// Age out packet[0].
+		swap_packets = true;
+		i = 1;
+	}
+
+	if (swap_packets)
+		std::swap(stream_base[0], stream_base[1]);
+
+	stream = &stream_base[i];
+
+	if (stream)
+	{
+		stream->reset();
+		stream->packet_seq = packet_seq;
+	}
+
+	return stream;
+}
+
+#define LOG(...) if (!is_audio && debug_log) fprintf(debug_log.get(), __VA_ARGS__)
 
 bool PyroStreamClient::iterate()
 {
@@ -393,7 +476,7 @@ bool PyroStreamClient::iterate()
 
 	if ((h.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0 && is_audio)
 	{
-		// Invalid.
+		LOG("  invalid fec\n");
 		return true;
 	}
 
@@ -409,80 +492,20 @@ bool PyroStreamClient::iterate()
 
 	// Duplicate packets most likely, or very old packets were sent.
 	if (last_completed_seq != UINT32_MAX && pyro_payload_get_packet_seq_delta(packet_seq, last_completed_seq) <= 0)
-		return true;
-
-	// Only accept FEC packets if we have received real data packets for a
-	// pending stream that needs FEC to actually recover.
-	// Otherwise, we risk pushing packets against a sequence we have actually completed and throw away data we
-	// don't want to throw away.
-	if ((h.encoded & PYRO_PAYLOAD_PACKET_FEC_BIT) != 0)
 	{
-		bool wants_fec = false;
-		for (auto &s : video)
-		{
-			if (packet_seq == s.packet_seq && !s.is_reset() && !s.is_complete())
-			{
-				wants_fec = true;
-				break;
-			}
-		}
-
-		if (!wants_fec)
-		{
-			// If we don't risk killing any existing decode streams, just go ahead.
-			wants_fec = true;
-			for (auto &s : video)
-				wants_fec = wants_fec && s.is_reset();
-		}
-
-		if (!wants_fec)
-			return true;
-	}
-
-	ReconstructedPacket *stream;
-	if (packet_seq == stream_base[0].packet_seq || stream_base[0].is_reset())
-	{
-		// Trivial case.
-		stream = &stream_base[0];
-		stream->packet_seq = packet_seq;
-	}
-	else if (packet_seq == stream_base[1].packet_seq && !stream_base[1].is_reset())
-	{
-		// Trivially keep appending to existing packet.
-		stream = &stream_base[1];
-		stream->packet_seq = packet_seq;
-	}
-	else if (pyro_payload_get_packet_seq_delta(packet_seq, stream_base[0].packet_seq) == 1 &&
-	         stream_base[1].is_reset())
-	{
-		// We're working on stream[0], but we started to receive packets for seq + 1.
-		// This is fine, just start working on stream[1].
-		stream = &stream_base[1];
-		stream->packet_seq = packet_seq;
-		stream->reset();
-	}
-	else if (pyro_payload_get_packet_seq_delta(packet_seq, stream_base[0].packet_seq) == -1 &&
-	         stream_base[1].is_reset())
-	{
-		// We're working on stream[0], but we got packets for stream[-1].
-		// Shift the window so that they become stream 1 and 0 respectively.
-		std::swap(stream_base[0], stream_base[1]);
-		stream = &stream_base[0];
-		stream->packet_seq = packet_seq;
-	}
-	else if (pyro_payload_get_packet_seq_delta(packet_seq, stream_base[0].packet_seq) < 0)
-	{
-		// Drop packet.
+		LOG("  old packet\n");
 		return true;
 	}
-	else
+
+	auto *stream = get_stream_packet(stream_base, packet_seq);
+
+	if (!stream)
 	{
-		// Restart case. Consider existing buffers completely stale.
-		stream_base[0].reset();
-		stream_base[1].reset();
-		stream = &stream_base[0];
-		stream->packet_seq = packet_seq;
+		LOG("  old packet\n");
+		return true;
 	}
+
+	LOG("  packet[%d]\n", int(stream - stream_base));
 
 	stream->prepare_decode(h);
 
@@ -490,7 +513,10 @@ bool PyroStreamClient::iterate()
 	{
 		// FEC blocks must be MAX_PAYLOAD_SIZE.
 		if (payload.size != PYRO_MAX_PAYLOAD_SIZE)
+		{
+			LOG("  invalid fec size\n");
 			return false;
+		}
 
 		uint32_t subpacket_seq = pyro_payload_get_subpacket_seq(h.encoded);
 		stream->add_fec_data(subpacket_seq, payload.buffer, payload.size);
@@ -512,6 +538,8 @@ bool PyroStreamClient::iterate()
 			stream = &stream_base[0];
 		}
 
+		LOG("  complete seq %04x\n", packet_seq);
+
 		if (last_completed_seq != UINT32_MAX)
 		{
 			int delta = pyro_payload_get_packet_seq_delta(stream->packet_seq, last_completed_seq);
@@ -519,11 +547,12 @@ bool PyroStreamClient::iterate()
 			if (delta < 1)
 			{
 				// Bogus case. Something has gone very wrong!
+				LOG("  invalid packet seq delta %d\n", delta);
 				return false;
 			}
 
-			if (debug_log && delta > 1)
-				fprintf(debug_log.get(), "DROP\n");
+			if (delta > 1)
+				LOG("  %d packet drops\n", delta - 1);
 			progress.total_dropped_packets += delta - 1;
 		}
 
@@ -532,7 +561,7 @@ bool PyroStreamClient::iterate()
 
 		if (stream->is_fec_recovered())
 		{
-			fprintf(debug_log.get(), "RECOVERED SEQ %u\n", stream->packet_seq);
+			LOG("  recovered seq %x with fec\n", stream->packet_seq);
 			progress.total_recovered_packets++;
 		}
 

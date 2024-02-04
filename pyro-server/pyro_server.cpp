@@ -189,12 +189,14 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 	// ~25% FEC overhead. TODO: Make configurable.
 	uint32_t num_data_blocks = (size + PYRO_MAX_PAYLOAD_SIZE - 1) / PYRO_MAX_PAYLOAD_SIZE;
 	uint32_t num_fec_blocks = num_data_blocks / 4 + 1;
-	uint32_t num_xor_blocks = std::min<uint32_t>(num_data_blocks / 2, 64u);
+	uint32_t num_xor_blocks_even = std::min<uint32_t>(num_data_blocks / 2, 64u);
+	uint32_t num_xor_blocks_odd = std::min<uint32_t>((num_data_blocks + 1) / 2, 64u);
 
 	// For small packets, just send a single full-XOR FEC block which can recover exactly one error.
-	if (num_data_blocks < 8)
+	if (num_data_blocks <= 8)
 	{
-		num_xor_blocks = num_data_blocks;
+		num_xor_blocks_even = num_data_blocks;
+		num_xor_blocks_odd = num_data_blocks;
 		num_fec_blocks = 1;
 	}
 
@@ -209,7 +211,8 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 
 	if (!is_audio)
 	{
-		header.num_xor_blocks = num_xor_blocks;
+		header.num_xor_blocks_even = num_xor_blocks_even;
+		header.num_xor_blocks_odd = num_xor_blocks_odd;
 		header.num_fec_blocks = num_fec_blocks;
 	}
 
@@ -247,7 +250,7 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 
 		for (uint32_t i = 0; i < num_fec_blocks; i++)
 		{
-			encoder.generate(xor_data, data, size, num_xor_blocks);
+			encoder.generate(xor_data, data, size, i & 1 ? num_xor_blocks_odd : num_xor_blocks_even);
 
 			header.encoded &= ~(PYRO_PAYLOAD_SUBPACKET_SEQ_MASK << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET);
 			header.encoded |= i << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;

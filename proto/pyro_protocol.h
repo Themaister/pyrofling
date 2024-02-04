@@ -212,7 +212,8 @@ struct pyro_payload_header
 	uint32_t pts_lo, pts_hi;
 	uint32_t dts_delta; // dts = pts - dts_delta
 	uint32_t payload_size;
-	uint16_t num_fec_blocks, num_xor_blocks;
+	uint16_t num_fec_blocks;
+	uint8_t num_xor_blocks_even, num_xor_blocks_odd;
 	pyro_payload_flags encoded;
 };
 

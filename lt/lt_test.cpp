@@ -87,13 +87,14 @@ static int test_encoder()
 	double total_non_dropped = 0.0;
 	std::vector<uint32_t> encoded;
 
-	constexpr unsigned num_data_blocks = 5000;
+	constexpr unsigned num_data_blocks = 39;
 	constexpr unsigned num_iterations = 1000;
 	unsigned successful_iterations = 0;
-	constexpr unsigned num_lost_packets = 8;
-	constexpr unsigned num_xor_blocks = 256;
+	constexpr unsigned num_lost_packets = 1;
+	constexpr unsigned num_xor_blocks_even = (num_data_blocks + 1) / 2;
+	constexpr unsigned num_xor_blocks_odd = num_data_blocks / 2;
 
-	for (unsigned num_fec_blocks = 100; num_fec_blocks < 1000; num_fec_blocks++)
+	for (unsigned num_fec_blocks = 0; num_fec_blocks < 10; num_fec_blocks++)
 	{
 		successful_iterations = 0;
 		total_non_dropped = 0.0;
@@ -117,13 +118,14 @@ static int test_encoder()
 			for (unsigned i = 0; i < num_fec_blocks; i++)
 			{
 				uint32_t fec;
-				encoder.generate(&fec, buf.data(), buf.size() * sizeof(buf.front()), num_xor_blocks);
+				encoder.generate(&fec, buf.data(), buf.size() * sizeof(buf.front()),
+								 i & 1 ? num_xor_blocks_odd : num_xor_blocks_even);
 				encoded.push_back(fec);
 			}
 
 			auto received = encoded;
 			decoder.begin_decode(seed, received.data(), buf.size() * sizeof(buf.front()),
-			                     num_fec_blocks, num_xor_blocks);
+			                     num_fec_blocks, num_xor_blocks_even, num_xor_blocks_odd);
 
 			size_t seq;
 			size_t non_dropped = 0;

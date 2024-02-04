@@ -27,6 +27,8 @@ void Decoder::seed_block(unsigned fec_index)
 	block.resolved_indices = index_buffer.get() + index_buffer_offset;
 	index_buffer_offset += output_blocks;
 
+	unsigned num_xor_blocks = fec_index & 1 ? num_xor_blocks_odd : num_xor_blocks_even;
+
 	shuffler.begin(output_blocks, num_xor_blocks);
 	block.output_index = 0;
 	for (unsigned i = 0; i < num_xor_blocks; i++)
@@ -40,12 +42,15 @@ void Decoder::seed_block(unsigned fec_index)
 }
 
 void Decoder::begin_decode(uint32_t seed, void *data, size_t size,
-                           unsigned max_fec_blocks, unsigned num_xor_blocks_)
+                           unsigned max_fec_blocks,
+						   unsigned num_xor_blocks_even_,
+						   unsigned num_xor_blocks_odd_)
 {
 	output_data = static_cast<uint8_t *>(data);
 	assert(size % block_size == 0);
 	output_blocks = size / block_size;
-	num_xor_blocks = num_xor_blocks_;
+	num_xor_blocks_even = num_xor_blocks_even_;
+	num_xor_blocks_odd = num_xor_blocks_odd_;
 	decoded_blocks = 0;
 	decoded_block_mask.clear();
 	decoded_block_mask.resize(output_blocks);

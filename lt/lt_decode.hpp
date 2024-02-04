@@ -11,7 +11,9 @@ class Decoder
 public:
 	void set_block_size(size_t size);
 	void begin_decode(uint32_t seed, void *data, size_t size,
-	                  unsigned max_fec_blocks, unsigned num_xor_blocks);
+	                  unsigned max_fec_blocks,
+	                  unsigned num_xor_blocks_even,
+	                  unsigned num_xor_blocks_odd);
 	bool push_fec_block(unsigned index, void *data);
 	// Mark that data in begin_decode now contains valid data, back-propagate through XOR blocks.
 	bool push_raw_block(unsigned index);
@@ -22,7 +24,8 @@ private:
 	uint8_t *output_data = nullptr;
 	unsigned output_blocks = 0;
 	unsigned decoded_blocks = 0;
-	unsigned num_xor_blocks = 0;
+	unsigned num_xor_blocks_even = 0;
+	unsigned num_xor_blocks_odd = 0;
 
 	std::unique_ptr<uint32_t []> index_buffer;
 	size_t index_buffer_capacity = 0;
