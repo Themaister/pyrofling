@@ -280,7 +280,13 @@ void PyroStreamClient::write_debug_header(const pyro_payload_header &header)
 
 	uint32_t num_packets = (header.payload_size + PYRO_MAX_PAYLOAD_SIZE - 1) / PYRO_MAX_PAYLOAD_SIZE;
 
-	fprintf(debug_log.get(), "SIZE %06u | SEQ %04x | SUBSEQ %u / %u | KEY %d | TYPE %s |%s%s\n",
+	auto current_t = std::chrono::steady_clock::now();
+	auto delta_t = std::chrono::steady_clock::now() - base_time;
+	auto millisecs = double(std::chrono::duration_cast<std::chrono::nanoseconds>(delta_t).count()) * 1e-6;
+	base_time = current_t;
+
+	fprintf(debug_log.get(), "T delta = %8.3f ms | SIZE %06u | SEQ %04x | SUBSEQ %u / %u | KEY %d | TYPE %s |%s%s\n",
+			millisecs,
 			header.payload_size,
 	        packet_seq, packet_subseq, num_packets,
 			int(packet_key), stream_type ? "AUDIO" : "VIDEO", packet_begin ? " [BEGIN]" : "",
@@ -625,5 +631,10 @@ bool PyroStreamClient::wait_next_packet()
 			return false;
 
 	return true;
+}
+
+PyroStreamClient::PyroStreamClient()
+{
+	base_time = std::chrono::steady_clock::now();
 }
 }

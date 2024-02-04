@@ -42,6 +42,7 @@ private:
 class PyroStreamClient
 {
 public:
+	PyroStreamClient();
 	bool connect(const char *host, const char *port);
 	bool handshake(pyro_kick_state_flags flags);
 
@@ -93,5 +94,7 @@ private:
 	bool iterate();
 
 	bool check_send_progress();
+
+	std::chrono::time_point<std::chrono::steady_clock> base_time;
 };
 }
