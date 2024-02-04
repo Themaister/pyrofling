@@ -75,6 +75,11 @@ bool Socket::connect(Proto proto, const char *addr, const char *port)
 		int size = 4 * 1024 * 1024;
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char *>(&size), sizeof(size)) < 0)
 			return false;
+
+		int actual_size = 0;
+		socklen_t sizelen = sizeof(size);
+		getsockopt(fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char *>(&actual_size), &sizelen);
+		fprintf(stderr, "Actual UDP rcvbuf size: %d bytes\n", actual_size);
 	}
 
 	if (!walk)
