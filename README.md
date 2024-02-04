@@ -114,6 +114,18 @@ PYROFLING=1 somevulkanapp
 
 Other RTMP setups is basically the same, just different URLs.
 
+#### Misc tweaks
+
+E.g.:
+
+`sudo tc qdisc add dev $iface root fq maxrate 100000000 flow_limit 2000 quantum 2048`
+
+to limit outgoing traffic to 100 mbit on Linux.
+Can be useful when doing real-time streaming.
+Increase maximum rcvbuf size on Linux:
+
+`sudo sysctl -w netcore.rmem_default=2000000`
+
 ### Special features
 
 #### Client rate multiplier
