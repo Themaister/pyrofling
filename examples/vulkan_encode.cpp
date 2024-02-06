@@ -330,7 +330,7 @@ struct H264RateControl
 	VkVideoEncodeH264RateControlInfoKHR h264_rate_control =
 		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR };
 	VkVideoEncodeH264RateControlLayerInfoKHR h264_layer =
-		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR };
+		{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_RATE_CONTROL_LAYER_INFO_KHR };
 	VkVideoEncodeRateControlLayerInfoKHR layer =
 			{ VK_STRUCTURE_TYPE_VIDEO_ENCODE_RATE_CONTROL_LAYER_INFO_KHR };
 };
@@ -381,7 +381,7 @@ static void reset_rate_control(CommandBuffer &cmd,
 
 		rate.rate_info.pNext = &rate.h264_rate_control;
 		rate.rate_info.virtualBufferSizeInMs = 1000;
-		rate.rate_info.initialVirtualBufferSizeInMs = 1000;
+		rate.rate_info.initialVirtualBufferSizeInMs = 500;
 		rate.rate_info.layerCount = 1;
 		rate.rate_info.pLayers = &rate.layer;
 
