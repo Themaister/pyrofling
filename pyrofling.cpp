@@ -70,7 +70,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			throw std::runtime_error("Failed to load Vulkan.");
 
 		Vulkan::Context instance_context;
-		if (!instance_context.init_instance(nullptr, 0))
+		if (!instance_context.init_instance(nullptr, 0,
+		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
+		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT))
 			throw std::runtime_error("Failed to create Vulkan instance.");
 		instance.reset(instance_context.get_instance());
 		instance_context.release_instance();
@@ -411,11 +414,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			if (img.src_cross_device_buffer)
 			{
-				cmd->image_barrier_acquire(*img.image, old_layout, new_layout,
-				                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_QUEUE_FAMILY_EXTERNAL,
+				cmd->acquire_image_barrier(*img.image, old_layout, new_layout,
 				                           VK_PIPELINE_STAGE_2_COPY_BIT,
-										   new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ?
-										   VK_ACCESS_TRANSFER_READ_BIT : 0);
+				                           new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ?
+				                           VK_ACCESS_TRANSFER_READ_BIT : 0);
 
 				if (new_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
 				{
@@ -433,9 +435,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			}
 			else
 			{
-				cmd->image_barrier_acquire(*img.image, old_layout, new_layout,
-				                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_QUEUE_FAMILY_EXTERNAL,
-				                           0, 0);
+				cmd->acquire_image_barrier(*img.image, old_layout, new_layout, 0, 0);
 
 				if (new_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
 				{
@@ -1106,11 +1106,17 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			gpu.context->context.set_system_handles(handles);
 
 			gpu.context->context.set_instance_factory(this);
-			if (!gpu.context->context.init_instance(nullptr, 0))
+			if (!gpu.context->context.init_instance(nullptr, 0,
+			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
+			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT))
 				return false;
 
 			gpu.context->context.release_instance();
-			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, nullptr, 0))
+			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, nullptr, 0,
+			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
+			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT))
 			{
 				gpu.context.reset();
 				return false;
