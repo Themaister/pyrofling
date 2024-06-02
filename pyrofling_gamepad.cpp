@@ -53,16 +53,16 @@ struct PadHandler : Granite::InputTrackerHandler
 			    joy.pid == PyroFling::VirtualGamepad::FAKE_PID)
 				continue;
 
-			state.axis_lx = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftX)]);
-			state.axis_ly = int16_t(0x7fff * joy.axis[int(JoypadAxis::LeftY)]);
-			state.axis_rx = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightX)]);
-			state.axis_ry = int16_t(0x7fff * joy.axis[int(JoypadAxis::RightY)]);
+			state.axis_lx = int16_t(0x7fff * joy.raw_axis[int(JoypadAxis::LeftX)]);
+			state.axis_ly = int16_t(0x7fff * joy.raw_axis[int(JoypadAxis::LeftY)]);
+			state.axis_rx = int16_t(0x7fff * joy.raw_axis[int(JoypadAxis::RightX)]);
+			state.axis_ry = int16_t(0x7fff * joy.raw_axis[int(JoypadAxis::RightY)]);
 			state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Left))) != 0 ? -1 : 0;
 			state.hat_x += (joy.button_mask & (1 << int(JoypadKey::Right))) != 0 ? +1 : 0;
 			state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Up))) != 0 ? -1 : 0;
 			state.hat_y += (joy.button_mask & (1 << int(JoypadKey::Down))) != 0 ? +1 : 0;
-			state.lz = uint8_t(255.0f * joy.axis[int(JoypadAxis::LeftTrigger)]);
-			state.rz = uint8_t(255.0f * joy.axis[int(JoypadAxis::RightTrigger)]);
+			state.lz = uint8_t(255.0f * joy.raw_axis[int(JoypadAxis::LeftTrigger)]);
+			state.rz = uint8_t(255.0f * joy.raw_axis[int(JoypadAxis::RightTrigger)]);
 			if (joy.button_mask & (1 << int(JoypadKey::East)))
 				state.buttons |= PYRO_PAD_EAST_BIT;
 			if (joy.button_mask & (1 << int(JoypadKey::South)))
