@@ -1065,6 +1065,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		bool audio = true;
 		bool immediate = false;
 		unsigned bit_depth = 8;
+		bool hdr10 = false;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1136,6 +1137,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.frame_timebase.den = int(video_encode.fps);
 			options.encoder = video_encode.encoder.c_str();
 			options.realtime = true;
+
+			// For now, just assume the inputs are properly PQ encoded.
+			// TODO: Deal with color space conversion as needed, etc.
+			options.hdr10 = video_encode.hdr10;
 
 			if (!video_encode.muxer.empty())
 				options.realtime_options.muxer_format = video_encode.muxer.c_str();
@@ -1409,6 +1414,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
 	cbs.add("--immediate-encode", [&](Util::CLIParser &) { opts.immediate = true; });
 	cbs.add("--10-bit", [&](Util::CLIParser &) { opts.bit_depth = 10; });
+	cbs.add("--hdr10", [&](Util::CLIParser &) { opts.hdr10 = true; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
