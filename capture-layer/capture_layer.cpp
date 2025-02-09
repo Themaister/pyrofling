@@ -68,7 +68,7 @@ struct SurfaceState
 {
 	explicit SurfaceState(Instance *instance);
 	~SurfaceState();
-	VkResult processPresent(VkQueue queue, uint32_t index, uint64_t presentId);
+	VkResult processPresent(VkQueue queue, uint32_t index, uint64_t presentId, const VkPresentModeKHR *updatePresentMode);
 	void setActiveDeviceAndSwapchain(Device *device, const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchainKHR chain);
 	void freeImage(ExportableImage &img);
 	bool initImageGroup(uint32_t count);
@@ -283,7 +283,9 @@ struct Device
 	uint32_t queueToFamilyIndex(VkQueue queue) const;
 
 	bool presentRequiresWrap(VkQueue queue, const VkPresentInfoKHR *pPresentInfo);
-	VkResult present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index, uint64_t khrPresentId);
+	VkResult present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index,
+	                 uint64_t khrPresentId,
+	                 const VkPresentModeKHR *presentMode);
 };
 
 #include "dispatch_wrapper.hpp"
@@ -548,7 +550,8 @@ VkResult SurfaceState::waitForPresent(uint64_t khrPresentId, uint64_t timeout)
 	return completedKHRPresentId < khrPresentId ? VK_TIMEOUT : VK_SUCCESS;
 }
 
-VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t khrPresentId)
+VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t khrPresentId,
+                                      const VkPresentModeKHR *updatePresentMode)
 {
 	VkResult res;
 	auto &table = *device->getTable();
@@ -686,6 +689,9 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	wire.index = clientIndex;
 	wire.vk_external_semaphore_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 
+	if (updatePresentMode)
+		presentMode = *updatePresentMode;
+
 	if (instance->getSyncMode() == SyncMode::Server)
 		wire.period = 1;
 	else if (instance->getSyncMode() == SyncMode::Client)
@@ -722,7 +728,10 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	if (khrPresentId != 0)
 		usesPresentWait = true;
 
-	if (wire.period > 0 && !usesPresentWait)
+	bool isFastForwardPresentMode = presentMode == VK_PRESENT_MODE_MAILBOX_KHR ||
+	                                presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR;
+
+	if (wire.period > 0 && (!usesPresentWait || (instance->getSyncMode() == SyncMode::Server && isFastForwardPresentMode)))
 	{
 		std::unique_lock<std::mutex> holder{clientLock};
 
@@ -1017,7 +1026,8 @@ bool Device::presentRequiresWrap(VkQueue queue, const VkPresentInfoKHR *pPresent
 	return false;
 }
 
-VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index, uint64_t presentId)
+VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index, uint64_t presentId,
+                         const VkPresentModeKHR *presentMode)
 {
 	auto *inst = getInstance();
 	SurfaceState *surface;
@@ -1027,7 +1037,7 @@ VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index
 	}
 
 	if (surface)
-		return surface->processPresent(queue, index, presentId);
+		return surface->processPresent(queue, index, presentId, presentMode);
 	else
 		return VK_SUCCESS;
 }
@@ -1276,6 +1286,7 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	}
 
 	const auto *id = findChain<VkPresentIdKHR>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
+	const auto *mode = findChain<VkSwapchainPresentModeInfoEXT>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT);
 
 	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
 	{
@@ -1284,7 +1295,7 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 		uint64_t presentId = id && i < id->swapchainCount ? id->pPresentIds[i] : 0;
 
 		// We're just concerned with fatal errors here like DEVICE_LOST etc.
-		if ((result = layer->present(queue, swap, index, presentId)) != VK_SUCCESS)
+		if ((result = layer->present(queue, swap, index, presentId, mode ? &mode->pPresentModes[i] : nullptr)) != VK_SUCCESS)
 			return result;
 	}
 
