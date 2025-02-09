@@ -41,6 +41,11 @@ bool PyroStreamConnection::requires_idr()
 	return (kick_flags & PYRO_KICK_STATE_VIDEO_BIT) != 0 && needs_key_frame.load(std::memory_order_relaxed);
 }
 
+void PyroStreamConnection::set_forward_error_correction(bool enable)
+{
+	fec = enable;
+}
+
 bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 {
 	// Timeout, cancel everything.
@@ -210,7 +215,7 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 	header.encoded |= seq << PYRO_PAYLOAD_PACKET_SEQ_OFFSET;
 	header.payload_size = size;
 
-	if (!is_audio)
+	if (!is_audio && fec)
 	{
 		header.num_xor_blocks_even = num_xor_blocks_even;
 		header.num_xor_blocks_odd = num_xor_blocks_odd;
@@ -238,7 +243,7 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 		subseq = (subseq + 1) & PYRO_PAYLOAD_SUBPACKET_SEQ_MASK;
 	}
 
-	if (!is_audio)
+	if (!is_audio && fec)
 	{
 		uint8_t xor_data[PYRO_MAX_PAYLOAD_SIZE];
 
@@ -382,6 +387,7 @@ bool PyroStreamServer::register_tcp_handler(PyroFling::Dispatcher &dispatcher, c
 {
 	auto conn = Util::make_handle<PyroStreamConnection>(dispatcher, *this, remote, ++cookie);
 	conn->add_reference();
+	conn->set_forward_error_correction(fec);
 	handler = conn.get();
 	std::lock_guard<std::mutex> holder{lock};
 	connections.push_back(std::move(conn));
@@ -460,6 +466,11 @@ const pyro_gamepad_state *PyroStreamServer::get_updated_gamepad_state()
 	auto *ret = new_gamepad_state ? &current_gamepad_state : nullptr;
 	new_gamepad_state = false;
 	return ret;
+}
+
+void PyroStreamServer::set_forward_error_correction(bool enable)
+{
+	fec = enable;
 }
 
 void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)

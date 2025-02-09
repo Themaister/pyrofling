@@ -38,6 +38,8 @@ public:
 
 	bool requires_idr();
 
+	void set_forward_error_correction(bool enable);
+
 private:
 	PyroStreamConnectionServerInterface &server;
 	PyroFling::RemoteAddress tcp_remote;
@@ -52,6 +54,7 @@ private:
 	uint32_t packet_seq_video = 0;
 	uint32_t packet_seq_audio = 0;
 	pyro_kick_state_flags kick_flags = 0;
+	bool fec = false;
 
 	union
 	{
@@ -92,6 +95,8 @@ public:
 	void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) override;
 	const pyro_gamepad_state *get_updated_gamepad_state();
 
+	void set_forward_error_correction(bool enable);
+
 private:
 	uint64_t cookie = 1000;
 	std::mutex lock;
@@ -104,5 +109,6 @@ private:
 	RemoteAddress current_gamepad_remote;
 	pyro_gamepad_state current_gamepad_state = {};
 	bool new_gamepad_state = false;
+	bool fec = false;
 };
 }

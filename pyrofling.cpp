@@ -1066,6 +1066,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		bool immediate = false;
 		unsigned bit_depth = 8;
 		bool hdr10 = false;
+		bool fec = false;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1175,6 +1176,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (video_encode.audio)
 				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
 
+			pyro.set_forward_error_correction(video_encode.fec);
 			encoder->set_audio_record_stream(audio_record.get());
 			if (video_encode.path.empty())
 				encoder->set_mux_stream_callback(this);
@@ -1415,6 +1417,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--immediate-encode", [&](Util::CLIParser &) { opts.immediate = true; });
 	cbs.add("--10-bit", [&](Util::CLIParser &) { opts.bit_depth = 10; });
 	cbs.add("--hdr10", [&](Util::CLIParser &) { opts.hdr10 = true; });
+	cbs.add("--fec", [&](Util::CLIParser &) { opts.fec = true; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
