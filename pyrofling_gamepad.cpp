@@ -148,7 +148,7 @@ int main(int argc, char **argv)
 	InputTracker tracker;
 	InputTrackerSDL pad;
 
-	if (SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS) < 0)
+	if (!SDL_Init(SDL_INIT_GAMEPAD | SDL_INIT_EVENTS))
 	{
 		LOGE("Failed to init SDL.\n");
 		return EXIT_FAILURE;
