@@ -1164,6 +1164,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					options.format = Granite::VideoEncoder::Format::P016;
 				else if (strstr(options.encoder, "vaapi") != nullptr)
 					options.format = Granite::VideoEncoder::Format::P010;
+				else if (strstr(options.encoder, "pyro") != nullptr)
+					options.format = Granite::VideoEncoder::Format::P016;
 				else
 				{
 					LOGW("Unsure which 10-bit pixel format to use.\n");
