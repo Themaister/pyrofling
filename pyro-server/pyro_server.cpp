@@ -159,6 +159,7 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 			needs_key_frame.store(progress.total_received_key_frames == 0, std::memory_order_relaxed);
 			if (total_dropped_video_packets != progress.total_dropped_video_packets)
 				has_pending_video_packet_loss.store(true, std::memory_order_relaxed);
+			total_dropped_video_packets = progress.total_dropped_video_packets;
 			break;
 		}
 
