@@ -1179,6 +1179,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
 
 			pyro.set_forward_error_correction(video_encode.fec);
+			pyro.set_idr_on_packet_loss(video_encode.gop_seconds < 0.0f);
 			encoder->set_audio_record_stream(audio_record.get());
 			if (video_encode.path.empty())
 				encoder->set_mux_stream_callback(this);
@@ -1367,7 +1368,7 @@ static void print_help()
 	     "\t[--threads THREADS]\n"
 	     "\t[--preset PRESET]\n"
 	     "\t[--tune PRESET]\n"
-	     "\t[--gop-seconds GOP_SECONDS]\n"
+	     "\t[--gop-seconds GOP_SECONDS (negative for IDR-on-demand mode if intra-refresh is not supported)]\n"
 	     "\t[--bitrate-kbits SIZE]\n"
 	     "\t[--max-bitrate-kbits SIZE]\n"
 	     "\t[--vbv-size-kbits SIZE]\n"

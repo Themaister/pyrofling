@@ -37,8 +37,8 @@ public:
 	                         const void *msg, size_t size);
 
 	bool requires_idr();
-
 	void set_forward_error_correction(bool enable);
+	bool get_and_clear_pending_video_packet_loss();
 
 private:
 	PyroStreamConnectionServerInterface &server;
@@ -48,7 +48,9 @@ private:
 	pyro_progress_report progress = {};
 	std::string remote_addr, remote_port;
 	std::atomic<bool> needs_key_frame;
+	std::atomic<bool> has_pending_video_packet_loss;
 	HybridLT::Encoder encoder;
+	uint64_t total_dropped_video_packets = 0;
 
 	uint64_t cookie;
 	uint32_t packet_seq_video = 0;
@@ -96,13 +98,14 @@ public:
 	const pyro_gamepad_state *get_updated_gamepad_state();
 
 	void set_forward_error_correction(bool enable);
+	void set_idr_on_packet_loss(bool enable);
 
 private:
 	uint64_t cookie = 1000;
 	std::mutex lock;
 	std::vector<Util::IntrusivePtr<PyroStreamConnection>> connections;
 	pyro_codec_parameters codec = {};
-	unsigned idr_counter = 0;
+	uint64_t idr_counter = 0;
 	mutable std::atomic<int> phase_offset_us;
 
 	// Current owner of virtual device. Super crude system, but hey :)
@@ -110,5 +113,6 @@ private:
 	pyro_gamepad_state current_gamepad_state = {};
 	bool new_gamepad_state = false;
 	bool fec = false;
+	bool idr_on_packet_loss = false;
 };
 }

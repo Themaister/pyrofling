@@ -34,6 +34,7 @@ PyroStreamConnection::PyroStreamConnection(
 	}
 
 	needs_key_frame.store(false, std::memory_order_relaxed);
+	has_pending_video_packet_loss.store(false, std::memory_order_relaxed);
 }
 
 bool PyroStreamConnection::requires_idr()
@@ -44,6 +45,11 @@ bool PyroStreamConnection::requires_idr()
 void PyroStreamConnection::set_forward_error_correction(bool enable)
 {
 	fec = enable;
+}
+
+bool PyroStreamConnection::get_and_clear_pending_video_packet_loss()
+{
+	return has_pending_video_packet_loss.exchange(false, std::memory_order_relaxed);
 }
 
 bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
@@ -151,6 +157,8 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 			}
 
 			needs_key_frame.store(progress.total_received_key_frames == 0, std::memory_order_relaxed);
+			if (total_dropped_video_packets != progress.total_dropped_video_packets)
+				has_pending_video_packet_loss.store(true, std::memory_order_relaxed);
 			break;
 		}
 
@@ -428,21 +436,22 @@ void PyroStreamServer::release_connection(PyroStreamConnection *conn)
 
 bool PyroStreamServer::should_force_idr()
 {
-	bool requires_idr = false;
+	// Rate limit forced IDR frames to avoid overwhelming the encoder and bandwidth.
 	if (idr_counter++ < 60)
 		return false;
-	idr_counter = 0;
+
+	bool requires_idr = false;
 
 	std::lock_guard<std::mutex> holder{lock};
 	for (auto &conn : connections)
 	{
-		if (conn->requires_idr())
-		{
+		bool has_pending_packet_loss = conn->get_and_clear_pending_video_packet_loss();
+		if ((has_pending_packet_loss && idr_on_packet_loss) || conn->requires_idr())
 			requires_idr = true;
-			break;
-		}
 	}
 
+	if (requires_idr)
+		idr_counter = 0;
 	return requires_idr;
 }
 
@@ -471,6 +480,11 @@ const pyro_gamepad_state *PyroStreamServer::get_updated_gamepad_state()
 void PyroStreamServer::set_forward_error_correction(bool enable)
 {
 	fec = enable;
+}
+
+void PyroStreamServer::set_idr_on_packet_loss(bool enable)
+{
+	idr_on_packet_loss = enable;
 }
 
 void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)
