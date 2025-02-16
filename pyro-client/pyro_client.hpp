@@ -76,6 +76,7 @@ private:
 	uint32_t last_completed_video_seq = UINT32_MAX;
 	uint32_t last_completed_audio_seq = UINT32_MAX;
 	pyro_progress_report progress = {};
+	bool request_immediate_feedback = false;
 
 	ReconstructedPacket video[2];
 	ReconstructedPacket audio[2];

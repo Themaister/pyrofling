@@ -564,6 +564,9 @@ bool PyroStreamClient::iterate()
 				progress.total_dropped_audio_packets += delta - 1;
 			else
 				progress.total_dropped_video_packets += delta - 1;
+
+			if (!is_audio && delta > 1)
+				request_immediate_feedback = true;
 		}
 
 		last_completed_seq = stream->packet_seq;
@@ -584,7 +587,11 @@ bool PyroStreamClient::iterate()
 #endif
 
 		if ((h.encoded & PYRO_PAYLOAD_KEY_FRAME_BIT) != 0)
+		{
+			if (progress.total_received_key_frames == 0)
+				request_immediate_feedback = true;
 			progress.total_received_key_frames++;
+		}
 
 		if (!check_send_progress())
 			return false;
@@ -598,7 +605,7 @@ bool PyroStreamClient::check_send_progress()
 {
 	auto current_time = std::chrono::steady_clock::now();
 	auto delta = current_time - last_progress_time;
-	if (std::chrono::duration_cast<std::chrono::milliseconds>(delta).count() >= 1000)
+	if (std::chrono::duration_cast<std::chrono::milliseconds>(delta).count() >= 1000 || request_immediate_feedback)
 	{
 		last_progress_time = current_time;
 		const pyro_message_type type = PYRO_MESSAGE_PROGRESS;
@@ -606,6 +613,8 @@ bool PyroStreamClient::check_send_progress()
 			return false;
 		if (!tcp.write(&progress, sizeof(progress)))
 			return false;
+
+		request_immediate_feedback = false;
 	}
 
 	return true;
