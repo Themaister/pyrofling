@@ -1111,14 +1111,16 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (!gpu.context->context.init_instance(nullptr, 0,
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
-			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT))
+			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
+			                                        Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
 				return false;
 
 			gpu.context->context.release_instance();
 			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, nullptr, 0,
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
-			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT))
+			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
+			                                      Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
 			{
 				gpu.context.reset();
 				return false;
