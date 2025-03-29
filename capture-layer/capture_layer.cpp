@@ -1128,6 +1128,83 @@ static VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance instance, VkSurfa
 	layer->getTable()->DestroySurfaceKHR(instance, surface, pAllocator);
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
+		VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
+		uint32_t *pSurfaceFormatCount, VkSurfaceFormatKHR *pSurfaceFormats)
+{
+	auto *layer = getInstanceLayer(physicalDevice);
+	VkResult vr;
+
+	uint32_t count;
+	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr);
+	if (vr != VK_SUCCESS)
+		return vr;
+	std::vector<VkSurfaceFormatKHR> surfaceFormats(count);
+	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, surfaceFormats.data());
+	if (vr != VK_SUCCESS)
+		return vr;
+
+	// For now, pyrofling only understands sRGB color space. TODO: Also expose PQ.
+	auto itr = std::remove_if(surfaceFormats.begin(), surfaceFormats.end(), [](const VkSurfaceFormatKHR &fmt) {
+		return fmt.colorSpace != VK_COLORSPACE_SRGB_NONLINEAR_KHR;
+	});
+	surfaceFormats.erase(itr, surfaceFormats.end());
+
+	if (pSurfaceFormats)
+	{
+		vr = *pSurfaceFormatCount >= surfaceFormats.size() ? VK_SUCCESS : VK_INCOMPLETE;
+		if (surfaceFormats.size() < *pSurfaceFormatCount)
+			*pSurfaceFormatCount = surfaceFormats.size();
+		memcpy(pSurfaceFormats, surfaceFormats.data(), *pSurfaceFormatCount * sizeof(VkSurfaceFormatKHR));
+	}
+	else
+	{
+		*pSurfaceFormatCount = surfaceFormats.size();
+	}
+	return vr;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
+		VkPhysicalDevice physicalDevice,
+		const VkPhysicalDeviceSurfaceInfo2KHR *pSurfaceInfo,
+		uint32_t *pSurfaceFormatCount,
+		VkSurfaceFormat2KHR *pSurfaceFormats)
+{
+	auto *layer = getInstanceLayer(physicalDevice);
+	uint32_t count;
+	VkResult vr;
+
+	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, pSurfaceInfo, &count, nullptr);
+	if (vr != VK_SUCCESS)
+		return vr;
+	std::vector<VkSurfaceFormat2KHR> surfaceFormats(count);
+	for (auto &fmt : surfaceFormats)
+		fmt.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR;
+	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, pSurfaceInfo, &count, surfaceFormats.data());
+	if (vr != VK_SUCCESS)
+		return vr;
+
+	// For now, pyrofling only understands sRGB color space. TODO: Also expose PQ.
+	auto itr = std::remove_if(surfaceFormats.begin(), surfaceFormats.end(), [](const VkSurfaceFormat2KHR &fmt) {
+		return fmt.surfaceFormat.colorSpace != VK_COLORSPACE_SRGB_NONLINEAR_KHR;
+	});
+	surfaceFormats.erase(itr, surfaceFormats.end());
+
+	if (pSurfaceFormats)
+	{
+		vr = *pSurfaceFormatCount >= surfaceFormats.size() ? VK_SUCCESS : VK_INCOMPLETE;
+		if (surfaceFormats.size() < *pSurfaceFormatCount)
+			*pSurfaceFormatCount = surfaceFormats.size();
+		for (uint32_t i = 0, n = *pSurfaceFormatCount; i < n; i++)
+			pSurfaceFormats[i].surfaceFormat = surfaceFormats[i].surfaceFormat;
+	}
+	else
+	{
+		*pSurfaceFormatCount = surfaceFormats.size();
+	}
+	return vr;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo *pCreateInfo,
                                                    const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
@@ -1340,6 +1417,8 @@ static PFN_vkVoidFunction interceptExtensionInstanceCommand(const char *pName)
 		const char *name;
 		PFN_vkVoidFunction proc;
 	} extInstanceCommands[] = {
+		{ "vkGetPhysicalDeviceSurfaceFormatsKHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceFormatsKHR) },
+		{ "vkGetPhysicalDeviceSurfaceFormats2KHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceFormats2KHR) },
 		{ "vkDestroySurfaceKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySurfaceKHR) },
 	};
 
