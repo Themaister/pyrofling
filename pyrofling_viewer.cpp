@@ -70,7 +70,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		, target_latency(target_latency_), hwdevice(hwdevice_)
 	{
 		sent_button_mask = 0;
-		get_wsi().set_low_latency_mode(true);
+		get_wsi().set_present_low_latency_mode(true);
 		if (video_path && !init_video_client(video_path))
 			throw std::runtime_error("Failed to init video client.");
 
