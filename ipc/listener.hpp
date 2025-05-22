@@ -26,6 +26,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <stdint.h>
 #include <sys/socket.h>
 
 namespace PyroFling
