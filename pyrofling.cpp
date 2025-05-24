@@ -1160,6 +1160,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.realtime_options.threads = video_encode.threads;
 			options.realtime_options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
 
+			// Software codecs in FFmpeg all use yuv420p.
+			options.format = Granite::VideoEncoder::Format::YUV420P;
+
 			if (video_encode.bit_depth > 8 && options.encoder)
 			{
 				if (strstr(options.encoder, "nvenc") != nullptr)
@@ -1174,8 +1177,15 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					options.format = Granite::VideoEncoder::Format::NV12;
 				}
 			}
-			else
+
+			if (options.format == Granite::VideoEncoder::Format::YUV420P &&
+			    (strstr(options.encoder, "nvenc") != nullptr ||
+			     strstr(options.encoder, "vaapi") != nullptr ||
+			     strstr(options.encoder, "_pyro") != nullptr))
+			{
+				// GPU encoders only understand NV12.
 				options.format = Granite::VideoEncoder::Format::NV12;
+			}
 
 			if (video_encode.audio)
 				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
