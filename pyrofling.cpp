@@ -1067,6 +1067,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		unsigned bit_depth = 8;
 		bool hdr10 = false;
 		bool fec = false;
+		bool walltime_to_pts = true;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1139,26 +1140,26 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.frame_timebase.num = 1;
 			options.frame_timebase.den = int(video_encode.fps);
 			options.encoder = video_encode.encoder.c_str();
-			options.realtime = true;
+			options.walltime_to_pts = video_encode.walltime_to_pts;
 
 			// For now, just assume the inputs are properly PQ encoded.
 			// TODO: Deal with color space conversion as needed, etc.
 			options.hdr10 = video_encode.hdr10;
 
 			if (!video_encode.muxer.empty())
-				options.realtime_options.muxer_format = video_encode.muxer.c_str();
+				options.muxer_format = video_encode.muxer.c_str();
 			else if (video_encode.path.find("://") != std::string::npos)
-				options.realtime_options.muxer_format = "flv";
+				options.muxer_format = "flv";
 
-			options.realtime_options.bitrate_kbits = video_encode.bitrate_kbits;
-			options.realtime_options.max_bitrate_kbits = video_encode.max_bitrate_kbits;
-			options.realtime_options.gop_seconds = video_encode.gop_seconds;
+			options.bitrate_kbits = video_encode.bitrate_kbits;
+			options.max_bitrate_kbits = video_encode.max_bitrate_kbits;
+			options.gop_seconds = video_encode.gop_seconds;
 			options.low_latency = video_encode.low_latency;
-			options.realtime_options.vbv_size_kbits = video_encode.vbv_size_kbits;
-			options.realtime_options.x264_preset = video_encode.x264_preset.empty() ? nullptr : video_encode.x264_preset.c_str();
-			options.realtime_options.x264_tune = video_encode.x264_tune.empty() ? nullptr : video_encode.x264_tune.c_str();
-			options.realtime_options.threads = video_encode.threads;
-			options.realtime_options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
+			options.vbv_size_kbits = video_encode.vbv_size_kbits;
+			options.x264_preset = video_encode.x264_preset.empty() ? nullptr : video_encode.x264_preset.c_str();
+			options.x264_tune = video_encode.x264_tune.empty() ? nullptr : video_encode.x264_tune.c_str();
+			options.threads = video_encode.threads;
+			options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
 
 			// Software codecs in FFmpeg all use yuv420p.
 			options.format = Granite::VideoEncoder::Format::YUV420P;
@@ -1185,6 +1186,14 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			{
 				// GPU encoders only understand NV12.
 				options.format = Granite::VideoEncoder::Format::NV12;
+			}
+
+			// Only bother with limited/left with the usual suspect codecs that expect it.
+			if (strstr(options.encoder, "264") == nullptr && strstr(options.encoder, "265") == nullptr &&
+			    strstr(options.encoder, "hevc") == nullptr && strstr(options.encoder, "av1") == nullptr)
+			{
+				options.color_full_range = true;
+				options.siting = Granite::VideoEncoder::ChromaSiting::Center;
 			}
 
 			if (video_encode.audio)
@@ -1433,6 +1442,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--10-bit", [&](Util::CLIParser &) { opts.bit_depth = 10; });
 	cbs.add("--hdr10", [&](Util::CLIParser &) { opts.hdr10 = true; });
 	cbs.add("--fec", [&](Util::CLIParser &) { opts.fec = true; });
+	cbs.add("--offline", [&](Util::CLIParser &) { opts.walltime_to_pts = false; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
