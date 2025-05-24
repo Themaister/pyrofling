@@ -126,6 +126,9 @@ bool PyroStreamClient::connect(const char *host, const char *port)
 	if (!udp.connect(PyroFling::Socket::Proto::UDP, host, port))
 		return false;
 
+	if (!udp.init_recv_thread(PYRO_MAX_UDP_DATAGRAM_SIZE, 1024))
+		return false;
+
 	return true;
 }
 
@@ -378,8 +381,8 @@ bool PyroStreamClient::iterate()
 	if (simulate_drop || simulate_reordering)
 	{
 		auto &sim = simulate_packets[num_simulated_packets];
-		sim.size = udp.read_partial(&sim, sizeof(sim), &tcp);
-		if (sim.size <= sizeof(pyro_payload_header) || sim.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
+		sim.size = udp.read_thread_packet(&sim, PYRO_MAX_UDP_DATAGRAM_SIZE);
+		if (sim.size <= sizeof(pyro_payload_header))
 			return false;
 
 		if ((payload.header.encoded & PYRO_PAYLOAD_STREAM_TYPE_BIT) == 0)
@@ -456,7 +459,7 @@ bool PyroStreamClient::iterate()
 	else
 #endif
 	{
-		payload.size = udp.read_partial(&payload, sizeof(payload), &tcp);
+		payload.size = udp.read_thread_packet(&payload, PYRO_MAX_UDP_DATAGRAM_SIZE);
 	}
 
 	if (payload.size < sizeof(pyro_payload_header) || payload.size > PYRO_MAX_UDP_DATAGRAM_SIZE)

@@ -1,10 +1,13 @@
 #include "simple_socket.hpp"
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef _WIN32
 #include <ws2tcpip.h>
 #include <winsock2.h>
+#undef SHUT_RD
+#define SHUT_RD SD_RECEIVE
 #else
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -17,6 +20,22 @@ namespace PyroFling
 {
 Socket::~Socket()
 {
+	if (thr.joinable())
+	{
+		// Unblock the thread in case it's waiting for us to read data.
+		{
+			std::lock_guard<std::mutex> holder{lock};
+			ring.read_count = ring.write_count;
+			cond.notify_one();
+		}
+
+		// If thread is blocking on a read, it should unblock now.
+		if (fd >= 0)
+			shutdown(fd, SHUT_RD);
+
+		thr.join();
+	}
+
 	if (fd >= 0)
 		closesocket(fd);
 }
@@ -86,6 +105,97 @@ bool Socket::connect(Proto proto, const char *addr, const char *port)
 		return false;
 
 	return true;
+}
+
+bool Socket::init_recv_thread(size_t max_packet_size, size_t num_packets)
+{
+	if (thr.joinable())
+		return false;
+
+	if (num_packets & (num_packets - 1))
+	{
+		fprintf(stderr, "num_packets must be POT.\n");
+		return false;
+	}
+
+	ring.packets.clear();
+	ring.packets.reserve(num_packets);
+	for (size_t i = 0; i < num_packets; i++)
+		ring.packets.push_back({ std::unique_ptr<char []>{new char[max_packet_size]}, 0 });
+	ring.max_packet_size = max_packet_size;
+
+	try
+	{
+		thr = std::thread(&Socket::recv_thread, this);
+	}
+	catch (const std::exception &e)
+	{
+		fprintf(stderr, "Failed to create thread.\n");
+		return false;
+	}
+
+	return true;
+}
+
+void Socket::recv_thread()
+{
+	uint32_t mask = ring.packets.size() - 1;
+
+	for (;;)
+	{
+		{
+			std::unique_lock<std::mutex> holder{lock};
+			cond.wait(holder, [this]() {
+				uint32_t queued = ring.write_count - ring.read_count;
+				return queued < ring.packets.size();
+			});
+		}
+
+		auto &packet = ring.packets[ring.write_count & mask];
+
+		int ret = int(::recv(fd, packet.data.get(), ring.max_packet_size, 0));
+		if (ret <= 0)
+			break;
+
+		packet.size = ret;
+		std::lock_guard<std::mutex> holder{lock};
+		ring.write_count++;
+		cond.notify_one();
+	}
+
+	std::lock_guard<std::mutex> holder{lock};
+	ring.dead = true;
+	cond.notify_one();
+}
+
+size_t Socket::read_thread_packet(void *data, size_t size)
+{
+	bool has_packet = false;
+
+	{
+		std::unique_lock<std::mutex> holder{lock};
+		auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		if (!cond.wait_until(holder, deadline, [this]() {
+			return ring.dead || ring.write_count != ring.read_count; }))
+		{
+			return 0;
+		}
+
+		has_packet = ring.write_count != ring.read_count;
+	}
+
+	if (!has_packet)
+		return 0;
+
+	auto &packet = ring.packets[ring.read_count & (ring.packets.size() - 1)];
+
+	size = std::min<size_t>(size, packet.size);
+	memcpy(data, packet.data.get(), size);
+
+	std::lock_guard<std::mutex> holder{lock};
+	ring.read_count++;
+	cond.notify_one();
+	return size;
 }
 
 bool Socket::read(void *data_, size_t size, const Socket *sentinel)
