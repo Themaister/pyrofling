@@ -373,6 +373,12 @@ PyroStreamClient::get_stream_packet(ReconstructedPacket *stream_base, uint32_t p
 
 #define LOG(...) if (!is_audio && debug_log) fprintf(debug_log.get(), __VA_ARGS__)
 
+static bool video_codec_is_self_recovering(const pyro_codec_parameters &codec)
+{
+	// Alternatively, we have intra refresh in other codecs, but that's TBD.
+	return codec.video_codec == PYRO_VIDEO_CODEC_PYROWAVE;
+}
+
 bool PyroStreamClient::iterate()
 {
 	Packet payload;
@@ -568,7 +574,7 @@ bool PyroStreamClient::iterate()
 			else
 				progress.total_dropped_video_packets += delta - 1;
 
-			if (!is_audio && delta > 1)
+			if (!is_audio && delta > 1 && !video_codec_is_self_recovering(codec))
 				request_immediate_feedback = true;
 		}
 

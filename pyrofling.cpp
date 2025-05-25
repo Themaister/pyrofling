@@ -1106,6 +1106,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			Vulkan::Context::SystemHandles handles = {};
 			handles.thread_group = &group;
 			handles.timeline_trace_file = group.get_timeline_trace_file();
+			gpu.context->context.set_num_thread_indices(group.get_num_threads() + 1);
 			gpu.context->context.set_system_handles(handles);
 
 			gpu.context->context.set_instance_factory(this);
