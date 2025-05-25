@@ -392,6 +392,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 						if (decoder.is_eof())
 							return false;
 						missed_deadlines++;
+
+						// It's possible we can decode a damaged frame instead, depends on the codec.
+						decoder.acquire_damaged_video_frame(next_frame);
 					}
 				}
 				else if (!decoder.acquire_video_frame(next_frame, 5000))
