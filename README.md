@@ -1,11 +1,8 @@
 # PyroFling
 
 PyroFling is a simple solution for capturing Vulkan applications and
-broadcast video and audio to streaming platforms using FFmpeg.
+broadcast video and audio to streaming platforms using FFmpeg, PyroEnc and PyroWave.
 The recording itself is implemented as a separate process which acts like a very basic compositor.
-
-The end-goal is to use Vulkan video encoding to get hardware accelerated encode.
-For now, x264 is used.
 
 ## Building
 
@@ -90,12 +87,93 @@ Should generally be left alone.
     [--threads THREADS]
     [--preset PRESET]
     [--tune PRESET]
-    [--gop-seconds GOP_SECONDS]
+    [--gop-seconds GOP_SECONDS (negative for IDR-on-demand mode if intra-refresh is not supported)]
     [--bitrate-kbits SIZE]
     [--max-bitrate-kbits SIZE]
     [--vbv-size-kbits SIZE]
     [--local-backup PATH]
+    [--encoder ENCODER]
+    [--muxer MUXER]
+    [--port PORT]
+    [--audio-rate RATE]
+    [--low-latency]
+    [--no-audio]
+    [--immediate-encode]
     url
+```
+
+### Peer-to-peer game streaming with low latency
+
+#### --encoder
+
+`h264_pyro`, `h265_pyro` and `pyrowave` (my own intra-only codec) are good for this.
+For the H.264 and H.265 codecs, Vulkan video support is required.
+
+```
+$ pyrofling --encoder h264_pyro --width 1920 --height 1080 --bitrate-kbits 50000 --immediate-encode --port 9000 --fps 60 --low-latency --gop-seconds -1
+$ pyrofling --encoder pyrowave --width 1920 --height 1080 --bitrate-kbits 250000 --immediate-encode --port 9000 --fps 60 --low-latency
+```
+
+```
+PYROFLING=1 PYROFLING_SYNC=server somevulkanapp
+```
+
+Negative GOP seconds means infinite GOP. IDR frames are automatically sent on packet losses.
+
+#### --fec
+
+Forward error correction can be added with `--fec`. This adds about 25% more network bandwidth on top,
+and can help correct errors.
+
+The server reports statistics every second, e.g.
+
+```
+PROGRESS for localhost @ 44860: 31539 complete, 129 dropped video, 13 dropped audio, 259 key frames, 500 FEC recovered.
+```
+
+This can be used to eye-ball the health of the connection.
+
+#### Client side
+
+For VRR displays, or where absolute minimal latency (at cost of jitter) is desired:
+
+```
+pyrofling-viewer "pyro://<ip>:<port>"
+```
+
+Replace `<ip>` and `<port>` as desired.
+
+For frace-paced output:
+
+This aims to receive the next frame at 0.0 seconds offset after previous vblank is complete,
+giving us ~16ms from when packets are received until they reach display for 60 FPS.
+Deadline at 0.008 means that if we don't receive a frame until 0.008, assume it's not arriving,
+or attempt to recover a damaged frame if there has been some packet loss, especially with pyrowave
+since it's robust against errors.
+
+```
+pyrofling-viewer "pyro://<ip>:<port>?phase_locked=0.0&deadline=0.008"
+```
+
+#### Client stats window
+
+While client is live, press 'V' key to display a HUD.
+Gamepad inputs registered by the client will show up as a green box in the top-left corner.
+
+#### Gamepad hand-off
+
+To take control with a game-pad, the "mode" button can be used.
+E.g. on a PS4 or PS5 controller, that's the PlayStation button.
+On controllers where this does not exist, like the Steam Deck, press Start + Select + L2 + R2.
+This way, multiple clients can do virtual couch coop with little to no friction.
+
+##### Connecting purely as a gamepad client
+
+This can be useful when multiple people want to share the same virtual controller (for e.g. virtual couch coop).
+The player using the mode button takes control until someone else takes control.
+
+```
+pyrofling-gamepad "<ip>:<port>"
 ```
 
 ### Streaming to Twitch example (1080p60)
@@ -121,10 +199,7 @@ E.g.:
 `sudo tc qdisc add dev $iface root fq maxrate 100000000 flow_limit 2000 quantum 2048`
 
 to limit outgoing traffic to 100 mbit on Linux.
-Can be useful when doing real-time streaming.
-Increase maximum rcvbuf size on Linux:
-
-`sudo sysctl -w netcore.rmem_default=2000000`
+Can be useful when doing real-time streaming over long distance.
 
 ### Special features
 
@@ -153,6 +228,10 @@ Alternatively, it's possible to redirect the monitor stream of an audio output a
 
 Currently, the server just encodes one of the clients' images by scaling it to the encode resolution.
 In theory, it would be possible to add various overlays (ala OBS) should the need arise.
+
+### Security
+
+There is none at this time. Use at your own risk and do not transmit anything sensitive. Use at your own risk.
 
 ## License
 
