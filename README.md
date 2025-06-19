@@ -164,7 +164,7 @@ Gamepad inputs registered by the client will show up as a green box in the top-l
 
 To take control with a game-pad, the "mode" button can be used.
 E.g. on a PS4 or PS5 controller, that's the PlayStation button.
-On controllers where this does not exist, like the Steam Deck, press Start + Select + L2 + R2.
+On controllers where this does not exist, like the Steam Deck, press Start + Select + L1 + R1.
 This way, multiple clients can do virtual couch coop with little to no friction.
 
 ##### Connecting purely as a gamepad client
