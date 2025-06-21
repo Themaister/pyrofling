@@ -1146,7 +1146,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 
 	auto itr = std::remove_if(surfaceFormats.begin(), surfaceFormats.end(), [](const VkSurfaceFormatKHR &fmt) {
 		return fmt.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
-		       fmt.colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT;
+		       fmt.colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+		       fmt.colorSpace != VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
 	});
 	surfaceFormats.erase(itr, surfaceFormats.end());
 
@@ -1184,9 +1185,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
 	if (vr != VK_SUCCESS)
 		return vr;
 
-	// For now, pyrofling only understands sRGB color space. TODO: Also expose PQ.
 	auto itr = std::remove_if(surfaceFormats.begin(), surfaceFormats.end(), [](const VkSurfaceFormat2KHR &fmt) {
-		return fmt.surfaceFormat.colorSpace != VK_COLORSPACE_SRGB_NONLINEAR_KHR;
+		return fmt.surfaceFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
+		       fmt.surfaceFormat.colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+		       fmt.surfaceFormat.colorSpace != VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
 	});
 	surfaceFormats.erase(itr, surfaceFormats.end());
 

@@ -224,11 +224,18 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			}
 
 			// TODO: Add query for formats ala vkGetPhysicalDeviceSurfaceFormatsKHR.
-			if (image_create.wire.vk_color_space != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+			if (image_create.wire.vk_color_space != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
+			    image_create.wire.vk_color_space != VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+			    image_create.wire.vk_color_space != VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT)
 			{
-				LOGE("Only sRGB color space is currently supported.\n");
+				LOGE("Unrecognized sRGB color space used.\n");
 				return send_message(fd, MessageType::ErrorParameter, image_create.get_serial());
 			}
+
+			color_space = VkColorSpaceKHR(image_create.wire.vk_color_space);
+
+			LOGI("Received image group request: format %d, color space %d\n",
+			     image_create.wire.vk_format, image_create.wire.vk_color_space);
 
 			VkImageFormatListCreateInfoKHR format_info = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR };
 			if (image_create.wire.vk_num_view_formats)
@@ -243,7 +250,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 						info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
 					else if (format_info.pViewFormats[i] == VK_FORMAT_B8G8R8A8_UNORM && info.format == VK_FORMAT_B8G8R8A8_SRGB)
 						info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
-					else if (format_info.pViewFormats[i] == VK_FORMAT_A8B8G8R8_SRGB_PACK32 && info.format == VK_FORMAT_A8B8G8R8_SRGB_PACK32)
+					if (format_info.pViewFormats[i] == VK_FORMAT_R8G8B8A8_SRGB && info.format == VK_FORMAT_R8G8B8A8_UNORM)
+						info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
+					else if (format_info.pViewFormats[i] == VK_FORMAT_B8G8R8A8_SRGB && info.format == VK_FORMAT_B8G8R8A8_UNORM)
 						info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
 				}
 			}
@@ -693,6 +702,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		SwapchainServer &server;
 		DeviceContextAssociation association = {};
 		std::vector<SwapchainImage> images;
+		VkColorSpaceKHR color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 
 		struct TimestampCompleteMapping
 		{
@@ -755,6 +765,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				auto info = Vulkan::ImageCreateInfo::immutable_2d_image(1, 1, VK_FORMAT_R8G8B8A8_UNORM);
 				info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 				info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+				info.misc |= Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT;
 				auto img = encoder_device->create_image(info);
 				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				                   0, 0,
@@ -810,7 +821,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				}
 
 				if (view)
-					encoder->process_rgb(*cmd, *ycbcr_pipeline, *view);
+					encoder->process_rgb(*cmd, *ycbcr_pipeline, *view, surface.chain->color_space);
 			}
 
 			encoder->submit_process_rgb(cmd, *ycbcr_pipeline);
