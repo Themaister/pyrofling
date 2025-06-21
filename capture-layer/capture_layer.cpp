@@ -920,6 +920,16 @@ bool SurfaceState::initImageGroup(uint32_t count)
 	imageGroupWire.vk_image_flags = info.flags;
 	imageGroupWire.vk_image_usage = info.usage;
 
+	if (const char *env = getenv("PYROFLING_FORCE_VK_COLOR_SPACE"))
+	{
+		if (strcmp(env, "HDR10") == 0)
+			imageGroupWire.vk_color_space = VK_COLOR_SPACE_HDR10_ST2084_EXT;
+		else if (strcmp(env, "scRGB") == 0)
+			imageGroupWire.vk_color_space = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+		else
+			imageGroupWire.vk_color_space = int(strtol(env, nullptr, 0));
+	}
+
 	return true;
 }
 

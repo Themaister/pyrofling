@@ -603,6 +603,12 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					LOGI("Flipping over to scRGB color space.\n");
 					get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::scRGB);
 				}
+				else if (frame.view->get_format() == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+				         get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::HDR10)
+				{
+					LOGI("Flipping over to HDR10 color space.\n");
+					get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::HDR10);
+				}
 
 				cmd->set_opaque_sprite_state();
 				cmd->set_program(blit);
