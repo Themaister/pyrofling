@@ -597,6 +597,13 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			cmd->begin_render_pass(rp);
 			if (frame.view)
 			{
+				if (frame.view->get_format() == VK_FORMAT_R16G16B16A16_SFLOAT &&
+				    get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::scRGB)
+				{
+					LOGI("Flipping over to scRGB color space.\n");
+					get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::scRGB);
+				}
+
 				cmd->set_opaque_sprite_state();
 				cmd->set_program(blit);
 				cmd->set_texture(0, 0, *frame.view, Vulkan::StockSampler::LinearClamp);

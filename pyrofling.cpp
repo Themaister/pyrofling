@@ -1180,10 +1180,14 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				}
 			}
 
-			if (options.format == Granite::VideoEncoder::Format::YUV420P &&
-			    (strstr(options.encoder, "nvenc") != nullptr ||
-			     strstr(options.encoder, "vaapi") != nullptr ||
-			     strstr(options.encoder, "_pyro") != nullptr))
+			if (options.hdr10 && strcmp(options.encoder, "pyrowave") == 0)
+			{
+				options.format = Granite::VideoEncoder::Format::YUV420P16;
+			}
+			else if (options.format == Granite::VideoEncoder::Format::YUV420P &&
+			         (strstr(options.encoder, "nvenc") != nullptr ||
+			          strstr(options.encoder, "vaapi") != nullptr ||
+			          strstr(options.encoder, "_pyro") != nullptr))
 			{
 				// GPU encoders only understand NV12.
 				options.format = Granite::VideoEncoder::Format::NV12;
