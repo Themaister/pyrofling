@@ -133,6 +133,24 @@ PROGRESS for localhost @ 44860: 31539 complete, 129 dropped video, 13 dropped au
 
 This can be used to eye-ball the health of the connection.
 
+#### HDR
+
+There is experimental HDR encoding supported. Add `--hdr10` to server which will transmit video in BT.2020 / PQ instead of BT.709.
+When capturing games, especially on Proton, this might be needed when running the game:
+
+```
+PYROFLING_FORCE_VK_COLOR_SPACE=HDR10 DXVK_HDR=1 PYROFLING=1 PYROFLING_SYNC=server %command%
+```
+
+`scRGB` is also supported if game wants to use that. This workaround is only needed
+when the WSI of the machine running the game does not natively support HDR WSI.
+Once Proton moves over to Wayland fully, this is less likely to be an issue.
+
+#### 4:4:4 chroma subsampling
+
+Especially when encoding HDR, 4:4:4 chroma subsampling seems very important.
+This is currently only supported for PyroWave and non-GPU accelerated codecs in FFmpeg. GPU accelerated H.264 / H.265 is TBD.
+
 #### Client side
 
 For VRR displays, or where absolute minimal latency (at cost of jitter) is desired:
