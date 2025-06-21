@@ -1079,6 +1079,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		bool hdr10 = false;
 		bool fec = false;
 		bool walltime_to_pts = true;
+		bool chroma_444 = false;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
 		std::string local_backup_path;
@@ -1174,7 +1175,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			options.local_backup_path = video_encode.local_backup_path.empty() ? nullptr : video_encode.local_backup_path.c_str();
 
 			// Software codecs in FFmpeg all use yuv420p.
-			options.format = Granite::VideoEncoder::Format::YUV420P;
+			options.format = video_encode.chroma_444 ?
+			                 Granite::VideoEncoder::Format::YUV444P :
+							 Granite::VideoEncoder::Format::YUV420P;
 
 			if (video_encode.bit_depth > 8 && options.encoder)
 			{
@@ -1193,7 +1196,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			if (options.hdr10 && strcmp(options.encoder, "pyrowave") == 0)
 			{
-				options.format = Granite::VideoEncoder::Format::YUV420P16;
+				options.format = video_encode.chroma_444 ?
+				                 Granite::VideoEncoder::Format::YUV444P16 :
+								 Granite::VideoEncoder::Format::YUV420P16;
 			}
 			else if (options.format == Granite::VideoEncoder::Format::YUV420P &&
 			         (strstr(options.encoder, "nvenc") != nullptr ||
@@ -1207,6 +1212,12 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			// Only bother with limited/left with the usual suspect codecs that expect it.
 			if (strstr(options.encoder, "264") == nullptr && strstr(options.encoder, "265") == nullptr &&
 			    strstr(options.encoder, "hevc") == nullptr && strstr(options.encoder, "av1") == nullptr)
+			{
+				options.color_full_range = true;
+				options.siting = Granite::VideoEncoder::ChromaSiting::Center;
+			}
+
+			if (video_encode.chroma_444)
 			{
 				options.color_full_range = true;
 				options.siting = Granite::VideoEncoder::ChromaSiting::Center;
@@ -1456,7 +1467,8 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--no-audio", [&](Util::CLIParser &) { opts.audio = false; });
 	cbs.add("--immediate-encode", [&](Util::CLIParser &) { opts.immediate = true; });
 	cbs.add("--10-bit", [&](Util::CLIParser &) { opts.bit_depth = 10; });
-	cbs.add("--hdr10", [&](Util::CLIParser &) { opts.hdr10 = true; });
+	cbs.add("--hdr10", [&](Util::CLIParser &) { opts.hdr10 = true; opts.bit_depth = 10; });
+	cbs.add("--444", [&](Util::CLIParser &) { opts.chroma_444 = true; });
 	cbs.add("--fec", [&](Util::CLIParser &) { opts.fec = true; });
 	cbs.add("--offline", [&](Util::CLIParser &) { opts.walltime_to_pts = false; });
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
