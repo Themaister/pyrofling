@@ -1187,18 +1187,13 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					options.format = Granite::VideoEncoder::Format::P010;
 				else if (strstr(options.encoder, "pyro") != nullptr)
 					options.format = Granite::VideoEncoder::Format::P016;
-				else
-				{
-					LOGW("Unsure which 10-bit pixel format to use.\n");
-					options.format = Granite::VideoEncoder::Format::NV12;
-				}
 			}
 
-			if (options.hdr10 && strcmp(options.encoder, "pyrowave") == 0)
+			if (options.hdr10 && (strcmp(options.encoder, "pyrowave") == 0 || strcmp(options.encoder, "rawvideo") == 0))
 			{
 				options.format = video_encode.chroma_444 ?
 				                 Granite::VideoEncoder::Format::YUV444P16 :
-								 Granite::VideoEncoder::Format::YUV420P16;
+				                 Granite::VideoEncoder::Format::YUV420P16;
 			}
 			else if (options.format == Granite::VideoEncoder::Format::YUV420P &&
 			         (strstr(options.encoder, "nvenc") != nullptr ||
