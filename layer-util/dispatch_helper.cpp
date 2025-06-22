@@ -68,6 +68,7 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(CreateSemaphore);
 	F(DestroySemaphore);
 	F(WaitForPresentKHR);
+	F(SetHdrMetadataEXT);
 #ifndef _WIN32
 	F(GetSemaphoreFdKHR);
 	F(ImportSemaphoreFdKHR);

@@ -139,6 +139,8 @@ struct VkLayerDispatchTable
 	PFN_vkCreateSemaphore CreateSemaphore;
 	PFN_vkDestroySemaphore DestroySemaphore;
 
+	PFN_vkSetHdrMetadataEXT SetHdrMetadataEXT;
+
 #ifndef _WIN32
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
 	PFN_vkImportSemaphoreFdKHR ImportSemaphoreFdKHR;

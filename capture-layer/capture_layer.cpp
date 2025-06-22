@@ -1402,6 +1402,30 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	return result;
 }
 
+static VKAPI_ATTR void VKAPI_CALL
+SetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount,
+                  const VkSwapchainKHR *pSwapchains,
+                  const VkHdrMetadataEXT *pMetadata)
+{
+	auto *layer = getDeviceLayer(device);
+	layer->getTable()->SetHdrMetadataEXT(device, swapchainCount, pSwapchains, pMetadata);
+	fprintf(stderr, "pyrofling: HDR metadata:\n"
+	                "\tR = (%.4f, %.4f)\n"
+	                "\tG = (%.4f, %.4f)\n"
+	                "\tB = (%.4f, %.4f)\n"
+	                "\tW = (%.4f, %.4f)\n"
+	                "\tMinLuminance = %.4f\n"
+	                "\tMaxLuminance = %.4f\n"
+	                "\tMaxFALL = %.4f\n"
+	                "\tMaxCLL = %.4f\n",
+	        pMetadata->displayPrimaryRed.x, pMetadata->displayPrimaryRed.y,
+	        pMetadata->displayPrimaryGreen.x, pMetadata->displayPrimaryGreen.y,
+	        pMetadata->displayPrimaryBlue.x, pMetadata->displayPrimaryBlue.y,
+	        pMetadata->whitePoint.x, pMetadata->whitePoint.y,
+	        pMetadata->minLuminance, pMetadata->maxLuminance,
+	        pMetadata->maxFrameAverageLightLevel, pMetadata->maxContentLightLevel);
+}
+
 static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 {
 	static const struct
@@ -1450,6 +1474,7 @@ static PFN_vkVoidFunction interceptDeviceCommand(const char *pName)
 	} coreDeviceCommands[] = {
 		{ "vkGetDeviceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CAPTURE_vkGetDeviceProcAddr) },
 		{ "vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(QueuePresentKHR) },
+		{ "vkSetHdrMetadataEXT", reinterpret_cast<PFN_vkVoidFunction>(SetHdrMetadataEXT) },
 		{ "vkWaitForPresentKHR", reinterpret_cast<PFN_vkVoidFunction>(WaitForPresentKHR) },
 		{ "vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(CreateSwapchainKHR) },
 		{ "vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySwapchainKHR) },
