@@ -1204,20 +1204,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				options.format = Granite::VideoEncoder::Format::NV12;
 			}
 
-			// Only bother with limited/left with the usual suspect codecs that expect it.
-			if (strstr(options.encoder, "264") == nullptr && strstr(options.encoder, "265") == nullptr &&
-			    strstr(options.encoder, "hevc") == nullptr && strstr(options.encoder, "av1") == nullptr)
-			{
-				options.color_full_range = true;
-				options.siting = Granite::VideoEncoder::ChromaSiting::Center;
-			}
-
-			if (video_encode.chroma_444)
-			{
-				options.color_full_range = true;
-				options.siting = Granite::VideoEncoder::ChromaSiting::Center;
-			}
-
 			if (video_encode.audio)
 				audio_record.reset(Granite::Audio::create_default_audio_record_backend("Stream", float(video_encode.audio_rate), 2));
 
