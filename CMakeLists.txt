@@ -100,6 +100,11 @@ if (NOT PYROFLING_LAYER_ONLY)
     set_target_properties(pyrofling-viewer PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
     install(TARGETS pyrofling-viewer)
 
+    add_granite_application(pyrofling-latency-tester pyrofling_latency_tester.cpp)
+    target_link_libraries(pyrofling-latency-tester PRIVATE granite-audio viewer-fonts)
+    set_target_properties(pyrofling-latency-tester PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
+    install(TARGETS pyrofling-latency-tester)
+
     add_granite_offline_tool(pyrofling-gamepad pyrofling_gamepad.cpp)
     target_link_libraries(pyrofling-gamepad PRIVATE pyro-client SDL3-static granite-input-sdl)
     if (WIN32)
