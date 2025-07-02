@@ -45,7 +45,321 @@
 #include <fcntl.h>
 #include <assert.h>
 
+#ifdef HAVE_PIPEWIRE
+#include <pipewire/pipewire.h>
+#include <spa/utils/result.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/param/props.h>
+#include <spa/debug/format.h>
+#endif
+
 using namespace PyroFling;
+
+// Some loose copy-pasta from Gamescope code.
+#ifdef HAVE_PIPEWIRE
+class SwapchainServer;
+
+class PipewireStream : public Handler
+{
+public:
+	PipewireStream(Dispatcher &dispatcher, SwapchainServer &server, Vulkan::Device &device);
+	bool init(unsigned width, unsigned height, unsigned fps);
+
+	~PipewireStream();
+
+	int get_fd();
+	bool iterate();
+	void process();
+
+	void stream_state_changed(pw_stream_state old, pw_stream_state state, const char *error);
+	void stream_param_changed(uint32_t id, const spa_pod *param);
+
+	bool handle(const FileHandle &fd, uint32_t id) override;
+
+	void release_id(uint32_t id) override;
+
+	void send_encoding(const Vulkan::Image &img);
+
+private:
+	SwapchainServer &server;
+	Vulkan::Device &device;
+	pw_loop *loop = nullptr;
+	pw_stream *stream = nullptr;
+	spa_video_info_raw raw_video_info = {};
+	uint32_t stride = 0;
+};
+
+static void on_stream_state_changed(void *data_, pw_stream_state old, pw_stream_state state, const char *error)
+{
+	static_cast<PipewireStream *>(data_)->stream_state_changed(old, state, error);
+}
+
+static void on_stream_param_changed(void *data_, uint32_t id, const spa_pod *param)
+{
+	static_cast<PipewireStream *>(data_)->stream_param_changed(id, param);
+}
+
+static void on_process(void *data_)
+{
+	static_cast<PipewireStream *>(data_)->process();
+}
+
+PipewireStream::PipewireStream(Dispatcher &dispatcher_, SwapchainServer &server_, Vulkan::Device &device_)
+	: Handler(dispatcher_), server(server_), device(device_)
+{
+}
+
+void PipewireStream::process()
+{
+	// Dequeue buffers and encode them.
+	for (;;)
+	{
+		struct pw_buffer *t;
+		if ((t = pw_stream_dequeue_buffer(stream)) == nullptr)
+			break;
+
+		spa_buffer *buffer = t->buffer;
+
+		if (buffer->n_datas != 1)
+		{
+			// Planar data is unexpected ...
+			LOGE("Got planar data. This should not happen.\n");
+			pw_stream_queue_buffer(stream, t);
+			continue;
+		}
+
+		auto info = Vulkan::ImageCreateInfo::immutable_2d_image(
+				raw_video_info.size.width,
+				raw_video_info.size.height,
+				VK_FORMAT_B8G8R8A8_SRGB);
+
+		info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+		info.misc = Vulkan::IMAGE_MISC_MUTABLE_SRGB_BIT | Vulkan::IMAGE_MISC_EXTERNAL_MEMORY_BIT;
+		// Vulkan takes ownership of the fd, so dup it first.
+		info.external.handle = dup(int(buffer->datas[0].fd));
+		info.external.memory_handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+		VkImageDrmFormatModifierExplicitCreateInfoEXT explicit_info =
+				{ VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT };
+		VkSubresourceLayout layout = {};
+		explicit_info.drmFormatModifier = raw_video_info.modifier;
+		explicit_info.drmFormatModifierPlaneCount = 1;
+		explicit_info.pPlaneLayouts = &layout;
+		layout.offset = buffer->datas[0].chunk->offset;
+		layout.rowPitch = buffer->datas[0].chunk->stride;
+		info.pnext = &explicit_info;
+
+		// TODO: memoize the imports? fstat + inodes is apparently a thing.
+		auto img = device.create_image(info);
+		if (img)
+			send_encoding(*img);
+		else
+			LOGE("Failed to import DMABUF.\n");
+
+		// Pipewire relies on implicit sync supposedly,
+		// so after we have submitted conversion work, we're done.
+		pw_stream_queue_buffer(stream, t);
+	}
+}
+
+void PipewireStream::stream_param_changed(uint32_t id, const spa_pod *param)
+{
+	uint8_t params_buffer[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
+	const struct spa_pod *params[1];
+
+	/* nullptr means to clear the format */
+	if (param == nullptr || id != SPA_PARAM_Format)
+		return;
+
+	uint32_t media_type, media_subtype;
+	if (spa_format_parse(param, &media_type, &media_subtype) < 0)
+	{
+		LOGE("Failed to parse spa format.\n");
+		return;
+	}
+
+	if (media_type != SPA_MEDIA_TYPE_video || media_subtype != SPA_MEDIA_SUBTYPE_raw)
+	{
+		LOGE("Received something not raw video.\n");
+		return;
+	}
+
+	/* call a helper function to parse the format for us. */
+	spa_format_video_raw_parse(param, &raw_video_info);
+
+	if (raw_video_info.format != SPA_VIDEO_FORMAT_BGRx)
+	{
+		LOGE("Expected BGRx format.\n");
+		pw_stream_set_error(stream, -EINVAL, "unknown pixel format");
+		return;
+	}
+
+	if (raw_video_info.size.width == 0 || raw_video_info.size.height == 0)
+	{
+		pw_stream_set_error(stream, -EINVAL, "invalid size");
+		return;
+	}
+
+	stride = SPA_ROUND_UP_N(raw_video_info.size.width * 4, 4);
+
+	// A SPA_TYPE_OBJECT_ParamBuffers object defines the acceptable size, number, stride, etc of the buffers.
+	params[0] = static_cast<const struct spa_pod *>(
+			spa_pod_builder_add_object(&b,
+			                           SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+			                           SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, 64),
+			                           SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
+			                           SPA_PARAM_BUFFERS_size, SPA_POD_Int(stride * raw_video_info.size.height),
+			                           SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
+			                           SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_DmaBuf))));
+
+	// We are done
+	pw_stream_update_params(stream, params, 1);
+}
+
+void PipewireStream::stream_state_changed(pw_stream_state old, pw_stream_state state, const char *error)
+{
+	LOGI("PipeWire state: %s\n", pw_stream_state_as_string(state));
+	if (error)
+		LOGE("PipeWire error: \"%s\"\n", error);
+
+	switch (state)
+	{
+	case PW_STREAM_STATE_UNCONNECTED:
+		break;
+	case PW_STREAM_STATE_PAUSED:
+		break;
+	case PW_STREAM_STATE_STREAMING:
+	default:
+		break;
+	}
+}
+
+bool PipewireStream::iterate()
+{
+	return pw_loop_iterate(loop, -1) >= 0;
+}
+
+int PipewireStream::get_fd()
+{
+	return pw_loop_get_fd(loop);
+}
+
+bool PipewireStream::init(unsigned width, unsigned height, unsigned fps)
+{
+	if (!device.get_device_features().supports_drm_modifiers)
+	{
+		LOGW("Device does not support DRM modifiers. Ignoring pipewire.\n");
+		return false;
+	}
+
+	int argc = 1;
+	char arg[] = "pyrofling";
+	char *argv[] = { arg, nullptr };
+	char **argvs = argv;
+
+	pw_init(&argc, &argvs);
+
+	loop = pw_loop_new(nullptr);
+	if (!loop)
+		return false;
+
+	auto *props = pw_properties_new(
+			PW_KEY_MEDIA_TYPE, "Video",
+			PW_KEY_MEDIA_CATEGORY, "Capture",
+			PW_KEY_MEDIA_ROLE, "Camera",
+			nullptr);
+
+	static const struct pw_stream_events stream_events = {
+		.version = PW_VERSION_STREAM_EVENTS,
+		.state_changed = on_stream_state_changed,
+		.param_changed = on_stream_param_changed,
+		.process = on_process,
+	};
+
+	// props ownership is taken
+	stream = pw_stream_new_simple(loop, "pyrofling-video", props, &stream_events, this);
+	if (!stream)
+		return false;
+
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	const struct spa_pod *params = nullptr;
+	struct spa_pod_frame f[2];
+
+	spa_pod_builder_push_object(&b, &f[0], SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+	spa_pod_builder_add(&b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), 0);
+	spa_pod_builder_add(&b, SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
+	spa_pod_builder_add(&b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx), 0);
+
+	// Query which DRM format modifiers we can support for the default BGRA8 format.
+	VkFormatProperties3 props3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
+	VkDrmFormatModifierPropertiesListEXT list = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+	props3.pNext = &list;
+	device.get_format_properties(VK_FORMAT_B8G8R8A8_SRGB, &props3);
+	std::vector<VkDrmFormatModifierPropertiesEXT> drm_props(list.drmFormatModifierCount);
+	list.pDrmFormatModifierProperties = drm_props.data();
+	device.get_format_properties(VK_FORMAT_B8G8R8A8_SRGB, &props3);
+	spa_pod_builder_prop(&b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+	spa_pod_builder_push_choice(&b, &f[1], SPA_CHOICE_Enum, 0);
+	{
+		for (auto &p : drm_props)
+		{
+			if (!(p.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+				continue;
+			spa_pod_builder_long(&b, int64_t(p.drmFormatModifier));
+			if (&p == &drm_props.front())
+				spa_pod_builder_long(&b, int64_t(p.drmFormatModifier));
+		}
+	}
+	spa_pod_builder_pop(&b, &f[1]);
+
+	spa_rectangle default_size = SPA_RECTANGLE(width, height);
+	spa_rectangle min_size = SPA_RECTANGLE(1, 1);
+	spa_rectangle max_size = SPA_RECTANGLE(65535, 65535);
+
+	spa_fraction default_fps = SPA_FRACTION(fps, 1);
+	spa_fraction lo_fps = SPA_FRACTION(0, 1);
+	spa_fraction hi_fps = SPA_FRACTION(fps, 1);
+
+	spa_pod_builder_add(&b, SPA_FORMAT_VIDEO_size,
+	                    SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size), 0);
+	spa_pod_builder_add(&b, SPA_FORMAT_VIDEO_framerate,
+	                    SPA_POD_CHOICE_RANGE_Fraction(&default_fps, &lo_fps, &hi_fps), 0);
+
+	params = static_cast<spa_pod *>(spa_pod_builder_pop(&b, &f[0]));
+
+	if (pw_stream_connect(
+			stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+			pw_stream_flags(PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS),
+			&params, 1))
+	{
+		return false;
+	}
+
+	//pw_loop_add_event(loop, reneg_formats, this);
+
+	return true;
+}
+
+PipewireStream::~PipewireStream()
+{
+	if (stream)
+		pw_stream_destroy(stream);
+	if (loop)
+		pw_loop_destroy(loop);
+}
+
+bool PipewireStream::handle(const FileHandle &, uint32_t)
+{
+	return iterate();
+}
+
+void PipewireStream::release_id(uint32_t)
+{
+}
+#endif
 
 struct InstanceDeleter
 {
@@ -738,6 +1052,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	{
 		Swapchain *chain;
 		int index;
+		const Vulkan::Image *img;
 	};
 
 	void encode_surface(const ReadySurface &surface, uint64_t period_ns)
@@ -759,7 +1074,16 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			// For now, just select one candidate and pretend it's the foreground flip.
 			auto cmd = encoder_device->request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
 
-			if (!surface.chain)
+			if (surface.img)
+			{
+				// External image from pipewire. Acquire and release properly from external queue.
+				cmd->acquire_image_barrier(*surface.img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+				encoder->process_rgb(*cmd, *ycbcr_pipeline, surface.img->get_view(), VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+				cmd->release_image_barrier(*surface.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+				                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0);
+			}
+			else if (!surface.chain)
 			{
 				// Some dummy background thing.
 				auto info = Vulkan::ImageCreateInfo::immutable_2d_image(1, 1, VK_FORMAT_R8G8B8A8_UNORM);
@@ -923,7 +1247,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				ready_surface = { handler.get(), index };
 		}
 
-		if (!video_encode.immediate || handlers.empty())
+		// If we're using pipewire, never encode dummy frames since we won't have normal handlers.
+		if (!video_encode.pipewire && (!video_encode.immediate || handlers.empty()))
 			encode_surface(ready_surface, period_ns);
 		return true;
 	}
@@ -1079,6 +1404,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		bool hdr10 = false;
 		bool fec = false;
 		bool walltime_to_pts = true;
+		bool pipewire = false;
 		bool chroma_444 = false;
 		std::string x264_preset = "fast";
 		std::string x264_tune;
@@ -1273,6 +1599,13 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	}
 };
 
+#ifdef HAVE_PIPEWIRE
+void PipewireStream::send_encoding(const Vulkan::Image &img)
+{
+	server.encode_surface({ nullptr, -1, &img }, 0);
+}
+#endif
+
 struct HeartbeatHandler final : Handler
 {
 	HeartbeatHandler(Dispatcher &dispatcher_, SwapchainServer &server_, unsigned fps)
@@ -1409,6 +1742,9 @@ static void print_help()
 	     "\t[--low-latency]\n"
 	     "\t[--no-audio]\n"
 	     "\t[--immediate-encode]\n"
+#ifdef HAVE_PIPEWIRE
+		 "\t[--pipewire]\n"
+#endif
 		 "\turl\n");
 }
 
@@ -1452,6 +1788,9 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--444", [&](Util::CLIParser &) { opts.chroma_444 = true; });
 	cbs.add("--fec", [&](Util::CLIParser &) { opts.fec = true; });
 	cbs.add("--offline", [&](Util::CLIParser &) { opts.walltime_to_pts = false; });
+#ifdef HAVE_PIPEWIRE
+	cbs.add("--pipewire", [&](Util::CLIParser &) { opts.pipewire = true; });
+#endif
 	cbs.default_handler = [&](const char *def) { opts.path = def; };
 
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
@@ -1506,6 +1845,23 @@ static int main_inner(int argc, char **argv)
 	{
 		return EXIT_FAILURE;
 	}
+
+#ifdef HAVE_PIPEWIRE
+	PipewireStream pipewire{dispatcher, server, *server.encoder_device};
+
+	if (opts.pipewire)
+	{
+		if (pipewire.init(opts.width, opts.height, opts.fps))
+		{
+			FileHandle fd{dup(pipewire.get_fd())};
+			dispatcher.add_connection(std::move(fd), &pipewire, 0, Dispatcher::ConnectionType::Input);
+		}
+		else
+		{
+			LOGE("Failed to initialize pipewire!\n");
+		}
+	}
+#endif
 
 	while (dispatcher.iterate()) {}
 	return EXIT_SUCCESS;

@@ -89,6 +89,16 @@ if (NOT PYROFLING_LAYER_ONLY)
         set_target_properties(pyrofling PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
     endif()
 
+    include(FindPkgConfig)
+    pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3)
+    if (PIPEWIRE_FOUND)
+        message("Found pipewire 0.3. Including PW node support.")
+        target_link_libraries(pyrofling PRIVATE PkgConfig::PIPEWIRE)
+        target_compile_definitions(pyrofling PRIVATE HAVE_PIPEWIRE)
+    else()
+        message("Did not find pipewire support.")
+    endif()
+
 	add_blob_archive_target(viewer-fonts viewer_fonts
         ${CMAKE_CURRENT_SOURCE_DIR}/Granite/assets/fonts/font.ttf fonts/font.ttf)
 
