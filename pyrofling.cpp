@@ -218,7 +218,7 @@ void PipewireStream::stream_param_changed(uint32_t id, const spa_pod *param)
 	pw_stream_update_params(stream, params, 1);
 }
 
-void PipewireStream::stream_state_changed(pw_stream_state old, pw_stream_state state, const char *error)
+void PipewireStream::stream_state_changed(pw_stream_state, pw_stream_state state, const char *error)
 {
 	LOGI("PipeWire state: %s\n", pw_stream_state_as_string(state));
 	if (error)
