@@ -29,9 +29,18 @@ Socket::~Socket()
 			cond.notify_one();
 		}
 
+#ifdef _WIN32
+		// Dirty hack since shutdown doesn't work and cba to use more complicated APIs.
+		if (fd >= 0)
+		{
+			closesocket(fd);
+			fd = -1;
+		}
+#else
 		// If thread is blocking on a read, it should unblock now.
 		if (fd >= 0)
 			shutdown(fd, SHUT_RD);
+#endif
 
 		thr.join();
 	}
