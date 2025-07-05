@@ -74,6 +74,10 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		if (video_path && !init_video_client(video_path))
 			throw std::runtime_error("Failed to init video client.");
 
+		if (GRANITE_FILESYSTEM()->read_file_to_string("pyrofling-uri.txt", cliptext))
+			while (!cliptext.empty() && cliptext.back() == '\n')
+				cliptext.pop_back();
+
 		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
