@@ -271,47 +271,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				begin(get_wsi().get_device());
 		}
 
-		if (e.get_key_state() == KeyState::Pressed)
-		{
-			// Experiment with setting HDR metadata.
-			VkHdrMetadataEXT hdr_metadata = { VK_STRUCTURE_TYPE_HDR_METADATA_EXT };
-			// P3 primaries. Don't think it matters?
-			hdr_metadata.displayPrimaryRed.x   = 0.680f;
-			hdr_metadata.displayPrimaryRed.y   = 0.320f;
-			hdr_metadata.displayPrimaryGreen.x = 0.265f;
-			hdr_metadata.displayPrimaryGreen.y = 0.690f;
-			hdr_metadata.displayPrimaryBlue.x  = 0.150f;
-			hdr_metadata.displayPrimaryBlue.y  = 0.060f;
-			hdr_metadata.whitePoint.x          = 0.3127f;
-			hdr_metadata.whitePoint.y          = 0.3290f;
-			hdr_metadata.minLuminance          = 0.001f;
-
-			static const struct
-			{
-				Key key;
-				float nits;
-			} binds[] = {
-				{ Key::_1, 200.0f },
-				{ Key::_2, 400.0f },
-				{ Key::_3, 600.0f },
-				{ Key::_4, 800.0f },
-				{ Key::_5, 1000.0f },
-				{ Key::_6, 2000.0f },
-			};
-
-			for (auto &bind : binds)
-			{
-				if (e.get_key() == bind.key)
-				{
-					hdr_metadata.maxLuminance = bind.nits;
-					hdr_metadata.maxContentLightLevel = bind.nits;
-					hdr_metadata.maxFrameAverageLightLevel = 0.5f * bind.nits;
-					get_wsi().set_hdr_metadata(hdr_metadata);
-					LOGI("Overriding HDR metadata to %f nits.\n", bind.nits);
-					break;
-				}
-			}
-		}
 		return true;
 	}
 
