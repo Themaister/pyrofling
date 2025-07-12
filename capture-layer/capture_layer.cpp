@@ -286,6 +286,9 @@ struct Device
 	VkResult present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index,
 	                 uint64_t khrPresentId,
 	                 const VkPresentModeKHR *presentMode);
+
+	VkPresentModeKHR getUnlockedPresentMode(VkSurfaceKHR surface);
+	uint32_t getMinImageCount(VkSurfaceKHR surface, VkPresentModeKHR = VK_PRESENT_MODE_MAX_ENUM_KHR);
 };
 
 #include "dispatch_wrapper.hpp"
@@ -731,6 +734,8 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	bool isFastForwardPresentMode = presentMode == VK_PRESENT_MODE_MAILBOX_KHR ||
 	                                presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR;
 
+	// The assumption here is that if a fast present mode is engaged,
+	// the application generally stops using present wait temporarily, kick in manual waits to deal with this.
 	if (wire.period > 0 && (!usesPresentWait || (instance->getSyncMode() == SyncMode::Server && isFastForwardPresentMode)))
 	{
 		std::unique_lock<std::mutex> holder{clientLock};
@@ -966,8 +971,6 @@ void SurfaceState::setActiveDeviceAndSwapchain(Device *device_, const VkSwapchai
 
 	presentMode = info.presentMode;
 	activeSwapchain = chain;
-	if (instance->getSyncMode() == SyncMode::Server)
-		presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
 
 	uint32_t count;
 	device->getTable()->GetSwapchainImagesKHR(device->getDevice(), chain, &count, nullptr);
@@ -1050,6 +1053,50 @@ VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index
 		return surface->processPresent(queue, index, presentId, presentMode);
 	else
 		return VK_SUCCESS;
+}
+
+VkPresentModeKHR Device::getUnlockedPresentMode(VkSurfaceKHR surface)
+{
+	uint32_t modeCount = 0;
+
+	if (getInstance()->getTable()->GetPhysicalDeviceSurfacePresentModesKHR(
+			getPhysicalDevice(), surface, &modeCount, nullptr) == VK_SUCCESS)
+	{
+		std::vector<VkPresentModeKHR> modes(modeCount);
+		if (getInstance()->getTable()->GetPhysicalDeviceSurfacePresentModesKHR(
+				getPhysicalDevice(), surface, &modeCount, modes.data()) == VK_SUCCESS)
+		{
+			if (std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_IMMEDIATE_KHR) != modes.end())
+				return VK_PRESENT_MODE_IMMEDIATE_KHR;
+			if (std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.end())
+				return VK_PRESENT_MODE_MAILBOX_KHR;
+		}
+	}
+
+	return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+uint32_t Device::getMinImageCount(VkSurfaceKHR surface, VkPresentModeKHR presentMode)
+{
+	if (presentMode != VK_PRESENT_MODE_MAX_ENUM_KHR)
+	{
+		VkSurfaceCapabilities2KHR caps = { VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR };
+		VkPhysicalDeviceSurfaceInfo2KHR info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR };
+		VkSurfacePresentModeEXT mode = { VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_EXT };
+		mode.presentMode = presentMode;
+		info.pNext = &mode;
+		info.surface = surface;
+		getInstance()->getTable()->GetPhysicalDeviceSurfaceCapabilities2KHR(
+				getPhysicalDevice(), &info, &caps);
+		return caps.surfaceCapabilities.minImageCount;
+	}
+	else
+	{
+		VkSurfaceCapabilitiesKHR caps = {};
+		getInstance()->getTable()->GetPhysicalDeviceSurfaceCapabilitiesKHR(
+				getPhysicalDevice(), surface, &caps);
+		return caps.minImageCount;
+	}
 }
 
 void Device::init(VkPhysicalDevice gpu_, VkDevice device_, Instance *instance_, PFN_vkGetDeviceProcAddr gpa,
@@ -1295,12 +1342,57 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	auto info = *pCreateInfo;
 	info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
+	// Ugly hackery.
+	VkSwapchainPresentModesCreateInfoEXT old_modes;
+	VkSwapchainPresentModesCreateInfoEXT *modes = nullptr;
+
+	if (layer->getInstance()->getSyncMode() == SyncMode::Server)
+	{
+		info.presentMode = layer->getUnlockedPresentMode(pCreateInfo->surface);
+		fprintf(stderr, "pyrofling: Overriding to present mode %d.\n", info.presentMode);
+
+		modes = const_cast<VkSwapchainPresentModesCreateInfoEXT *>(
+				findChain<VkSwapchainPresentModesCreateInfoEXT>(
+						info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT));
+
+		// Ugly hackery.
+		if (modes)
+		{
+			old_modes = *modes;
+			const_cast<VkSwapchainPresentModesCreateInfoEXT *>(modes)->presentModeCount = 1;
+			const_cast<VkSwapchainPresentModesCreateInfoEXT *>(modes)->pPresentModes = &info.presentMode;
+		}
+	}
+
+	// Completely disregard local sync behavior for remote play.
+	// Force immediate so that local presentation progress is not stalled.
+	if (layer->getInstance()->getSyncMode() == SyncMode::Server)
+	{
+		if (modes)
+		{
+			info.minImageCount = std::max<uint32_t>(
+					info.minImageCount, layer->getMinImageCount(pCreateInfo->surface, info.presentMode));
+			fprintf(stderr, "pyrofling: Overriding to %u image count (swapchain maintenance).\n", info.minImageCount);
+		}
+		else
+		{
+			info.minImageCount = std::max<uint32_t>(info.minImageCount, layer->getMinImageCount(pCreateInfo->surface));
+			fprintf(stderr, "pyrofling: Overriding to %u image count (legacy).\n", info.minImageCount);
+		}
+	}
+
 	auto result = layer->getTable()->CreateSwapchainKHR(device, &info, pAllocator, pSwapchain);
 	if (result != VK_SUCCESS)
 		return result;
 
+	// Ugly hackery.
+	if (modes)
+		*const_cast<VkSwapchainPresentModesCreateInfoEXT *>(modes) = old_modes;
+
 	auto *instance = layer->getInstance();
 	auto *surface = instance->registerSurface(pCreateInfo->surface);
+
+	// Pass down the original create info so we get original present mode plumbed through.
 	surface->setActiveDeviceAndSwapchain(layer, pCreateInfo, *pSwapchain);
 	return VK_SUCCESS;
 }
@@ -1355,32 +1447,57 @@ static VKAPI_ATTR VkResult VKAPI_CALL
 QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 {
 	auto *layer = getDeviceLayer(queue);
+	auto info = *pPresentInfo;
 
 	// If we have no connections associated with this present, just pass it through.
-	if (!layer->presentRequiresWrap(queue, pPresentInfo))
-		return layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
+	if (!layer->presentRequiresWrap(queue, &info))
+		return layer->getTable()->QueuePresentKHR(queue, &info);
 
 	VkResult result;
 
 	// Wait semaphore count is generally just 1, so don't bother allocating wait dst stage arrays.
-	for (uint32_t i = 0; i < pPresentInfo->waitSemaphoreCount; i++)
+	for (uint32_t i = 0; i < info.waitSemaphoreCount; i++)
 	{
 		VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 		const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 		submit.waitSemaphoreCount = 1;
 		submit.pWaitDstStageMask = &waitStage;
-		submit.pWaitSemaphores = &pPresentInfo->pWaitSemaphores[i];
+		submit.pWaitSemaphores = &info.pWaitSemaphores[i];
 		if ((result = layer->getTable()->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE)) != VK_SUCCESS)
 			return result;
 	}
 
-	const auto *id = findChain<VkPresentIdKHR>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
-	const auto *mode = findChain<VkSwapchainPresentModeInfoEXT>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT);
+	const auto *id = findChain<VkPresentIdKHR>(info.pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
 
-	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
+	const auto *mode = findChain<VkSwapchainPresentModeInfoEXT>(
+			info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT);
+
+	const void **ppModeSkipPatch = nullptr;
+
+	if (mode && layer->getInstance()->getSyncMode() == SyncMode::Server)
 	{
-		VkSwapchainKHR swap = pPresentInfo->pSwapchains[i];
-		uint32_t index = pPresentInfo->pImageIndices[i];
+		// Patch out the request to modify present mode. Hacky as shit, but w/e.
+		ppModeSkipPatch = &info.pNext;
+
+		auto *sin = static_cast<const VkBaseInStructure *>(info.pNext);
+		while (sin)
+		{
+			if (sin->sType == mode->sType)
+			{
+				// Skip ahead in the chain.
+				*ppModeSkipPatch = sin->pNext;
+				break;
+			}
+
+			ppModeSkipPatch = (const void **)&sin->pNext;
+			sin = sin->pNext;
+		}
+	}
+
+	for (uint32_t i = 0; i < info.swapchainCount; i++)
+	{
+		VkSwapchainKHR swap = info.pSwapchains[i];
+		uint32_t index = info.pImageIndices[i];
 		uint64_t presentId = id && i < id->swapchainCount ? id->pPresentIds[i] : 0;
 
 		// We're just concerned with fatal errors here like DEVICE_LOST etc.
@@ -1389,16 +1506,21 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	}
 
 	// Resignal the semaphores when we're done blitting so that the normal WSI request goes through.
-	if (pPresentInfo->waitSemaphoreCount)
+	if (info.waitSemaphoreCount)
 	{
 		VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-		submit.signalSemaphoreCount = pPresentInfo->waitSemaphoreCount;
-		submit.pSignalSemaphores = pPresentInfo->pWaitSemaphores;
+		submit.signalSemaphoreCount = info.waitSemaphoreCount;
+		submit.pSignalSemaphores = info.pWaitSemaphores;
 		if ((result = layer->getTable()->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE)) != VK_SUCCESS)
 			return result;
 	}
 
-	result = layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
+	result = layer->getTable()->QueuePresentKHR(queue, &info);
+
+	// Restore the pNext link.
+	if (ppModeSkipPatch)
+		*ppModeSkipPatch = mode;
+
 	return result;
 }
 
