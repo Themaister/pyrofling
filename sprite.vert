@@ -24,6 +24,20 @@ layout(location = 0) flat out mediump vec4 vColor;
     } constants;
 #endif
 
+layout(constant_id =  8) const float PREROTATE_MATRIX_0 = 1.0;
+layout(constant_id =  9) const float PREROTATE_MATRIX_1 = 0.0;
+layout(constant_id = 10) const float PREROTATE_MATRIX_2 = 0.0;
+layout(constant_id = 11) const float PREROTATE_MATRIX_3 = 1.0;
+
+void prerotate_fixup_clip_xy()
+{
+	gl_Position.xy =
+			mat2(PREROTATE_MATRIX_0, PREROTATE_MATRIX_1,
+			     PREROTATE_MATRIX_2, PREROTATE_MATRIX_3) *
+			     gl_Position.xy;
+}
+
+
 void main()
 {
     vec2 QuadPos = (mat2(Rotation.xy, Rotation.zw) * QuadCoord) * 0.5 + 0.5;
@@ -37,4 +51,5 @@ void main()
 #endif
 
     vColor = Color;
+	prerotate_fixup_clip_xy();
 }

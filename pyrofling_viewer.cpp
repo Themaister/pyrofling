@@ -78,7 +78,13 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			while (!cliptext.empty() && cliptext.back() == '\n')
 				cliptext.pop_back();
 
+		if (cliptext.empty())
+			if (GRANITE_FILESYSTEM()->read_file_to_string("/data/local/tmp/pyrofling-uri.txt", cliptext))
+				while (!cliptext.empty() && cliptext.back() == '\n')
+					cliptext.pop_back();
+
 		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
+		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_touch_event, TouchDownEvent);
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication,
 		                             on_module_created, on_module_destroyed,
@@ -258,12 +264,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		}
 	}
 
-	bool on_key_pressed(const KeyboardEvent &e)
+	void trigger_enter()
 	{
-		if (e.get_key() == Key::V && e.get_key_state() == KeyState::Pressed)
-			stats.enable = !stats.enable;
-		if (e.get_key() == Key::Return && e.get_key_state() == KeyState::Pressed &&
-		    !video_active && !cliptext.empty())
+		if (!video_active && !cliptext.empty())
 		{
 			if (!init_video_client(cliptext.c_str()))
 				request_shutdown();
@@ -274,7 +277,20 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			if (video_active && blit)
 				begin(get_wsi().get_device());
 		}
+	}
 
+	bool on_touch_event(const TouchDownEvent &)
+	{
+		trigger_enter();
+		return true;
+	}
+
+	bool on_key_pressed(const KeyboardEvent &e)
+	{
+		if (e.get_key() == Key::V && e.get_key_state() == KeyState::Pressed)
+			stats.enable = !stats.enable;
+		if (e.get_key() == Key::Return && e.get_key_state() == KeyState::Pressed)
+			trigger_enter();
 		return true;
 	}
 

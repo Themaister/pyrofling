@@ -42,6 +42,10 @@ if (WIN32 AND (NOT MSVC) AND (IS_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-bu
     set(CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-build-msys2/output")
 endif()
 
+if (ANDROID)
+    set(GRANITE_LIBAV_PATH ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-android-maker/output)
+endif()
+
 if (${CMAKE_BUILD_TYPE} MATCHES "Release")
     set(GRANITE_SHIPPING ON CACHE BOOL "" FORCE)
     message("Using GRANITE_SHIPPING build.")

@@ -68,12 +68,20 @@ bool Socket::connect(Proto proto, const char *addr, const char *port)
 	if (proto == Proto::TCP)
 	{
 		hints.ai_socktype = SOCK_STREAM;
+#ifdef __ANDROID__
+		hints.ai_protocol = 0;
+#else
 		hints.ai_protocol = IPPROTO_TCP;
+#endif
 	}
 	else
 	{
 		hints.ai_socktype = SOCK_DGRAM;
+#ifdef __ANDROID__
+		hints.ai_protocol = 0;
+#else
 		hints.ai_protocol = IPPROTO_UDP;
+#endif
 	}
 
 	int res = getaddrinfo(addr, port, &hints, &servinfo);
