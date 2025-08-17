@@ -8,13 +8,33 @@ The recording itself is implemented as a separate process which acts like a very
 
 Normal CMake. Granite submodule must also be initialized.
 
-```
+```shell
 git submodule update --init --recursive
 mkdir build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/.local -G Ninja
 ninja install
 ```
+
+### Android
+
+Android build is a little more elaborate. First, FFmpeg need to be built with:
+
+```shell
+bash ./build-ffmpeg-android.sh
+```
+
+See script for how `ANDROID_SDK_HOME` and `ANDROID_NDK_HOME` should be set.
+It assumes the SDK and NDK is installed.
+
+Once FFmpeg libraries are built:
+
+```shell
+bash ./build-android.sh
+```
+
+Which generates a Gradle project and invokes Gradle.
+APK is in `./android/build/outputs/apk/$buildtype`.
 
 ## IPC
 
@@ -109,12 +129,12 @@ Should generally be left alone.
 `h264_pyro`, `h265_pyro` and `pyrowave` (my own intra-only codec) are good for this.
 For the H.264 and H.265 codecs, Vulkan video support is required.
 
-```
+```shell
 $ pyrofling --encoder h264_pyro --width 1920 --height 1080 --bitrate-kbits 50000 --immediate-encode --port 9000 --fps 60 --low-latency --gop-seconds -1
 $ pyrofling --encoder pyrowave --width 1920 --height 1080 --bitrate-kbits 250000 --immediate-encode --port 9000 --fps 60 --low-latency
 ```
 
-```
+```shell
 PYROFLING=1 PYROFLING_SYNC=server somevulkanapp
 ```
 
@@ -155,7 +175,7 @@ This is currently only supported for PyroWave and non-GPU accelerated codecs in 
 
 For VRR displays, or where absolute minimal latency (at cost of jitter) is desired:
 
-```
+```shell
 pyrofling-viewer "pyro://<ip>:<port>"
 ```
 
@@ -169,9 +189,27 @@ Deadline at 0.008 means that if we don't receive a frame until 0.008, assume it'
 or attempt to recover a damaged frame if there has been some packet loss, especially with pyrowave
 since it's robust against errors.
 
-```
+```shell
 pyrofling-viewer "pyro://<ip>:<port>?phase_locked=0.0&deadline=0.008"
 ```
+
+##### Android (very WIP)
+
+Android is currently a big hack as there is no easy way to provide a command line,
+and keyboard input support is limited.
+For now, create a default command line text file, e.g. create `uri.txt`:
+
+```
+pyro://10.0.0.2:9000
+```
+
+and then push it to device with:
+
+```
+adb push uri.txt /data/local/tmp/pyrofling-uri.txt
+```
+
+Once APK starts, it should prompt for "enter", touch the screen to connect.
 
 #### Client stats window
 
@@ -190,7 +228,7 @@ This way, multiple clients can do virtual couch coop with little to no friction.
 This can be useful when multiple people want to share the same virtual controller (for e.g. virtual couch coop).
 The player using the mode button takes control until someone else takes control.
 
-```
+```shell
 pyrofling-gamepad "<ip>:<port>"
 ```
 
@@ -218,6 +256,7 @@ E.g.:
 
 to limit outgoing traffic to 100 mbit on Linux.
 Can be useful when doing real-time streaming over long distance.
+NOTE: Do not use this when streaming with pyrowave, it will only increase latency.
 
 ### Special features
 
