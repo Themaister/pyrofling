@@ -193,23 +193,19 @@ since it's robust against errors.
 pyrofling-viewer "pyro://<ip>:<port>?phase_locked=0.0&deadline=0.008"
 ```
 
-##### Android (very WIP)
+##### Android (WIP)
 
-Android is currently a big hack as there is no easy way to provide a command line,
-and keyboard input support is limited.
-For now, create a default command line text file, e.g. create `uri.txt`:
+Android is currently quite hacky.
+
+Tapping the screen as instructed can bringup a soft keyboard which lets you copy-paste or
+type in an URI. Then type in e.g.:
 
 ```
 pyro://10.0.0.2:9000
 ```
 
-and then push it to device with:
-
-```
-adb push uri.txt /data/local/tmp/pyrofling-uri.txt
-```
-
-Once APK starts, it should prompt for "enter", touch the screen to connect.
+Then hit "Connect". The typed URI is remember between runs for convenience,
+so subsequent sessions only need to click "Connect".
 
 #### Client stats window
 

@@ -79,9 +79,14 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				cliptext.pop_back();
 
 		if (cliptext.empty())
-			if (GRANITE_FILESYSTEM()->read_file_to_string("/data/local/tmp/pyrofling-uri.txt", cliptext))
+			if (GRANITE_FILESYSTEM()->read_file_to_string("cache://pyrofling-uri.txt", cliptext))
 				while (!cliptext.empty() && cliptext.back() == '\n')
 					cliptext.pop_back();
+
+#ifdef __ANDROID__
+		if (cliptext.empty())
+			cliptext = "pyro://";
+#endif
 
 		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_key_pressed, KeyboardEvent);
 		EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_touch_event, TouchDownEvent);
@@ -94,6 +99,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_file_drop, Vulkan::ApplicationWindowFileDropEvent);
 			EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_text_drop, Vulkan::ApplicationWindowTextDropEvent);
+			EVENT_MANAGER_REGISTER(VideoPlayerApplication, on_soft_keyboard_update, Vulkan::ApplicationSoftKeyboardUpdateEvent);
 		}
 
 		EVENT_MANAGER_REGISTER_LATCH(VideoPlayerApplication, on_begin_platform, on_end_platform,
@@ -102,6 +108,12 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		if (deadline_enable)
 			timeBeginPeriod(1);
 #endif
+	}
+
+	bool on_soft_keyboard_update(const Vulkan::ApplicationSoftKeyboardUpdateEvent &e)
+	{
+		cliptext = e.get_text();
+		return true;
 	}
 
 	bool init_video_client(const char *video_path)
@@ -268,6 +280,9 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 		if (!video_active && !cliptext.empty())
 		{
+			GRANITE_FILESYSTEM()->write_string_to_file("cache://pyrofling-uri.txt", cliptext);
+			get_platform().end_soft_keyboard();
+
 			if (!init_video_client(cliptext.c_str()))
 				request_shutdown();
 
@@ -279,9 +294,22 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		}
 	}
 
-	bool on_touch_event(const TouchDownEvent &)
+	bool showing_soft_keyboard = false;
+
+	bool on_touch_event(const TouchDownEvent &e)
 	{
-		trigger_enter();
+		if (video_active)
+			return true;
+
+		if (!showing_soft_keyboard)
+			get_platform().begin_soft_keyboard(cliptext);
+		else
+			get_platform().end_soft_keyboard();
+
+		showing_soft_keyboard = !showing_soft_keyboard;
+
+		if (e.get_y() * float(e.get_screen_height()) < 100.0f)
+			trigger_enter();
 		return true;
 	}
 
@@ -579,6 +607,21 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		flat_renderer.begin();
 
 		char buffer[1024];
+
+#ifdef __ANDROID__
+
+		flat_renderer.render_quad({ 0.0f, 0.0f, 0.5f }, { cmd->get_viewport().width, 100.0f }, { 0.1f, 0.1f, 0.0f, 1.0f });
+		flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Huge), "Connect",
+		                          {}, { cmd->get_viewport().width, 100.0f }, vec4(1.0f), Font::Alignment::Center);
+
+		snprintf(buffer, sizeof(buffer), "\"%s\"%s", cliptext.c_str(),
+		         showing_soft_keyboard ? "" : " (tap screen to bring up IME)");
+
+		// TODO: Can we possibly get IME insets to compute a safe region?
+		flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Huge), buffer,
+		                          {}, { cmd->get_viewport().width, cmd->get_viewport().height * 0.5f },
+		                          vec4(1.0f), Font::Alignment::Center);
+#else
 		if (cliptext.empty())
 			snprintf(buffer, sizeof(buffer), "Drop file in window or CTRL + V path!");
 		else
@@ -587,6 +630,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large), buffer,
 		                          {}, { cmd->get_viewport().width, cmd->get_viewport().height },
 		                          vec4(1.0f), Font::Alignment::Center);
+#endif
+
 		flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
 		cmd->end_render_pass();
 
