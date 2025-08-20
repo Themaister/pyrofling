@@ -468,7 +468,12 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 			// Audio syncs to video.
 			// Dynamic rate control.
+#ifdef __ANDROID__
+			// Give more slop to mobile.
+			decoder.latch_audio_buffering_target(0.050);
+#else
 			decoder.latch_audio_buffering_target(0.030);
+#endif
 
 			// Measure frame jitter. Ideally, the time delta in decode done time (client side) should
 			// equal the time delta in PTS domain (server side).
