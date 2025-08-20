@@ -16,5 +16,7 @@ echo "ANDROID_SDK_HOME = $ANDROID_SDK_HOME"
 echo "ANDROID_NDK_HOME = $ANDROID_NDK_HOME"
 
 cd ffmpeg-android-maker
-git pull origin master
+git fetch origin
+git checkout origin/master
+git am ../ffmpeg-android-enable-mediacodec.patch
 bash ./ffmpeg-android-maker.sh -abis=arm64-v8a
