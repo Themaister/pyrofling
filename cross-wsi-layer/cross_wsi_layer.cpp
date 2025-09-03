@@ -47,6 +47,7 @@ static const char *redirectedExtensions[] = {
 	VK_KHR_PRESENT_ID_EXTENSION_NAME,
 	VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
 	VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
+	VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
 };
 
 // Block any extension that we don't explicitly wrap or understand yet.
@@ -62,6 +63,9 @@ static const char *blockedExtensions[] = {
 	VK_NV_PRESENT_BARRIER_EXTENSION_NAME,
 	VK_NV_LOW_LATENCY_2_EXTENSION_NAME,
 	"VK_EXT_full_screen_exclusive",
+	// TODO:
+	VK_KHR_PRESENT_ID_2_EXTENSION_NAME,
+	VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME,
 };
 
 struct Instance;

@@ -1351,16 +1351,16 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 		info.presentMode = layer->getUnlockedPresentMode(pCreateInfo->surface);
 		fprintf(stderr, "pyrofling: Overriding to present mode %d.\n", info.presentMode);
 
-		modes = const_cast<VkSwapchainPresentModesCreateInfoEXT *>(
-				findChain<VkSwapchainPresentModesCreateInfoEXT>(
-						info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_EXT));
+		modes = const_cast<VkSwapchainPresentModesCreateInfoKHR *>(
+				findChain<VkSwapchainPresentModesCreateInfoKHR>(
+						info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR));
 
 		// Ugly hackery.
 		if (modes)
 		{
 			old_modes = *modes;
-			const_cast<VkSwapchainPresentModesCreateInfoEXT *>(modes)->presentModeCount = 1;
-			const_cast<VkSwapchainPresentModesCreateInfoEXT *>(modes)->pPresentModes = &info.presentMode;
+			const_cast<VkSwapchainPresentModesCreateInfoKHR *>(modes)->presentModeCount = 1;
+			const_cast<VkSwapchainPresentModesCreateInfoKHR *>(modes)->pPresentModes = &info.presentMode;
 		}
 	}
 
@@ -1468,9 +1468,10 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	}
 
 	const auto *id = findChain<VkPresentIdKHR>(info.pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
+	const auto *id2 = findChain<VkPresentId2KHR>(info.pNext, VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR);
 
-	const auto *mode = findChain<VkSwapchainPresentModeInfoEXT>(
-			info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_EXT);
+	const auto *mode = findChain<VkSwapchainPresentModeInfoKHR>(
+			info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR);
 
 	const void **ppModeSkipPatch = nullptr;
 
@@ -1498,7 +1499,12 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	{
 		VkSwapchainKHR swap = info.pSwapchains[i];
 		uint32_t index = info.pImageIndices[i];
-		uint64_t presentId = id && i < id->swapchainCount ? id->pPresentIds[i] : 0;
+
+		uint64_t presentId = 0;
+		if (id2)
+			presentId = i < id2->swapchainCount ? id2->pPresentIds[i] : 0;
+		else if (id)
+			presentId = i < id->swapchainCount ? id->pPresentIds[i] : 0;
 
 		// We're just concerned with fatal errors here like DEVICE_LOST etc.
 		if ((result = layer->present(queue, swap, index, presentId, mode ? &mode->pPresentModes[i] : nullptr)) != VK_SUCCESS)
