@@ -1444,6 +1444,45 @@ WaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId,
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL
+WaitForPresent2KHR(VkDevice device, VkSwapchainKHR swapchain, const VkPresentWait2InfoKHR *pPresentWait2Info)
+{
+	auto *layer = getDeviceLayer(device);
+	auto *inst = layer->getInstance();
+	VkResult result = VK_SUCCESS;
+
+	SurfaceState *surface;
+	{
+		std::lock_guard<std::mutex> holder{inst->surfaceLock};
+		surface = inst->findActiveSurfaceLocked(layer, swapchain);
+	}
+
+	// In client sync mode, we always honor the client's sync.
+	bool doNormalWait = inst->getSyncMode() == SyncMode::Client || !surface;
+
+	// If client is unlocked in default mode, we want to run at full throttle, always sync to client.
+	if (inst->getSyncMode() == SyncMode::Default &&
+	    surface->presentMode != VK_PRESENT_MODE_FIFO_KHR &&
+	    surface->presentMode != VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+	{
+		doNormalWait = true;
+	}
+
+	if (!doNormalWait && surface)
+	{
+		result = surface->waitForPresent(pPresentWait2Info->presentId, pPresentWait2Info->timeout);
+		// We lost connection with server, fall back to normal present wait.
+		if (result == VK_ERROR_SURFACE_LOST_KHR)
+			doNormalWait = true;
+	}
+
+	if (doNormalWait)
+		return layer->getTable()->WaitForPresent2KHR(device, swapchain, pPresentWait2Info);
+	else
+		return result;
+}
+
+
+static VKAPI_ATTR VkResult VKAPI_CALL
 QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 {
 	auto *layer = getDeviceLayer(queue);
@@ -1604,6 +1643,7 @@ static PFN_vkVoidFunction interceptDeviceCommand(const char *pName)
 		{ "vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(QueuePresentKHR) },
 		{ "vkSetHdrMetadataEXT", reinterpret_cast<PFN_vkVoidFunction>(SetHdrMetadataEXT) },
 		{ "vkWaitForPresentKHR", reinterpret_cast<PFN_vkVoidFunction>(WaitForPresentKHR) },
+		{ "vkWaitForPresent2KHR", reinterpret_cast<PFN_vkVoidFunction>(WaitForPresent2KHR) },
 		{ "vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(CreateSwapchainKHR) },
 		{ "vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySwapchainKHR) },
 		{ "vkDestroyDevice", reinterpret_cast<PFN_vkVoidFunction>(DestroyDevice) },

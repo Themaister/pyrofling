@@ -135,6 +135,7 @@ struct VkLayerDispatchTable
 	PFN_vkFreeMemory FreeMemory;
 	PFN_vkGetMemoryHostPointerPropertiesEXT GetMemoryHostPointerPropertiesEXT;
 	PFN_vkWaitForPresentKHR WaitForPresentKHR;
+	PFN_vkWaitForPresent2KHR WaitForPresent2KHR;
 
 	PFN_vkCreateSemaphore CreateSemaphore;
 	PFN_vkDestroySemaphore DestroySemaphore;
