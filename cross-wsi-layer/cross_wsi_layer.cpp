@@ -66,6 +66,7 @@ static const char *blockedExtensions[] = {
 	// TODO:
 	VK_KHR_PRESENT_ID_2_EXTENSION_NAME,
 	VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME,
+	VK_EXT_PRESENT_TIMING_EXTENSION_NAME,
 };
 
 struct Instance;
