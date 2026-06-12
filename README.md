@@ -36,6 +36,21 @@ bash ./build-android.sh
 Which generates a Gradle project and invokes Gradle.
 APK is in `./android/build/outputs/apk/$buildtype`.
 
+### Steam Deck
+
+Building for Steam Deck is mostly about building against the Steam runtime.
+The rough flow for building on Arch at least:
+
+- Install `docker` or something compatible with it.
+- Start the `docker` service.
+- Add your user to the `docker` group.
+- Run `./build-ffmpeg-steamrt.sh`. This should pull Steam SDK build environment.
+- Run `./build-steamrt.sh`. This should pick up the static FFmpeg build and build the viewer.
+- Push `steamrt-output/bin/pyrofling-viewer` to the device, add that binary as an external application in Steam.
+- Add `pyro://<ip>:<port>` arguments, etc as desired. Hopefully your desktop has a fixed IP on your local network.
+- ...
+- Profit?
+
 ## IPC
 
 `pyrofling-ipc` implements a basic Unix domain socket setup where client can send messages and receive replies
