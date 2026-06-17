@@ -1222,6 +1222,32 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 	return vr;
 }
 
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceCapabilities2KHR(
+		VkPhysicalDevice                            physicalDevice,
+		const VkPhysicalDeviceSurfaceInfo2KHR*      pSurfaceInfo,
+		VkSurfaceCapabilities2KHR*                  pSurfaceCapabilities)
+{
+	auto *layer = getInstanceLayer(physicalDevice);
+	VkResult vr = layer->getTable()->GetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
+	if (vr != VK_SUCCESS)
+		return vr;
+
+	// Present timing will mess with our custom frame pacing and the results are not meaningful.
+	auto *caps = const_cast<VkPresentTimingSurfaceCapabilitiesEXT *>(
+			findChain<VkPresentTimingSurfaceCapabilitiesEXT>(
+				pSurfaceCapabilities->pNext, VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT));
+
+	if (caps)
+	{
+		caps->presentTimingSupported = VK_FALSE;
+		caps->presentAtAbsoluteTimeSupported = VK_FALSE;
+		caps->presentAtRelativeTimeSupported = VK_FALSE;
+		caps->presentStageQueries = 0;
+	}
+
+	return VK_SUCCESS;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
 		VkPhysicalDevice physicalDevice,
 		const VkPhysicalDeviceSurfaceInfo2KHR *pSurfaceInfo,
@@ -1622,6 +1648,7 @@ static PFN_vkVoidFunction interceptExtensionInstanceCommand(const char *pName)
 	} extInstanceCommands[] = {
 		{ "vkGetPhysicalDeviceSurfaceFormatsKHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceFormatsKHR) },
 		{ "vkGetPhysicalDeviceSurfaceFormats2KHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceFormats2KHR) },
+		{ "vkGetPhysicalDeviceSurfaceCapabilities2KHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceCapabilities2KHR) },
 		{ "vkDestroySurfaceKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySurfaceKHR) },
 	};
 
