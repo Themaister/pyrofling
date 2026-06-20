@@ -515,12 +515,12 @@ Shaders<Program, Shader>::Shaders(Device &device, Layout &layout, const Resolver
 	this->sprite_frag[1][1] = device.request_shader(spirv_bank + 2565, 748, &layout);
 	{
 		auto *program = device.get_shader_manager().register_graphics("builtin://shaders/sprite.vert", "builtin://shaders/sprite.frag");
-		program->register_precompiled_variant(this->sprite_vert[0], this->sprite_frag[0][0], {{"HAVE_EMISSIVE", 0}, {"HAVE_EMISSIVE_REFRACTION", 0}, {"HAVE_EMISSIVE_REFLECTION", 0}, {"HAVE_POSITION", 1}, {"HAVE_UV", 0}, {"HAVE_NORMAL", 0}, {"HAVE_TANGENT", 0}, {"HAVE_BONE_INDEX", 0}, {"HAVE_BONE_WEIGHT", 0}, {"HAVE_VERTEX_COLOR", 1}});
-		program->register_precompiled_variant(this->sprite_vert[1], this->sprite_frag[1][1], {{"VARIANT_BIT_4", 1}, {"HAVE_EMISSIVE", 0}, {"HAVE_EMISSIVE_REFRACTION", 0}, {"HAVE_EMISSIVE_REFLECTION", 0}, {"HAVE_POSITION", 1}, {"HAVE_UV", 1}, {"HAVE_NORMAL", 0}, {"HAVE_TANGENT", 0}, {"HAVE_BONE_INDEX", 0}, {"HAVE_BONE_WEIGHT", 0}, {"HAVE_VERTEX_COLOR", 1}, {"HAVE_BASECOLORMAP", 1}, {"HAVE_METALLICROUGHNESSMAP", 0}, {"HAVE_OCCLUSIONMAP", 0}, {"HAVE_EMISSIVEMAP", 0}});
+		program->register_precompiled_variant(this->sprite_vert[0], this->sprite_frag[0][0], {{"HAVE_EMISSIVE", 0}, {"HAVE_POSITION", 1}, {"HAVE_UV", 0}, {"HAVE_NORMAL", 0}, {"HAVE_TANGENT", 0}, {"HAVE_BONE_INDEX", 0}, {"HAVE_BONE_WEIGHT", 0}, {"HAVE_VERTEX_COLOR", 1}});
+		program->register_precompiled_variant(this->sprite_vert[1], this->sprite_frag[1][1], {{"VARIANT_BIT_4", 1}, {"HAVE_EMISSIVE", 0}, {"HAVE_POSITION", 1}, {"HAVE_UV", 1}, {"HAVE_NORMAL", 0}, {"HAVE_TANGENT", 0}, {"HAVE_BONE_INDEX", 0}, {"HAVE_BONE_WEIGHT", 0}, {"HAVE_VERTEX_COLOR", 1}, {"HAVE_BASECOLORMAP", 1}, {"HAVE_METALLICROUGHNESSMAP", 0}, {"HAVE_OCCLUSIONMAP", 0}, {"HAVE_EMISSIVEMAP", 0}});
 	}
 	{
 		auto *program = device.get_shader_manager().register_graphics("builtin://shaders/line_ui.vert", "builtin://shaders/debug_mesh.frag");
-		program->register_precompiled_variant(this->line_ui, this->debug_mesh, {{"HAVE_EMISSIVE", 0}, {"HAVE_EMISSIVE_REFRACTION", 0}, {"HAVE_EMISSIVE_REFLECTION", 0}, {"HAVE_POSITION", 1}, {"HAVE_UV", 0}, {"HAVE_NORMAL", 0}, {"HAVE_TANGENT", 0}, {"HAVE_BONE_INDEX", 0}, {"HAVE_BONE_WEIGHT", 0}, {"HAVE_VERTEX_COLOR", 1}});
+		program->register_precompiled_variant(this->line_ui, this->debug_mesh, {{"HAVE_EMISSIVE", 0}, {"HAVE_POSITION", 1}, {"HAVE_UV", 0}, {"HAVE_NORMAL", 0}, {"HAVE_TANGENT", 0}, {"HAVE_BONE_INDEX", 0}, {"HAVE_BONE_WEIGHT", 0}, {"HAVE_VERTEX_COLOR", 1}});
 	}
 }
 }
