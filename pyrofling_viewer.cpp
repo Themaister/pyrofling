@@ -59,13 +59,24 @@ static void push_sliding_window(T (&v)[N], U value)
 	v[N - 1] = T(value);
 }
 
+template <typename T, size_t N>
+static T avg_abs(const T (&v)[N])
+{
+	auto avg = T(0);
+	for (auto &value : v)
+		avg += muglm::abs(value);
+	return avg / T(N);
+}
+
 struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterface
 {
 	VideoPlayerApplication(const char *video_path,
 	                       float target_latency_,
 	                       double phase_locked_offset_, bool phase_locked_enable_,
+	                       bool frr_adaptive_,
 	                       double deadline_, bool deadline_enable_, const char *hwdevice_)
 		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
+		, frr_adaptive(frr_adaptive_)
 		, deadline(deadline_), deadline_enable(deadline_enable_)
 		, target_latency(target_latency_), hwdevice(hwdevice_)
 	{
@@ -176,6 +187,18 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				}
 			}
 
+			if (frr_adaptive)
+			{
+				phase_locked_enable = true;
+				phase_locked_offset = -0.01; // Start out with 10ms offset, gradually adapt.
+				deadline = 0.0;
+				deadline_enable = true;
+				LOGI("Enabling FRR adaptive path.\n");
+
+				get_wsi().set_enable_timing_feedback(true);
+				get_wsi().enable_fixed_rate_low_latency_pacer(true);
+			}
+
 			float target_buffer = std::max(0.1f, std::min(target_latency * 2.0f, target_latency + 0.2f));
 			opts.target_video_buffer_time = target_buffer;
 			opts.target_realtime_audio_buffer_time = target_buffer;
@@ -204,7 +227,10 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
 		}
 		else
+		{
 			phase_locked_enable = false;
+			frr_adaptive = false;
+		}
 
 		if (!decoder.init(GRANITE_AUDIO_MIXER(), video_path, opts))
 		{
@@ -365,6 +391,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	double last_pts = 0.0;
 	double phase_locked_offset;
 	bool phase_locked_enable;
+	bool frr_adaptive;
 	double deadline;
 	bool deadline_enable;
 	float target_latency;
@@ -442,8 +469,51 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 							return false;
 						missed_deadlines++;
 
+						if (frr_adaptive)
+						{
+							// Deadline failed, bump the target latency.
+							Vulkan::RefreshRateInfo refresh_rate_info = {};
+							if (get_wsi().get_refresh_rate_info(refresh_rate_info) &&
+							    refresh_rate_info.refresh_duration)
+							{
+								// Don't allow more than half a frame of target latency.
+								phase_locked_offset = std::max<double>(
+									phase_locked_offset - 1e-4,
+									double(refresh_rate_info.refresh_duration) * -0.5e-9);
+							}
+
+							// If we're not going to render a fresh video frame this iteration, discard any statistics.
+							get_wsi().get_fixed_rate_pacer().discard_pacing_statistics(
+								get_wsi().get_last_submitted_present_id() + 1);
+						}
+
 						// It's possible we can decode a damaged frame instead, depends on the codec.
 						decoder.acquire_damaged_video_frame(next_frame);
+					}
+					else if (frr_adaptive)
+					{
+						// Successful frame, veeeery slowly reduce the target window.
+						Vulkan::RefreshRateInfo refresh_rate_info = {};
+
+						// In a perfect world, this will always hit 0, but due to jitter, that's not realistic.
+						double phase_offset = double(Util::get_current_time_nsecs() - int64_t(next_frame.done_ts)) * 1e-9;
+
+						if (get_wsi().get_refresh_rate_info(refresh_rate_info) &&
+							refresh_rate_info.refresh_duration)
+						{
+							// If there's not at least a 2ms gap, we're too close for comfort, pull it back a little.
+							// The more jitter there is in the system, the more often we will hit the 0-2ms guardband.
+							if (phase_offset > 2e-3)
+								phase_locked_offset += 1e-6;
+							else
+								phase_locked_offset -= 1e-5;
+
+							// Clamp to make sure the phase offset doesn't explode.
+							phase_locked_offset = std::max<double>(
+								std::min<double>(phase_locked_offset,
+								                 double(refresh_rate_info.refresh_duration) * -0.125e-9),
+								double(refresh_rate_info.refresh_duration) * -0.5e-9);
+						}
 					}
 				}
 				else if (!decoder.acquire_video_frame(next_frame, 5000))
@@ -456,9 +526,14 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			if (phase_locked_enable && frame.view)
 			{
 				double phase_offset = target_done - double(frame.done_ts) * 1e-9;
-				memmove(stats.phase_offsets, stats.phase_offsets + 1,
-				        sizeof(stats.phase_offsets) - sizeof(stats.phase_offsets[0]));
-				stats.phase_offsets[sizeof(stats.phase_offsets) / sizeof(stats.phase_offsets[0]) - 1] = float(phase_offset);
+
+				if (frr_adaptive)
+				{
+					// Pull back phase offset based on jitter. For safety, don't allow more than 10ms of jitter.
+					double avg_jitter = avg_abs(stats.pts_deltas);
+					phase_offset -= std::min<double>(avg_jitter, 0.01);
+				}
+
 				push_sliding_window(stats.phase_offsets, phase_offset);
 
 				int target_phase_offset_us = int(phase_offset * 1e6);
@@ -524,8 +599,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			while (next_frame.view)
 			{
 				// If we have two candidates, shift out frame if next_frame PTS is closer.
-				double d_current = std::abs(frame.pts - target_pts);
-				double d_next = std::abs(next_frame.pts - target_pts);
+				double d_current = muglm::abs(frame.pts - target_pts);
+				double d_next = muglm::abs(next_frame.pts - target_pts);
 
 				// In case we get two frames with same PTS for whatever reason, ensure forward progress.
 				// The less-equal check is load-bearing.
@@ -735,6 +810,54 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(Granite::UI::FontSize::Large), text,
 					                          { 15.0f + 320.0f + 10.0f, y_offset + 10.0f, 0 },
 					                          { 300.0f - 10.0f, 45.0f - 10.0f});
+
+					y_offset += 50.0f;
+				}
+
+				if (frr_adaptive)
+				{
+					auto &pacer = get_wsi().get_fixed_rate_pacer();
+					char text[128];
+					y_offset += 200.0f;
+
+#define RENDER_LINE(...) do { \
+	snprintf(text, sizeof(text), __VA_ARGS__); \
+	flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Normal), text, \
+		{ 15.0f + 10.0f, y_offset + 10.0f, 0 }, \
+		{ 500.0f - 10.0f, 45.0f - 10.0f}); \
+	y_offset += 30.0f; \
+} while (false)
+
+					RENDER_LINE("Phase locked offset: %.3f ms\n", 1e3 * phase_locked_offset);
+					RENDER_LINE("Target present gap: %.3f ms (%.3f %% confidence, %llu since last fail, %llu failures)\n",
+					            1e-6 * double(pacer.get_estimated_present_gap_ns()),
+					            pacer.get_current_histogram_stats().confidence * 100.0,
+					            static_cast<unsigned long long>(
+						            get_wsi().get_last_submitted_present_id() -
+						            pacer.get_current_histogram_stats().last_failure_present_id),
+					            static_cast<unsigned long long>(pacer.get_current_histogram_stats().
+						            num_relevant_present_failures));
+					RENDER_LINE("Candidate present gap: (%.3f %% confidence, %llu since last fail, %llu failures)\n",
+					            pacer.get_candidate_histogram_stats().confidence * 100.0,
+					            static_cast<unsigned long long>(
+						            get_wsi().get_last_submitted_present_id() -
+						            pacer.get_candidate_histogram_stats().last_failure_present_id),
+					            static_cast<unsigned long long>(pacer.get_candidate_histogram_stats().
+						            num_relevant_present_failures));
+					RENDER_LINE("Minimum candidate confidence for promotion: %.3f %%\n",
+					            pacer.get_minimum_confidence_for_promotion() * 100.0);
+					RENDER_LINE("Pacer confidence: %.6f %%\n",
+					            pacer.get_overall_histogram_stats().confidence * 100.0);
+					RENDER_LINE("Frames since last failure: %llu\n",
+					            static_cast<unsigned long long>(
+						            get_wsi().get_last_submitted_present_id() -
+						            pacer.get_overall_histogram_stats().last_failure_present_id));
+					RENDER_LINE("Num failures: %llu\n",
+					            static_cast<unsigned long long>(
+						            pacer.get_overall_histogram_stats().num_relevant_present_failures));
+					RENDER_LINE("Target CPU -> GPU idle latency: %.3f ms\n",
+					            1e-6 * double(pacer.get_estimated_cpu_gpu_idle_latency_ns()));
+#undef RENDER_LINE
 				}
 
 				if (sent_button_mask.exchange(0, std::memory_order_relaxed))
@@ -765,7 +888,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		for (size_t i = 0; i < N; i++)
 		{
 			offsets[i].x = x + width * float(i) / float(N - 1);
-			float normalized_time = 60.0f * abs(ts[i]);
+			float normalized_time = 60.0f * (is_signed ? ts[i] : muglm::abs(ts[i]));
 
 			if (is_signed)
 			{
@@ -781,7 +904,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			if (is_signed)
 				avg += ts[i];
 			else
-				avg += abs(ts[i]);
+				avg += muglm::abs(ts[i]);
 		}
 
 		avg /= float(N);
@@ -961,12 +1084,14 @@ Application *application_create(int argc, char **argv)
 	bool phase_locked_enable = false;
 	double deadline = 0.0;
 	bool deadline_enable = false;
+	bool frr_adaptive = false;
 	const char *hwdevice = nullptr;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
 	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
+	cbs.add("--frr-adaptive", [&](Util::CLIParser &) { frr_adaptive = true; });
 	cbs.add("--deadline", [&](Util::CLIParser &parser) { deadline = parser.next_double(); deadline_enable = true; });
 	cbs.add("--hwdevice", [&](Util::CLIParser &parser) { hwdevice = parser.next_string(); });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
@@ -987,6 +1112,7 @@ Application *application_create(int argc, char **argv)
 	{
 		auto *app = new VideoPlayerApplication(path, target_delay,
 		                                       phase_locked_offset, phase_locked_enable,
+		                                       frr_adaptive,
 		                                       deadline, deadline_enable, hwdevice);
 		return app;
 	}
