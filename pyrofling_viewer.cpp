@@ -1060,7 +1060,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 static void print_help()
 {
 	LOGI("pyrofling-viewer "
-	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE]\n");
+	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE] [--frr-adaptive]\n");
 }
 
 namespace Granite
