@@ -73,10 +73,10 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	VideoPlayerApplication(const char *video_path,
 	                       float target_latency_,
 	                       double phase_locked_offset_, bool phase_locked_enable_,
-	                       bool frr_adaptive_,
+	                       bool frr_adaptive_, bool host_gpu_timestamp_,
 	                       double deadline_, bool deadline_enable_, const char *hwdevice_)
 		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
-		, frr_adaptive(frr_adaptive_)
+		, frr_adaptive(frr_adaptive_), host_gpu_timestamp(host_gpu_timestamp_)
 		, deadline(deadline_), deadline_enable(deadline_enable_)
 		, target_latency(target_latency_), hwdevice(hwdevice_)
 	{
@@ -392,6 +392,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	double phase_locked_offset;
 	bool phase_locked_enable;
 	bool frr_adaptive;
+	bool host_gpu_timestamp;
 	double deadline;
 	bool deadline_enable;
 	float target_latency;
@@ -715,7 +716,16 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
 		cmd->end_render_pass();
 
-		device.submit(cmd);
+		Vulkan::Fence fence;
+		device.submit(cmd, host_gpu_timestamp ? &fence : nullptr);
+
+		// Workaround for RDNA3.5 iGPU for now.
+		if (fence)
+		{
+			fence->wait();
+			get_wsi().get_fixed_rate_pacer().override_gpu_done_time(get_wsi().get_last_submitted_present_id() + 1,
+			                                                        Util::get_current_time_nsecs());
+		}
 	}
 
 	void render_frame(double frame_time, double elapsed_time) override
@@ -1060,7 +1070,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 static void print_help()
 {
 	LOGI("pyrofling-viewer "
-	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE] [--frr-adaptive]\n");
+	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE] [--frr-adaptive] [--host-gpu-timestamp]\n");
 }
 
 namespace Granite
@@ -1085,6 +1095,7 @@ Application *application_create(int argc, char **argv)
 	double deadline = 0.0;
 	bool deadline_enable = false;
 	bool frr_adaptive = false;
+	bool host_gpu_timestamp = false;
 	const char *hwdevice = nullptr;
 
 	Util::CLICallbacks cbs;
@@ -1092,6 +1103,7 @@ Application *application_create(int argc, char **argv)
 	cbs.add("--latency", [&](Util::CLIParser &parser) { target_delay = float(parser.next_double()); });
 	cbs.add("--phase-locked", [&](Util::CLIParser &parser) { phase_locked_offset = parser.next_double(); phase_locked_enable = true; });
 	cbs.add("--frr-adaptive", [&](Util::CLIParser &) { frr_adaptive = true; });
+	cbs.add("--host-gpu-timestamp", [&](Util::CLIParser &) { host_gpu_timestamp = true; });
 	cbs.add("--deadline", [&](Util::CLIParser &parser) { deadline = parser.next_double(); deadline_enable = true; });
 	cbs.add("--hwdevice", [&](Util::CLIParser &parser) { hwdevice = parser.next_string(); });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
@@ -1112,7 +1124,7 @@ Application *application_create(int argc, char **argv)
 	{
 		auto *app = new VideoPlayerApplication(path, target_delay,
 		                                       phase_locked_offset, phase_locked_enable,
-		                                       frr_adaptive,
+		                                       frr_adaptive, host_gpu_timestamp,
 		                                       deadline, deadline_enable, hwdevice);
 		return app;
 	}
