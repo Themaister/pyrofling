@@ -196,7 +196,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				LOGI("Enabling FRR adaptive path.\n");
 
 				get_wsi().set_enable_timing_feedback(true);
-				get_wsi().enable_fixed_rate_low_latency_pacer(true);
+				get_wsi().set_fixed_rate_low_latency_pacer(true);
 			}
 
 			float target_buffer = std::max(0.1f, std::min(target_latency * 2.0f, target_latency + 0.2f));
