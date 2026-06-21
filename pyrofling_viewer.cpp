@@ -716,16 +716,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		flat_renderer.flush(*cmd, {}, { cmd->get_viewport().width, cmd->get_viewport().height, 1.0f });
 		cmd->end_render_pass();
 
-		Vulkan::Fence fence;
-		device.submit(cmd, host_gpu_timestamp ? &fence : nullptr);
-
-		// Workaround for RDNA3.5 iGPU for now.
-		if (fence)
-		{
-			fence->wait();
-			get_wsi().get_fixed_rate_pacer().override_gpu_done_time(get_wsi().get_last_submitted_present_id() + 1,
-			                                                        Util::get_current_time_nsecs());
-		}
+		device.submit(cmd);
 	}
 
 	void render_frame(double frame_time, double elapsed_time) override
@@ -882,7 +873,17 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			GRANITE_SCOPED_TIMELINE_EVENT("submit");
 			frame.sem.reset();
-			device.submit(cmd, nullptr, 1, &frame.sem);
+
+			Vulkan::Fence fence;
+			device.submit(cmd, host_gpu_timestamp ? &fence : nullptr, 1, &frame.sem);
+
+			// Workaround for RDNA3.5 iGPU for now.
+			if (fence)
+			{
+				fence->wait();
+				get_wsi().get_fixed_rate_pacer().override_gpu_done_time(get_wsi().get_last_submitted_present_id() + 1,
+						Util::get_current_time_nsecs());
+			}
 		}
 	}
 
