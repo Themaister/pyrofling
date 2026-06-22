@@ -16,6 +16,7 @@ public:
 	virtual ~PyroStreamConnectionServerInterface() = default;
 	virtual void release_connection(PyroStreamConnection *conn) = 0;
 	virtual pyro_codec_parameters get_codec_parameters() = 0;
+	virtual int64_t sample_reference_pts() = 0;
 	virtual void set_phase_offset(int phase_us) = 0;
 	virtual void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) = 0;
 };
@@ -95,6 +96,8 @@ public:
 	void set_phase_offset(int phase_offset_us) override;
 	int get_phase_offset_us() const;
 	void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) override;
+	int64_t sample_reference_pts() override;
+
 	const pyro_gamepad_state *get_updated_gamepad_state();
 
 	void set_forward_error_correction(bool enable);

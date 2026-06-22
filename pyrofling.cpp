@@ -729,6 +729,14 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			img.state = State::PresentQueued;
 			img.event = { server.group.get_timeline_trace_file(), "PresentQueue", present.wire.index };
 
+			// Normalize the layouts to sync2.
+			if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+				old_layout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
+			if (old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+				old_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+			if (new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+				new_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+
 			// No future present can be locked in earlier than this one.
 			earliest_next_timestamp = img.target_timestamp + img.target_period;
 
@@ -759,9 +767,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			{
 				cmd->acquire_image_barrier(*img.image, old_layout, new_layout, 0, 0);
 
-				if (new_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+				if (new_layout != VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
 				{
-					cmd->image_barrier(*img.image, new_layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					cmd->image_barrier(*img.image, new_layout, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
 					                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
 					                   0, 0);
 				}
@@ -1075,10 +1083,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (surface.img)
 			{
 				// External image from pipewire. Acquire and release properly from external queue.
-				cmd->acquire_image_barrier(*surface.img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				cmd->acquire_image_barrier(*surface.img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
 				                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 				encoder->process_rgb(*cmd, *ycbcr_pipeline, surface.img->get_view(), VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
-				cmd->release_image_barrier(*surface.img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+				cmd->release_image_barrier(*surface.img, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
 				                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0);
 			}
 			else if (!surface.chain)
@@ -1098,7 +1106,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				value.color.float32[1] = 0.2f;
 				value.color.float32[2] = 0.3f;
 				cmd->clear_image(*img, value);
-				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
 				                   VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 				encoder->process_rgb(*cmd, *ycbcr_pipeline, img->get_view());
@@ -1131,7 +1139,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					                          0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
 
 					cmd->image_barrier(*surf.dst_cross_device_image,
-					                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
 					                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 					                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 

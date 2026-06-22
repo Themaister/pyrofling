@@ -202,6 +202,15 @@ double PyroStreamClient::get_current_ping_delay() const
 	return last_ping_delay;
 }
 
+bool PyroStreamClient::estimate_remote_pts_to_local_time(double remote_pts, double &local_pts)
+{
+	if (last_reference_pts == 0 || last_local_pts == 0)
+		return false;
+
+	local_pts = remote_pts + double(last_local_pts - last_reference_pts) * 1e-6;
+	return true;
+}
+
 bool PyroStreamClient::send_gamepad_state(const pyro_gamepad_state &state)
 {
 	auto send_state = state;
@@ -484,7 +493,22 @@ bool PyroStreamClient::iterate()
 	if ((payload.header.encoded & special_packet) == special_packet)
 	{
 		uint32_t packet_seq = pyro_payload_get_packet_seq(payload.header.encoded);
-		last_ping_delay = 1e-9 * double(Util::get_current_time_nsecs() - ping_times[packet_seq % 256]);
+		auto current_ns = Util::get_current_time_nsecs();
+		auto ping_ns = current_ns - ping_times[packet_seq % 256];
+		last_ping_delay = 1e-9 * double(ping_ns);
+
+		if (payload.size == sizeof(pyro_ping_state_extended))
+		{
+			pyro_ping_state_extended sync = {};
+			memcpy(&sync, payload.buffer, sizeof(sync));
+			last_reference_pts = sync.pts_reference_lo | (int64_t(sync.pts_reference_hi) << 32);
+			last_local_pts = current_ns / 1000;
+
+			// Estimate that the latency from client to server and server to client is the same,
+			// so subtract half the ping delay to estimate the time at server when we sent the PING request.
+			last_reference_pts -= ping_ns / 2000;
+		}
+
 		return true;
 	}
 

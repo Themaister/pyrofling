@@ -195,7 +195,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				deadline_enable = true;
 				LOGI("Enabling FRR adaptive path.\n");
 
-				get_wsi().set_enable_timing_feedback(true);
 				get_wsi().set_fixed_rate_low_latency_pacer(true);
 			}
 
@@ -222,6 +221,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			video_path = nullptr;
 
 			is_running_pyro = true;
+			get_wsi().set_enable_timing_feedback(true);
 
 			if (target_latency <= 0.0 && !phase_locked_enable)
 				get_wsi().set_present_mode(Vulkan::PresentMode::UnlockedNoTearing);
@@ -414,12 +414,49 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		float server_frame_time[150];
 		float ping[150];
 		float buffered_video[150];
+		float system_latency[150];
 		bool enable = false;
 	} stats = {};
 
 	void update_audio_buffer_stats()
 	{
 		push_sliding_window(stats.audio_delay_buffer, decoder.get_audio_buffering_duration());
+	}
+
+	struct LatencyMeasurement
+	{
+		uint64_t present_id;
+		double pts;
+	};
+	Util::SmallVector<LatencyMeasurement> latency_measurements;
+
+	void register_system_latency_measurement(uint64_t present_id, double pts)
+	{
+		if (latency_measurements.size() > 16)
+			latency_measurements.clear();
+
+		latency_measurements.push_back({ present_id, pts });
+	}
+
+	void notify_system_latency_measurement(uint64_t present_id, uint64_t present_done_ts)
+	{
+		// Remove old and obsolete entries.
+		auto itr = std::remove_if(latency_measurements.begin(), latency_measurements.end(), [&](const LatencyMeasurement &m)
+		{
+			return m.present_id < present_id;
+		});
+		latency_measurements.erase(itr, latency_measurements.end());
+
+		itr = std::find_if(latency_measurements.begin(), latency_measurements.end(), [&](const LatencyMeasurement &m)
+		{
+			return m.present_id == present_id;
+		});
+
+		if (itr != latency_measurements.end())
+		{
+			push_sliding_window(stats.system_latency, double(present_done_ts) * 1e-9 - itr->pts);
+			latency_measurements.erase(itr);
+		}
 	}
 
 	bool update(Vulkan::Device &device, double frame_time, double elapsed_time)
@@ -491,34 +528,54 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 						// It's possible we can decode a damaged frame instead, depends on the codec.
 						decoder.acquire_damaged_video_frame(next_frame);
 					}
-					else if (frr_adaptive)
+					else
 					{
-						// Successful frame, veeeery slowly reduce the target window.
-						Vulkan::RefreshRateInfo refresh_rate_info = {};
-
-						// In a perfect world, this will always hit 0, but due to jitter, that's not realistic.
-						double phase_offset = double(Util::get_current_time_nsecs() - int64_t(next_frame.done_ts)) * 1e-9;
-
-						if (get_wsi().get_refresh_rate_info(refresh_rate_info) &&
-							refresh_rate_info.refresh_duration)
-						{
-							// If there's not at least a 2ms gap, we're too close for comfort, pull it back a little.
-							// The more jitter there is in the system, the more often we will hit the 0-2ms guardband.
-							if (phase_offset > 2e-3)
-								phase_locked_offset += 1e-6;
-							else
-								phase_locked_offset -= 1e-5;
-
-							// Clamp to make sure the phase offset doesn't explode.
-							phase_locked_offset = std::max<double>(
-								std::min<double>(phase_locked_offset,
-								                 double(refresh_rate_info.refresh_duration) * -0.125e-9),
-								double(refresh_rate_info.refresh_duration) * -0.5e-9);
-						}
+						had_acquire = true;
 					}
 				}
 				else if (!decoder.acquire_video_frame(next_frame, 5000))
 					return false;
+			}
+
+			if (frr_adaptive && had_acquire)
+			{
+				// Successful frame, veeeery slowly reduce the target window.
+				Vulkan::RefreshRateInfo refresh_rate_info = {};
+
+				// In a perfect world, this will always hit 0, but due to jitter, that's not realistic.
+				double phase_offset = double(Util::get_current_time_nsecs() - int64_t(next_frame.done_ts)) * 1e-9;
+
+				if (get_wsi().get_refresh_rate_info(refresh_rate_info) && refresh_rate_info.refresh_duration)
+				{
+					// If there's not at least a 2ms gap, we're too close for comfort, pull it back a little.
+					// The more jitter there is in the system, the more often we will hit the 0-2ms guardband.
+					if (phase_offset > 2e-3)
+						phase_locked_offset += 1e-6;
+					else
+						phase_locked_offset -= 1e-5;
+
+					// Clamp to make sure the phase offset doesn't explode.
+					phase_locked_offset = std::max<double>(
+						std::min<double>(phase_locked_offset,
+										 double(refresh_rate_info.refresh_duration) * -0.125e-9),
+						double(refresh_rate_info.refresh_duration) * -0.5e-9);
+				}
+			}
+
+			if (had_acquire && is_running_pyro)
+			{
+				double local_pts;
+				if (pyro.estimate_remote_pts_to_local_time(next_frame.pts, local_pts))
+				{
+					register_system_latency_measurement(get_wsi().get_last_submitted_present_id() + 1, local_pts);
+
+					Vulkan::PresentationStats presentation_stats = {};
+					if (get_wsi().get_presentation_stats(presentation_stats))
+					{
+						notify_system_latency_measurement(presentation_stats.feedback_present_id,
+						                                  presentation_stats.present_done_ts);
+					}
+				}
 			}
 
 			if (next_frame.view)
@@ -803,6 +860,12 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				y_offset += 110.0f;
 				render_sliding_window("Ping", 15.0f, y_offset, 300, 100, stats.ping);
 
+				Vulkan::PresentationStats presentation_stats = {};
+				bool has_working_stats = get_wsi().get_presentation_stats(presentation_stats);
+
+				if (has_working_stats)
+					render_sliding_window("System Latency", 15.0f, y_offset + 110.0f, 300, 100, stats.system_latency);
+
 				if (deadline_enable)
 				{
 					flat_renderer.render_quad({15.0f + 320.0f, y_offset, 0.5f}, {300, 45}, {0.0f, 0.0f, 0.0f, 0.5f});
@@ -815,7 +878,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					y_offset += 50.0f;
 				}
 
-				if (frr_adaptive)
+				if (frr_adaptive && has_working_stats)
 				{
 					auto &pacer = get_wsi().get_fixed_rate_pacer();
 					char text[128];

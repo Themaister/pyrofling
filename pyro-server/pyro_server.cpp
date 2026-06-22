@@ -6,6 +6,8 @@
 #include <string.h>
 #include <netdb.h>
 
+#include "timer.hpp"
+
 namespace PyroFling
 {
 PyroStreamConnection::PyroStreamConnection(
@@ -365,10 +367,16 @@ void PyroStreamConnection::handle_udp_datagram(
 			pyro_ping_state state = {};
 			memcpy(&state, msg, sizeof(state));
 			state.seq &= PYRO_PAYLOAD_PACKET_SEQ_MASK;
+
+			auto pts = server.sample_reference_pts();
+			pyro_ping_state_extended ext = {};
+			ext.pts_reference_lo = uint32_t(pts);
+			ext.pts_reference_hi = uint32_t(pts >> 32);
+
 			pyro_payload_header header = {};
 			header.encoded |= PYRO_PAYLOAD_KEY_FRAME_BIT | PYRO_PAYLOAD_STREAM_TYPE_BIT;
 			header.encoded |= state.seq << PYRO_PAYLOAD_PACKET_SEQ_OFFSET;
-			dispatcher_.write_udp_datagram(udp_remote, &header, sizeof(header), nullptr, 0);
+			dispatcher_.write_udp_datagram(udp_remote, &header, sizeof(header), &ext, sizeof(ext));
 		}
 		break;
 	}
@@ -504,5 +512,10 @@ void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro
 		current_gamepad_remote = remote;
 		new_gamepad_state = true;
 	}
+}
+
+int64_t PyroStreamServer::sample_reference_pts()
+{
+	return Util::get_current_time_nsecs() / 1000;
 }
 }

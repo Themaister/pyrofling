@@ -108,6 +108,14 @@ struct pyro_ping_state
 	uint16_t seq;
 };
 
+// Newer server will reply with payload data for PING packets.
+// This remains backwards compatible with older clients since it will ignore it.
+// Newer clients can check size of the received packet to determine if this data is available.
+struct pyro_ping_state_extended
+{
+	uint32_t pts_reference_lo, pts_reference_hi;
+};
+
 typedef enum pyro_kick_state_bits
 {
 	PYRO_KICK_STATE_VIDEO_BIT = 1 << 0,

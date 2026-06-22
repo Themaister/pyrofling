@@ -65,6 +65,8 @@ public:
 
 	double get_current_ping_delay() const;
 
+	bool estimate_remote_pts_to_local_time(double remote_pts, double &local_pts);
+
 private:
 	PyroFling::Socket tcp, udp;
 	pyro_kick_state_flags kick_flags = 0;
@@ -87,8 +89,10 @@ private:
 	std::chrono::time_point<std::chrono::steady_clock> last_progress_time;
 	uint16_t gamepad_seq = 0;
 	uint16_t ping_seq = 0;
-	uint64_t ping_times[256] = {};
+	int64_t ping_times[256] = {};
 	double last_ping_delay = 0.0;
+	int64_t last_reference_pts = 0;
+	int64_t last_local_pts = 0;
 
 	ReconstructedPacket *get_stream_packet(ReconstructedPacket *stream_base,
 	                                       uint32_t packet_seq);
