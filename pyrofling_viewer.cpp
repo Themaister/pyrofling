@@ -434,7 +434,6 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 		if (latency_measurements.size() > 16)
 			latency_measurements.clear();
-
 		latency_measurements.push_back({ present_id, pts });
 	}
 
@@ -454,7 +453,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 		if (itr != latency_measurements.end())
 		{
-			push_sliding_window(stats.system_latency, double(present_done_ts) * 1e-9 - itr->pts);
+			double latency = double(present_done_ts) * 1e-9 - itr->pts;
+			push_sliding_window(stats.system_latency, latency);
 			latency_measurements.erase(itr);
 		}
 	}
@@ -535,6 +535,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				}
 				else if (!decoder.acquire_video_frame(next_frame, 5000))
 					return false;
+				else
+					had_acquire = true;
 			}
 
 			if (frr_adaptive && had_acquire)
@@ -570,7 +572,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					register_system_latency_measurement(get_wsi().get_last_submitted_present_id() + 1, local_pts);
 
 					Vulkan::PresentationStats presentation_stats = {};
-					if (get_wsi().get_presentation_stats(presentation_stats))
+					if (get_wsi().get_presentation_stats(presentation_stats) &&
+						presentation_stats.present_done_ts)
 					{
 						notify_system_latency_measurement(presentation_stats.feedback_present_id,
 						                                  presentation_stats.present_done_ts);

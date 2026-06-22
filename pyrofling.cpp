@@ -461,7 +461,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				server.unregister_handler(this);
 
 				// Make sure we tear down the pipe handler as well.
-				const uint64_t sentinel[2] = { uint64_t(-1), uint64_t(-1) };
+				const uint64_t sentinel[3] = { uint64_t(-1), uint64_t(-1), uint64_t(-1) };
 				ssize_t ret = ::write(pipe_fd.get_native_handle(), &sentinel, sizeof(sentinel));
 				if (ret < 0 && errno != EPIPE)
 					LOGE("Failed to terminate pipe.\n");
@@ -686,6 +686,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (img.state != State::ClientOwned)
 				return send_message(fd, MessageType::ErrorProtocol, present.get_serial());
 
+			int64_t ts = server.encoder ? server.encoder->sample_realtime_pts() : 0;
+
 			Vulkan::Semaphore sem;
 			Vulkan::CommandBuffer::Type cmd_type =
 					img.src_cross_device_buffer ? Vulkan::CommandBuffer::Type::AsyncTransfer :
@@ -742,6 +744,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			auto cmd = device.request_command_buffer(cmd_type);
 
+			bool wait_early = false;
+
 			if (img.src_cross_device_buffer)
 			{
 				cmd->acquire_image_barrier(*img.image, old_layout, new_layout,
@@ -762,18 +766,26 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 				cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+				// We must have a roundtrip between the GPUs when it's remote GPU presenting.
+				wait_early = true;
 			}
 			else
 			{
-				cmd->acquire_image_barrier(*img.image, old_layout, new_layout, 0, 0);
+				cmd->acquire_image_barrier(*img.image, old_layout, new_layout,
+				                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT);
 
 				if (new_layout != VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
 				{
 					cmd->image_barrier(*img.image, new_layout, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
 					                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
-					                   0, 0);
+					                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT);
 				}
 			}
+
+			// If we're not doing immediate encode, we should make sure GPU is idle before we commit to a cycle.
+			if (!server.video_encode.immediate)
+				wait_early = true;
 
 			Vulkan::Fence fence;
 			device.submit(cmd, &fence);
@@ -781,14 +793,31 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			// Mark the buffer async.
 			add_reference();
 			server.group.create_task(
-					[this, index = present.wire.index, serial = image_group_serial, f = std::move(fence)]() mutable {
+					[this, index = present.wire.index, serial = image_group_serial,
+						f = std::move(fence), ts, wait_early]() mutable {
+
+						// Don't want to create a bubble here if we can help it.
+						if (wait_early)
+						{
+							f->wait();
+							const uint64_t buf[3] = { serial, index, uint64_t(ts) };
+							ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
+							if (ret < 0 && errno != EPIPE)
+								LOGE("Failed to write to pipe.\n");
+						}
+
+						// Need to block before we can release the reference at least ...
 						f->wait();
-						const uint64_t buf[2] = { serial, index };
-						ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
-						if (ret < 0 && errno != EPIPE)
-							LOGE("Failed to write to pipe.\n");
 						release_reference();
 					});
+
+			if (!wait_early)
+			{
+				const uint64_t buf[3] = { image_group_serial, present.wire.index, uint64_t(ts) };
+				ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
+				if (ret < 0 && errno != EPIPE)
+					LOGE("Failed to write to pipe.\n");
+			}
 
 			if (!send_message(fd, MessageType::OK, present.get_serial()))
 				return false;
@@ -812,7 +841,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 		bool handle_async(const FileHandle &fd)
 		{
-			uint64_t buf[2];
+			uint64_t buf[3];
 			if (size_t(::read(fd.get_native_handle(), buf, sizeof(buf))) != sizeof(buf))
 				return false;
 
@@ -834,7 +863,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			// If we're using immediate mode, we'll want to encode this frame right away and send it.
 			// It will be retired late.
 			timestamp_complete_mappings.push_back({ images[index].target_timestamp, images[index].present_id });
-			server.notify_async_surface({ this, int(index) });
+			server.notify_async_surface({ this, int(index), int64_t(buf[2]) });
 
 			// If we're doing immediate encode, every user image can be retired now.
 			// We've already blitted it.
@@ -1058,6 +1087,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 	{
 		Swapchain *chain;
 		int index;
+		int64_t pts;
 		const Vulkan::Image *img;
 	};
 
@@ -1074,7 +1104,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 		if (encoder && encoder_device && ycbcr_pipeline && encode_frame)
 		{
-			auto pts = encoder->sample_realtime_pts();
+			auto pts = surface.pts;
+			if (pts == 0)
+				pts = encoder->sample_realtime_pts();
 
 			// Composite the final YCbCr frame here.
 			// For now, just select one candidate and pretend it's the foreground flip.
@@ -1608,7 +1640,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 #ifdef HAVE_PIPEWIRE
 void PipewireStream::send_encoding(const Vulkan::Image &img)
 {
-	server.encode_surface({ nullptr, -1, &img }, 0);
+	int64_t pts = server.encoder ? server.encoder->sample_realtime_pts() : 0;
+	server.encode_surface({ nullptr, -1, pts, &img }, 0);
 }
 #endif
 
