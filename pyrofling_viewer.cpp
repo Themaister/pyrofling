@@ -474,7 +474,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			double target_done = double(Util::get_current_time_nsecs()) * 1e-9 + phase_locked_offset;
 			bool had_acquire = false;
-			unsigned target_frames = phase_locked_enable ? 3 : 0;
+			unsigned target_frames = phase_locked_enable ? 1 : 0;
 
 			// Catch up and then rely on phase locked loop to tune latency.
 			while (decoder.get_num_ready_video_frames() > target_frames)
