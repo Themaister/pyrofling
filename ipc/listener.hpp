@@ -124,6 +124,9 @@ public:
 	                       const void *header, unsigned header_size,
 	                       const void *data, unsigned size);
 
+	int write_udp_datagrams(const RemoteAddress &addr, unsigned num_sub_packets, unsigned header_size,
+	                        const void *headers, const void **data, const unsigned *sizes);
+
 private:
 	HandlerFactoryInterface *iface = nullptr;
 	Listener listener;

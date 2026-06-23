@@ -1,5 +1,6 @@
 #include "pyro_server.hpp"
 #include "messages.hpp"
+#include "small_vector.hpp"
 #include <algorithm>
 
 #include <sys/timerfd.h>
@@ -235,6 +236,10 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 
 	uint32_t subseq = 0;
 
+	Util::SmallVector<pyro_payload_header, 1024> headers;
+	Util::SmallVector<const void *, 1024> data_ptrs;
+	Util::SmallVector<unsigned, 1024> data_sizes;
+
 	auto *data = static_cast<const uint8_t *>(data_);
 	for (size_t i = 0; i < size; i += PYRO_MAX_PAYLOAD_SIZE)
 	{
@@ -245,15 +250,20 @@ void PyroStreamConnection::write_packet(int64_t pts, int64_t dts,
 		header.encoded &= ~(PYRO_PAYLOAD_SUBPACKET_SEQ_MASK << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET);
 		header.encoded |= subseq << PYRO_PAYLOAD_SUBPACKET_SEQ_OFFSET;
 
-		if (dispatcher.write_udp_datagram(udp_remote, &header, sizeof(header),
-		                                  data + i, std::min<size_t>(PYRO_MAX_PAYLOAD_SIZE, size - i)) < 0)
-		{
-			fprintf(stderr, "Error writing UDP datagram. Congested buffers?\n");
-		}
+		headers.push_back(header);
+		data_ptrs.push_back(data + i);
+		data_sizes.push_back(std::min<unsigned>(PYRO_MAX_PAYLOAD_SIZE, size - i));
 
 		subseq = (subseq + 1) & PYRO_PAYLOAD_SUBPACKET_SEQ_MASK;
 	}
 
+	if (dispatcher.write_udp_datagrams(udp_remote, headers.size(), sizeof(pyro_payload_header),
+	                                   headers.data(), data_ptrs.data(), data_sizes.data()) < 0)
+	{
+		fprintf(stderr, "Error writing UDP datagram. Congested buffers?\n");
+	}
+
+	// The --fec path implies lower bitrate, so don't bother.
 	if (!is_audio && fec)
 	{
 		uint8_t xor_data[PYRO_MAX_PAYLOAD_SIZE];

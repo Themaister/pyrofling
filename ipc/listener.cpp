@@ -236,11 +236,11 @@ int Dispatcher::write_udp_datagram(const RemoteAddress &addr,
                                    const void *header, unsigned header_size,
                                    const void *data, unsigned size)
 {
-	struct msghdr msg = {};
+	msghdr msg = {};
 	msg.msg_name = const_cast<sockaddr_storage *>(&addr.addr);
 	msg.msg_namelen = addr.addr_size;
 
-	struct iovec iv[2] = {};
+	iovec iv[2] = {};
 	msg.msg_iov = iv;
 	msg.msg_iovlen = 2;
 
@@ -250,6 +250,51 @@ int Dispatcher::write_udp_datagram(const RemoteAddress &addr,
 	iv[1].iov_len = size;
 
 	return int(::sendmsg(udp_listener.get_file_handle().get_native_handle(), &msg, 0));
+}
+
+int Dispatcher::write_udp_datagrams(
+		const RemoteAddress &addr, unsigned num_sub_packets, unsigned header_size,
+		const void *headers, const void **data, const unsigned *sizes)
+{
+	msghdr msg = {};
+	msg.msg_name = const_cast<sockaddr_storage *>(&addr.addr);
+	msg.msg_namelen = addr.addr_size;
+
+	constexpr size_t StaticSubPackets = 1024;
+	mmsghdr mmsghdr_static[StaticSubPackets];
+	iovec iov_static[StaticSubPackets * 2];
+
+	std::vector<mmsghdr> mmsghdr_dynamic;
+	std::vector<iovec> iov_dynamic;
+
+	// Fallback to dynamically allocated as needed.
+	mmsghdr *mmgs = mmsghdr_static;
+	iovec *iovs = iov_static;
+
+	if (num_sub_packets > StaticSubPackets)
+	{
+		iov_dynamic.resize(num_sub_packets * 2);
+		mmsghdr_dynamic.resize(num_sub_packets);
+
+		iovs = iov_dynamic.data();
+		mmgs = mmsghdr_dynamic.data();
+	}
+
+	for (unsigned i = 0; i < num_sub_packets; i++, iovs += 2)
+	{
+		mmgs[i].msg_hdr = msg;
+		mmgs[i].msg_len = 0;
+
+		iovs[0].iov_base = const_cast<uint8_t *>(static_cast<const uint8_t *>(headers) + header_size * i);
+		iovs[0].iov_len = header_size;
+		iovs[1].iov_base = const_cast<void *>(data[i]);
+		iovs[1].iov_len = sizes[i];
+
+		mmgs[i].msg_hdr.msg_iov = iovs;
+		mmgs[i].msg_hdr.msg_iovlen = 2;
+	}
+
+	return int(::sendmmsg(udp_listener.get_file_handle().get_native_handle(), mmgs, num_sub_packets, 0));
 }
 
 bool Dispatcher::iterate_inner()
