@@ -415,6 +415,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		float ping[150];
 		float buffered_video[150];
 		float system_latency[150];
+		float present_gap[150];
+		float encode_transmission_time[150];
 		bool enable = false;
 	} stats = {};
 
@@ -427,17 +429,18 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	{
 		uint64_t present_id;
 		double pts;
+		double recieved;
 	};
 	Util::SmallVector<LatencyMeasurement> latency_measurements;
 
-	void register_system_latency_measurement(uint64_t present_id, double pts)
+	void register_system_latency_measurement(uint64_t present_id, double pts, double recieved)
 	{
 		if (latency_measurements.size() > 16)
 			latency_measurements.clear();
-		latency_measurements.push_back({ present_id, pts });
+		latency_measurements.push_back({ present_id, pts, recieved });
 	}
 
-	void notify_system_latency_measurement(uint64_t present_id, uint64_t present_done_ts)
+	void notify_system_latency_measurement(uint64_t present_id, uint64_t present_done_ts, uint64_t gpu_done_ts)
 	{
 		// Remove old and obsolete entries.
 		auto itr = std::remove_if(latency_measurements.begin(), latency_measurements.end(), [&](const LatencyMeasurement &m)
@@ -455,6 +458,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 		{
 			double latency = double(present_done_ts) * 1e-9 - itr->pts;
 			push_sliding_window(stats.system_latency, latency);
+			push_sliding_window(stats.present_gap, (double(present_done_ts) - double(gpu_done_ts)) * 1e-9);
+			push_sliding_window(stats.encode_transmission_time, itr->recieved - itr->pts);
 			latency_measurements.erase(itr);
 		}
 	}
@@ -468,6 +473,21 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 		if (is_running_pyro)
 			push_sliding_window(stats.ping, pyro.get_current_ping_delay());
+
+		Vulkan::PresentationStats presentation_stats = {};
+		if (get_wsi().get_presentation_stats(presentation_stats) &&
+			(presentation_stats.present_done_ts || presentation_stats.gpu_done_ts))
+		{
+			if (!presentation_stats.present_done_ts)
+				presentation_stats.present_done_ts = presentation_stats.gpu_done_ts;
+
+			if (!presentation_stats.gpu_done_ts)
+				presentation_stats.gpu_done_ts = presentation_stats.present_done_ts;
+
+			notify_system_latency_measurement(presentation_stats.feedback_present_id,
+											  presentation_stats.present_done_ts,
+											  presentation_stats.gpu_done_ts);
+		}
 
 		// Most aggressive method, not all that great for pacing ...
 		if (realtime && (target_latency <= 0.0 || phase_locked_enable))
@@ -569,15 +589,10 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				double local_pts;
 				if (pyro.estimate_remote_pts_to_local_time(next_frame.pts, local_pts))
 				{
-					register_system_latency_measurement(get_wsi().get_last_submitted_present_id() + 1, local_pts);
+					register_system_latency_measurement(get_wsi().get_last_submitted_present_id() + 1, local_pts,
+					                                    double(Util::get_current_time_nsecs()) * 1e-9);
 
-					Vulkan::PresentationStats presentation_stats = {};
-					if (get_wsi().get_presentation_stats(presentation_stats) &&
-						presentation_stats.present_done_ts)
-					{
-						notify_system_latency_measurement(presentation_stats.feedback_present_id,
-						                                  presentation_stats.present_done_ts);
-					}
+
 				}
 			}
 
@@ -867,7 +882,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				bool has_working_stats = get_wsi().get_presentation_stats(presentation_stats);
 
 				if (has_working_stats)
-					render_sliding_window("System Latency", 15.0f, y_offset + 110.0f, 300, 100, stats.system_latency);
+				{
+					render_sliding_window("System Lat", 15.0f + 320.0f * 2.0f, 15.0f, 300, 100, stats.system_latency);
+					render_sliding_window("Enc + Wire", 15.0f + 320.0f * 3.0f, 15.0f, 300, 100, stats.encode_transmission_time);
+					render_sliding_window("Flip Gap", 15.0f + 320.0f * 4.0f, 15.0f, 300, 100, stats.present_gap);
+				}
 
 				if (deadline_enable)
 				{
