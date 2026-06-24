@@ -796,6 +796,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 					[this, index = present.wire.index, serial = image_group_serial,
 						f = std::move(fence), ts, wait_early]() mutable {
 
+						Util::TimelineTraceFile::ScopedEvent scoped {
+							server.group.get_timeline_trace_file(), "GPU drain", uint32_t(index),
+						};
+
 						// Don't want to create a bubble here if we can help it.
 						if (wait_early)
 						{
@@ -811,16 +815,16 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 						release_reference();
 					});
 
-			if (!wait_early)
-			{
-				const uint64_t buf[3] = { image_group_serial, present.wire.index, uint64_t(ts) };
-				ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
-				if (ret < 0 && errno != EPIPE)
-					LOGE("Failed to write to pipe.\n");
-			}
-
 			if (!send_message(fd, MessageType::OK, present.get_serial()))
 				return false;
+
+			if (!wait_early)
+			{
+				// Don't roundtrip to a socket and epoll loop when we can just handle the event inline.
+				const uint64_t buf[3] = { image_group_serial, present.wire.index, uint64_t(ts) };
+				if (!handle_async(buf))
+					return false;
+			}
 
 			if (!retire_obsolete_images())
 				return false;
@@ -839,12 +843,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			return ts;
 		}
 
-		bool handle_async(const FileHandle &fd)
+		bool handle_async(const uint64_t *buf)
 		{
-			uint64_t buf[3];
-			if (size_t(::read(fd.get_native_handle(), buf, sizeof(buf))) != sizeof(buf))
-				return false;
-
 			// Sentinel.
 			if (buf[1] == uint64_t(-1))
 				return false;
@@ -874,6 +874,14 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			}
 			else
 				return retire_obsolete_images();
+		}
+
+		bool handle_async(const FileHandle &fd)
+		{
+			uint64_t buf[3];
+			if (size_t(::read(fd.get_native_handle(), buf, sizeof(buf))) != sizeof(buf))
+				return false;
+			return handle_async(buf);
 		}
 
 		bool handle(const FileHandle &fd, uint32_t id) override
