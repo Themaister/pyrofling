@@ -884,7 +884,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				if (has_working_stats)
 				{
 					render_sliding_window("System Lat", 15.0f + 320.0f * 2.0f, 15.0f, 300, 100, stats.system_latency);
-					render_sliding_window("Enc + Wire", 15.0f + 320.0f * 3.0f, 15.0f, 300, 100, stats.encode_transmission_time);
+					render_sliding_window("GPU/Enc/Wire", 15.0f + 320.0f * 3.0f, 15.0f, 300, 100, stats.encode_transmission_time);
 					render_sliding_window("Flip Gap", 15.0f + 320.0f * 4.0f, 15.0f, 300, 100, stats.present_gap);
 				}
 
