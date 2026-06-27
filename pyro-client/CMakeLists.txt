@@ -5,4 +5,6 @@ target_link_libraries(pyro-client PUBLIC pyro-protocol granite-util pyrofling-so
 
 if (WIN32)
     target_link_libraries(pyro-client PRIVATE ws2_32)
+else()
+    set_target_properties(pyro-client PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()

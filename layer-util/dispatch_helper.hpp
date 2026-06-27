@@ -46,6 +46,7 @@ struct VkLayerInstanceDispatchTable
 	PFN_vkGetPhysicalDeviceQueueFamilyProperties GetPhysicalDeviceQueueFamilyProperties;
 	PFN_vkEnumeratePhysicalDevices EnumeratePhysicalDevices;
 	PFN_vkGetPhysicalDeviceProperties2KHR GetPhysicalDeviceProperties2KHR;
+	PFN_vkGetPhysicalDeviceFeatures2KHR GetPhysicalDeviceFeatures2KHR;
 	PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties;
 	PFN_vkDestroySurfaceKHR DestroySurfaceKHR;
 
@@ -84,6 +85,8 @@ struct VkLayerInstanceDispatchTable
 	PFN_vkReleaseDisplayEXT ReleaseDisplayEXT;
 	PFN_vkAcquireDrmDisplayEXT AcquireDrmDisplayEXT;
 	PFN_vkGetDrmDisplayEXT GetDrmDisplayEXT;
+
+	PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR GetPhysicalDeviceCalibrateableTimeDomainsKHR;
 };
 
 // Device function pointer dispatch table
@@ -130,6 +133,7 @@ struct VkLayerDispatchTable
 	PFN_vkAllocateMemory AllocateMemory;
 	PFN_vkBindImageMemory BindImageMemory;
 	PFN_vkBindBufferMemory BindBufferMemory;
+	PFN_vkMapMemory MapMemory;
 	PFN_vkDestroyImage DestroyImage;
 	PFN_vkDestroyBuffer DestroyBuffer;
 	PFN_vkFreeMemory FreeMemory;
@@ -141,6 +145,12 @@ struct VkLayerDispatchTable
 	PFN_vkDestroySemaphore DestroySemaphore;
 
 	PFN_vkSetHdrMetadataEXT SetHdrMetadataEXT;
+
+	PFN_vkSetSwapchainPresentTimingQueueSizeEXT SetSwapchainPresentTimingQueueSizeEXT;
+	PFN_vkGetSwapchainTimingPropertiesEXT GetSwapchainTimingPropertiesEXT;
+	PFN_vkGetSwapchainTimeDomainPropertiesEXT GetSwapchainTimeDomainPropertiesEXT;
+	PFN_vkGetPastPresentationTimingEXT GetPastPresentationTimingEXT;
+	PFN_vkGetCalibratedTimestampsKHR GetCalibratedTimestampsKHR;
 
 #ifndef _WIN32
 	PFN_vkGetSemaphoreFdKHR GetSemaphoreFdKHR;
@@ -188,7 +198,7 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 #endif
 
 void addUniqueExtension(std::vector<const char *> &extensions, const char *name);
-void addUniqueExtension(std::vector<const char *> &extensions,
+bool addUniqueExtension(std::vector<const char *> &extensions,
                         const std::vector<VkExtensionProperties> &allowed,
                         const char *name);
 

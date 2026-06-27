@@ -1,0 +1,20 @@
+{
+    "file_format_version" : "1.1.2",
+    "layer" : {
+        "name": "VK_LAYER_pyrofling_latency_measurement@PYROFLING_ABI_TAG@",
+        "type": "GLOBAL",
+        "library_path": "@PYROFLING_LAYER_PATH@",
+        "api_version": "1.4.354",
+        "implementation_version": "1",
+        "description": "PyroFling latency measurement",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion" : "VK_LAYER_PYROFLING_LATENCY_MEASUREMENT_vkNegotiateLoaderLayerInterfaceVersion"
+        },
+        "enable_environment": {
+            "LATENCY_MEASUREMENT": "1"
+        },
+        "disable_environment": {
+            "DISABLE_LATENCY_MEASUREMENT": "1"
+        }
+    }
+}

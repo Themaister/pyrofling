@@ -8,7 +8,7 @@ namespace PyroFling
 class VirtualGamepad
 {
 public:
-	VirtualGamepad();
+	VirtualGamepad(uint32_t fake_vid = 0, uint32_t fake_pid = 0, const char *fake_name = nullptr);
 	~VirtualGamepad();
 	void operator=(const VirtualGamepad &) = delete;
 	VirtualGamepad(const VirtualGamepad &) = delete;
