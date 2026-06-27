@@ -1545,7 +1545,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
 		uint32_t*                                   pPropertyCount,
 		VkExtensionProperties*                      pProperties)
 {
-	if (pLayerName && strcmp(pLayerName, "VK_LAYER_pyrofling_cross_wsi") == 0)
+	if (pLayerName && strstr(pLayerName, "VK_LAYER_pyrofling_cross_wsi"))
 	{
 		*pPropertyCount = 0;
 		return VK_SUCCESS;

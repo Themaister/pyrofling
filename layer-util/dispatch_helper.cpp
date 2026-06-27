@@ -63,6 +63,7 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(FreeMemory);
 	F(BindImageMemory);
 	F(BindBufferMemory);
+	F(MapMemory);
 	F(DestroyImage);
 	F(DestroyBuffer);
 	F(CreateSemaphore);
@@ -70,6 +71,11 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(WaitForPresentKHR);
 	F(WaitForPresent2KHR);
 	F(SetHdrMetadataEXT);
+	F(SetSwapchainPresentTimingQueueSizeEXT);
+	F(GetSwapchainTimingPropertiesEXT);
+	F(GetSwapchainTimeDomainPropertiesEXT);
+	F(GetPastPresentationTimingEXT);
+	F(GetCalibratedTimestampsKHR);
 #ifndef _WIN32
 	F(GetSemaphoreFdKHR);
 	F(ImportSemaphoreFdKHR);
@@ -94,6 +100,7 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 	F(GetPhysicalDeviceExternalFencePropertiesKHR);
 	F(GetPhysicalDeviceExternalBufferPropertiesKHR);
 	F(GetPhysicalDeviceProperties2KHR);
+	F(GetPhysicalDeviceFeatures2KHR);
 	F(EnumeratePhysicalDevices);
 	F(CreateDevice);
 
@@ -119,6 +126,8 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 	F(ReleaseDisplayEXT);
 	F(AcquireDrmDisplayEXT);
 	F(GetDrmDisplayEXT);
+
+	F(GetPhysicalDeviceCalibrateableTimeDomainsKHR);
 #undef F
 }
 
@@ -130,22 +139,24 @@ void addUniqueExtension(std::vector<const char *> &extensions, const char *name)
 	extensions.push_back(name);
 }
 
-void addUniqueExtension(std::vector<const char *> &extensions,
+bool addUniqueExtension(std::vector<const char *> &extensions,
                         const std::vector<VkExtensionProperties> &allowed,
                         const char *name)
 {
 	for (auto *ext : extensions)
 		if (strcmp(ext, name) == 0)
-			return;
+			return true;
 
 	for (auto &ext : allowed)
 	{
 		if (strcmp(ext.extensionName, name) == 0)
 		{
 			extensions.push_back(name);
-			break;
+			return true;
 		}
 	}
+
+	return false;
 }
 
 bool findExtension(const std::vector<VkExtensionProperties> &props, const char *ext)

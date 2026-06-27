@@ -4,7 +4,7 @@
         "name": "VK_LAYER_pyrofling_cross_wsi@PYROFLING_ABI_TAG@",
         "type": "GLOBAL",
         "library_path": "@PYROFLING_LAYER_PATH@",
-        "api_version": "1.3.207",
+        "api_version": "1.4.354",
         "implementation_version": "1",
         "description": "PyroFling cross WSI layer",
         "functions": {
