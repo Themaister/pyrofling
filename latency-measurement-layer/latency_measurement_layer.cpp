@@ -176,13 +176,11 @@ struct Swapchain
 
 	Device *device;
 	std::vector<SwapchainImage> images;
+	VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 
 	std::mutex lock;
 	std::condition_variable cond;
 	std::thread worker;
-	uint64_t submitCount = 0;
-	uint64_t processedSourceCount = 0;
-	uint64_t pendingWaitId = 0;
 
 	uint32_t width = 0;
 	uint32_t height = 0;
@@ -197,7 +195,7 @@ struct Swapchain
 
 	static VkCommandPool createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family);
 	VkResult initSourceCommands(uint32_t familyIndex);
-	VkResult submitSourceWork(VkQueue queue, uint32_t index, uint64_t present_id);
+	VkResult submitSourceWork(VkQueue queue, uint32_t index, uint64_t presentId);
 	VkResult setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateInfo, VkImage image, uint32_t index);
 
 	void runWorker();
@@ -206,6 +204,26 @@ struct Swapchain
 	bool appDrivenID = false;
 	bool presentTiming = false;
 	VkPresentStageFlagsEXT supportedStages = 0;
+
+	uint64_t domainCounter = 0;
+	uint64_t timeDomainId = 0;
+	VkTimeDomainKHR timeDomain = {};
+
+	enum { FeedbackQueueSize = 64 };
+	struct FeedbackQueueEntry
+	{
+		uint64_t presentId;
+		uint64_t queueDone;
+		uint64_t presentDone;
+		VkPresentStageFlagsEXT presentStage;
+	};
+	FeedbackQueueEntry feedbackQueue[FeedbackQueueSize];
+	uint32_t feedbackQueueSize = 0;
+	uint64_t internalPresentId = 0;
+
+	void pollFeedback();
+	void updateFeedback(const VkPastPresentationTimingEXT &timing);
+	void reportCompleteEvent(const FeedbackQueueEntry &entry);
 };
 
 struct Device
@@ -361,7 +379,10 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 		// Wait until all source commands are done processing.
 		std::unique_lock<std::mutex> holder{lock};
 		cond.wait(holder, [this]() {
-			return submitCount == processedSourceCount;
+			for (auto &img : images)
+				if (img.busy)
+					return false;
+			return true;
 		});
 
 		table.DestroyCommandPool(vkDevice, cmdPool.pool, nullptr);
@@ -533,19 +554,25 @@ void Swapchain::runWorker()
 			workQueue.pop();
 		}
 
-		if (device->table.WaitForFences(device->device, 1, &images[work.index].fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+		if (device->table.WaitForFences(
+			    device->device, 1, &images[work.index].fence,
+			    VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
+		    device->table.ResetFences(device->device, 1, &images[work.index].fence) != VK_SUCCESS)
+		{
 			break;
+		}
 
-		if (device->table.ResetFences(device->device, 1, &images[work.index].fence) != VK_SUCCESS)
-			break;
+		std::lock_guard<std::mutex> holder{lock};
+		images[work.index].busy = false;
+		cond.notify_one();
 	}
 
 	std::lock_guard<std::mutex> holder{lock};
-	swapchainStatus = VK_ERROR_SURFACE_LOST_KHR;
+	swapchainStatus = VK_ERROR_DEVICE_LOST;
 	cond.notify_all();
 }
 
-VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, uint64_t present_id)
+VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, uint64_t presentId)
 {
 	VkResult result = initSourceCommands(device->queueToFamilyIndex(queue));
 	if (result != VK_SUCCESS)
@@ -555,17 +582,39 @@ VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, uint64_t pre
 	submit.commandBufferCount = 1;
 	submit.pCommandBuffers = &images[index].cmd;
 
-	// TODO: Wait for worker to be done processing.
+	{
+		std::unique_lock<std::mutex> holder{lock};
+		cond.wait(holder, [&]()
+		{
+			return !images[index].busy || swapchainStatus < 0;
+		});
+
+		if (swapchainStatus < 0)
+			return swapchainStatus;
+	}
 
 	result = device->table.QueueSubmit(queue, 1, &submit, images[index].fence);
 	if (result != VK_SUCCESS)
 		return result;
+
+	std::lock_guard<std::mutex> holder{lock};
+
+	images[index].busy = true;
+
+	Work work = {};
+	work.presentId = presentId;
+	work.index = index;
+	workQueue.push(work);
+
+	cond.notify_one();
+	return result;
 }
 
-VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchainKHR swapchain)
+VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchainKHR swapchain_)
 {
 	width = pCreateInfo->imageExtent.width;
 	height = pCreateInfo->imageExtent.height;
+	swapchain = swapchain_;
 
 	uint32_t count;
 	device->table.GetSwapchainImagesKHR(device->device, swapchain, &count, nullptr);
@@ -580,8 +629,172 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 			return res;
 	}
 
+	if (presentTiming)
+	{
+		auto *table = device->getTable();
+
+		VkSwapchainTimeDomainPropertiesEXT domainProperties =
+				{ VK_STRUCTURE_TYPE_SWAPCHAIN_TIME_DOMAIN_PROPERTIES_EXT };
+		VkTimeDomainKHR domains[32];
+		uint64_t timeDomainIds[32];
+		domainProperties.pTimeDomains = domains;
+		domainProperties.pTimeDomainIds = timeDomainIds;
+		domainProperties.timeDomainCount = 32;
+		if (table->GetSwapchainTimeDomainPropertiesEXT(
+			device->device, swapchain, &domainProperties, &domainCounter) >= 0)
+		{
+			uint32_t i;
+			for (i = 0; i < domainProperties.timeDomainCount; i++)
+			{
+				if (domains[i] == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT)
+				{
+					timeDomainId = timeDomainIds[i];
+					timeDomain = domains[i];
+					break;
+				}
+			}
+
+			// Should only happen if the implementation is non-compliant.
+			if (i == domainProperties.timeDomainCount)
+				presentTiming = false;
+		}
+		else
+		{
+			// Should only happen if the implement is non-compliant.
+			presentTiming = false;
+		}
+
+		if (presentTiming && table->SetSwapchainPresentTimingQueueSizeEXT(
+			device->device, swapchain, FeedbackQueueSize) != VK_SUCCESS)
+		{
+			presentTiming = false;
+		}
+	}
+
 	worker = std::thread(&Swapchain::runWorker, this);
 	return VK_SUCCESS;
+}
+
+void Swapchain::reportCompleteEvent(const FeedbackQueueEntry &entry)
+{
+
+}
+
+void Swapchain::updateFeedback(const VkPastPresentationTimingEXT &timing)
+{
+	// Use this for subsequent presents. Shouldn't change.
+	timeDomain = timing.timeDomain;
+	timeDomainId = timing.timeDomainId;
+
+	uint64_t queueDone = 0;
+	uint64_t presentDone = 0;
+	VkPresentStageFlagsEXT presentStage = 0;
+
+	for (uint32_t stageIndex = 0; stageIndex < timing.presentStageCount; stageIndex++)
+	{
+		auto &stage = timing.pPresentStages[stageIndex];
+		if (stage.stage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT)
+			queueDone = stage.time;
+
+		if (stage.stage == VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT ||
+			stage.stage == VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)
+		{
+			presentDone = stage.time;
+			presentStage = stage.stage;
+		}
+	}
+
+	// TODO: It's wasteful to calibrate *all* the time.
+	if (presentDone != 0 && queueDone != 0)
+	{
+		VkSwapchainCalibratedTimestampInfoEXT queueDoneStage = { VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT };
+		queueDoneStage.presentStage = VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT;
+		queueDoneStage.timeDomainId = timeDomainId;
+		queueDoneStage.swapchain = swapchain;
+
+		VkSwapchainCalibratedTimestampInfoEXT presentDoneStage = { VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT };
+		presentDoneStage.presentStage = presentStage;
+		presentDoneStage.timeDomainId = timeDomainId;
+		presentDoneStage.swapchain = swapchain;
+
+		VkCalibratedTimestampInfoKHR timestampInfo[3] =
+		{
+			{ VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, nullptr, VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR },
+			{ VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, &queueDoneStage, VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT },
+			{ VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, &presentDoneStage, VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT }
+		};
+
+		auto *table = device->getTable();
+		uint64_t timestamps[3];
+		uint64_t maxDeviation = 0;
+
+		if (table->GetCalibratedTimestampsKHR(device->device, 3, timestampInfo,
+				timestamps, &maxDeviation) == VK_SUCCESS)
+		{
+			uint64_t queueDelta = timestamps[1] - queueDone;
+			queueDone = timestamps[0] - queueDelta;
+
+			uint64_t presentDelta = timestamps[2] - presentDone;
+			presentDone = timestamps[0] - presentDelta;
+		}
+		else
+		{
+			presentDone = 0;
+			queueDone = 0;
+		}
+	}
+
+	std::lock_guard<std::mutex> holder{lock};
+	FeedbackQueueEntry completeEntry = {};
+
+	for (uint32_t i = 0; i < feedbackQueueSize; i++)
+	{
+		if (feedbackQueue[i].presentId == timing.presentId)
+		{
+			completeEntry = feedbackQueue[i];
+			completeEntry.queueDone = queueDone;
+			completeEntry.presentDone = presentDone;
+			completeEntry.presentStage = presentStage;
+
+			feedbackQueue[i] = feedbackQueue[--feedbackQueueSize];
+			break;
+		}
+	}
+
+	if (completeEntry.presentDone && completeEntry.queueDone)
+		reportCompleteEvent(completeEntry);
+}
+
+void Swapchain::pollFeedback()
+{
+	if (!presentTiming)
+		return;
+
+	auto *table = device->getTable();
+
+	VkPastPresentationTimingInfoEXT pastInfo = { VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT };
+	VkPastPresentationTimingPropertiesEXT pastTimingProperties =
+		{ VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT };
+	pastInfo.swapchain = swapchain;
+
+	VkPastPresentationTimingEXT pastPresentationTiming[FeedbackQueueSize] = {};
+	VkPresentStageTimeEXT pastTime[FeedbackQueueSize][4];
+	for (uint32_t i = 0; i < FeedbackQueueSize; i++)
+	{
+		auto &prop = pastPresentationTiming[i];
+		prop.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT;
+		prop.pPresentStages = pastTime[i];
+		prop.presentStageCount = 4;
+	}
+
+	pastTimingProperties.pPresentationTimings = pastPresentationTiming;
+	pastTimingProperties.presentationTimingCount = FeedbackQueueSize;
+
+	if (table->GetPastPresentationTimingEXT(device->device, &pastInfo, &pastTimingProperties) < 0)
+		return;
+
+	for (uint32_t i = 0; i < pastTimingProperties.presentationTimingCount; i++)
+		updateFeedback(pastTimingProperties.pPresentationTimings[i]);
 }
 
 Swapchain::~Swapchain()
@@ -896,6 +1109,17 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 {
 	auto *layer = getDeviceLayer(queue);
 
+	// Complicated case that "never" happens in the real world. Ignore it.
+	if (pPresentInfo->swapchainCount != 1)
+		return layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
+
+	// If we're not using present timing actively, just forward the call as-is.
+	auto *swap = layer->getSwapchain(pPresentInfo->pSwapchains[0]);
+	if (!swap->presentTiming)
+		return layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
+
+	swap->pollFeedback();
+
 	VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 	const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 	submitInfo.pWaitDstStageMask = &waitStage;
@@ -911,13 +1135,46 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 
 	auto *ids = findChain<VkPresentId2KHR>(pPresentInfo->pNext, VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR);
 
+	VkPresentTimingsInfoEXT timingsInfo = { VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT };
+	VkPresentTimingInfoEXT timingInfo = { VK_STRUCTURE_TYPE_PRESENT_TIMING_INFO_EXT };
+	VkPresentId2KHR fallbackId = { VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR };
+	uint64_t presentId = ids && ids->swapchainCount ? ids->pPresentIds[0] : 0;
+	auto tmpInfo = *pPresentInfo;
+
 	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++)
 	{
-		auto *swap = layer->getSwapchain(pPresentInfo->pSwapchains[i]);
-		auto res = swap->submitSourceWork(queue, pPresentInfo->pImageIndices[i],
-		                                  ids && i < ids->swapchainCount ? ids->pPresentIds[i] : 0);
+		if (!swap->presentTiming)
+			continue;
+
+		if (!swap->appDrivenID)
+		{
+			presentId = ++swap->internalPresentId;
+
+			fallbackId.pPresentIds = &presentId;
+			fallbackId.swapchainCount = 1;
+
+			fallbackId.pNext = tmpInfo.pNext;
+			tmpInfo.pNext = &fallbackId;
+		}
+
+		auto res = swap->submitSourceWork(queue, pPresentInfo->pImageIndices[i], presentId);
 		if (res != VK_SUCCESS)
 			return res;
+
+		// It's possible that app takes control of presentId2 but doesn't use it.
+		// Shouldn't happen in real world scenarios.
+		if (swap->feedbackQueueSize < Swapchain::FeedbackQueueSize && presentId)
+		{
+			timingsInfo.swapchainCount = 1;
+			timingsInfo.pTimingInfos = &timingInfo;
+			timingInfo.timeDomainId = swap->timeDomainId;
+			timingInfo.presentStageQueries = swap->supportedStages;
+
+			timingsInfo.pNext = tmpInfo.pNext;
+			tmpInfo.pNext = &timingsInfo;
+
+			swap->feedbackQueue[swap->feedbackQueueSize++] = { presentId };
+		}
 	}
 
 	submitInfo.waitSemaphoreCount = 0;
@@ -935,7 +1192,7 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	if (pPresentInfo->waitSemaphoreCount == 0)
 		layer->getTable()->QueueWaitIdle(queue);
 
-	return layer->getTable()->QueuePresentKHR(queue, pPresentInfo);
+	return layer->getTable()->QueuePresentKHR(queue, &tmpInfo);
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceSupportKHR(
