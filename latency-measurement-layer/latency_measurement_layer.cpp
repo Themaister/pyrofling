@@ -1527,7 +1527,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 	{
 		if (fmt.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
 			return true;
-		if (fmt.format != VK_FORMAT_R8G8B8A8_UNORM && fmt.format != VK_FORMAT_R8G8B8A8_SRGB)
+		if (fmt.format != VK_FORMAT_R8G8B8A8_UNORM && fmt.format != VK_FORMAT_R8G8B8A8_SRGB &&
+		    fmt.format != VK_FORMAT_B8G8R8A8_UNORM && fmt.format != VK_FORMAT_B8G8R8A8_SRGB)
 			return true;
 		return false;
 	});
