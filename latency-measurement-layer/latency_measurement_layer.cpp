@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include "virtual_gamepad.hpp"
+#include <sys/stat.h>
 
 extern "C"
 {
@@ -191,6 +192,7 @@ struct Swapchain
 	uint32_t representativeWidth = 0;
 	uint32_t representativeHeight = 0;
 	VkFormat format = {};
+	double timeOffset = 0.0;
 
 	struct FeedbackQueueEntry
 	{
@@ -253,6 +255,9 @@ struct Swapchain
 	std::thread fakeInputThread;
 	std::mutex fakeInputMutex;
 	bool fakeInputValid = false;
+
+	struct FILEDeleter { void operator()(FILE *f) { if (f) fclose(f); } };
+	std::unique_ptr<FILE, FILEDeleter> latencyReportFile;
 };
 
 struct Device
@@ -604,6 +609,12 @@ static uint64_t getTimeNS()
 
 void Swapchain::runFakeInputStimulus()
 {
+	std::string fakeStimulusTriggerPath;
+	if (const char *env = getenv("LATENCY_MEASUREMENT_TRIGGER"))
+		fakeStimulusTriggerPath = env;
+	else
+		fakeStimulusTriggerPath = "/tmp/latency-measurement-trigger";
+
 	PyroFling::VirtualGamepad gamepad(PyroFling::VirtualGamepad::FAKE_VID,
 		PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
 
@@ -620,7 +631,7 @@ void Swapchain::runFakeInputStimulus()
 	{
 		std::unique_lock<std::mutex> holder{fakeInputMutex};
 		// An arbitrary heartbeat.
-		fakeInputCond.wait_for(holder, std::chrono::milliseconds(7), [this]()
+		fakeInputCond.wait_for(holder, std::chrono::milliseconds(23), [this]()
 		{
 			return swapchainStatus < 0;
 		});
@@ -630,6 +641,48 @@ void Swapchain::runFakeInputStimulus()
 
 		if (lastStimulusTime == 0)
 			lastInputWasActive = false;
+
+		// Keep the run going as long as this file exists.
+		struct stat s = {};
+		bool doInput = ::stat(fakeStimulusTriggerPath.c_str(), &s) == 0 && (s.st_mode & S_IFMT) == S_IFREG;
+
+		if (!doInput)
+		{
+			lastCandidateFrameId = 0;
+			lastStimulusTime = 0;
+			latencyReportFile.reset();
+			continue;
+		}
+
+		if (!latencyReportFile)
+		{
+			// Shut up stupid GCC warning.
+			char self_exe[PATH_MAX - 256] = {};
+			char path[PATH_MAX];
+
+			if (readlink("/proc/self/exe", self_exe, sizeof(self_exe) - 1) < 0)
+				strcpy(self_exe, "unknown");
+
+			const char *base = strrchr(self_exe, '/');
+			if (base)
+				base++;
+
+			if (!base || *base == '\0')
+				base = "unknown";
+
+			snprintf(path, sizeof(path), "/tmp/latency-measurement-%s-", base);
+
+			auto t = std::time(nullptr);
+			std::tm gmt;
+			gmtime_r(&t, &gmt);
+
+			strftime(path + strlen(path), sizeof(path) - strlen(path),
+				"%Y-%m-%d-%H-%M-%S.csv", &gmt);
+
+			latencyReportFile.reset(fopen(path, "w"));
+			if (latencyReportFile)
+				fprintf(latencyReportFile.get(), "id,stimulus,queuepresent,queuedone,presentdone\n");
+		}
 
 		if (lastCandidateFrameId == 0)
 		{
@@ -731,12 +784,6 @@ void Swapchain::runWorker()
 			for (int i = 0; i < NumHistoryFrames - 1; i++)
 				maxHistoryMSE = std::max<double>(maxHistoryMSE, mseHistory[i]);
 
-#if 0
-			fprintf(stderr, "present ID %llu, MSE: %10.3f.\n",
-					static_cast<unsigned long long>(waitWork.presentId),
-					mseHistory[NumHistoryFrames - 1]);
-#endif
-
 			// Measure a meaningful difference, which we presume was caused by (synthetic) player stimulus.
 			constexpr double MinimumPixelDelta = 5.0;
 			if (mseHistory[NumHistoryFrames - 1] > 16.0 * maxHistoryMSE &&
@@ -748,8 +795,6 @@ void Swapchain::runWorker()
 				// Once input thread sees that we have an MSE candidate, stop generating input.
 				lastCandidateFrameId = waitWork.presentId;
 				stimulusTime = lastStimulusTime;
-				fprintf(stderr, "Got significant delta for present ID: %llu.\n",
-				        static_cast<unsigned long long>(waitWork.presentId));
 				fakeInputCond.notify_one();
 			}
 		}
@@ -758,12 +803,17 @@ void Swapchain::runWorker()
 			auto &entry = work.u.feedbackEntry;
 			if (entry.presentId == lastCandidateFrameId && stimulusTime)
 			{
-				fprintf(stderr,
-					"Feedback: ID: %u, stimulus: %.3f ms, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
-					unsigned(entry.presentId),
-					stimulusTime * 1e-6,
-					entry.submitted * 1e-6,
-					entry.queueDone * 1e-6, entry.presentDone * 1e-6);
+				std::lock_guard<std::mutex> holder{fakeInputMutex};
+				if (latencyReportFile)
+				{
+					fprintf(latencyReportFile.get(),
+					        "%llu,%.6f,%.6f,%.6f,%.6f\n",
+					        static_cast<unsigned long long>(entry.presentId),
+					        double(stimulusTime) * 1e-9 - timeOffset,
+					        double(entry.submitted) * 1e-9 - timeOffset,
+					        double(entry.queueDone) * 1e-9 - timeOffset,
+					        double(entry.presentDone) * 1e-9 - timeOffset);
+				}
 			}
 
 			// Ensure there is a grace period where we can capture "idle" frames.
@@ -828,6 +878,8 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 	height = pCreateInfo->imageExtent.height;
 	format = pCreateInfo->imageFormat;
 	swapchain = swapchain_;
+
+	timeOffset = double(getTimeNS()) * 1e-9;
 
 	representativeWidth = std::min<uint32_t>(width, 256);
 	representativeHeight = std::min<uint32_t>(height, 256);
