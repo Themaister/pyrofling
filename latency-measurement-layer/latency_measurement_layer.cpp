@@ -482,6 +482,8 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 			copy.imageOffset = { int32_t(width - representativeWidth) / 2, int32_t(height - representativeHeight) / 2 };
 			copy.imageExtent = { representativeWidth, representativeHeight, 1 };
 			copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			copy.bufferRowLength = representativeWidth;
+			copy.bufferImageHeight = representativeHeight;
 			table.CmdCopyImageToBuffer(cmd,
 			                           image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 			                           image.buffer.buffer,
@@ -651,6 +653,8 @@ void Swapchain::runFakeInputStimulus()
 			lastCandidateFrameId = 0;
 			lastStimulusTime = 0;
 			latencyReportFile.reset();
+			state = {};
+			gamepad.report_state(state);
 			continue;
 		}
 
@@ -784,8 +788,20 @@ void Swapchain::runWorker()
 			for (int i = 0; i < NumHistoryFrames - 1; i++)
 				maxHistoryMSE = std::max<double>(maxHistoryMSE, mseHistory[i]);
 
+#if 0
+			{
+				std::lock_guard<std::mutex> holder{fakeInputMutex};
+				if (latencyReportFile)
+				{
+					fprintf(latencyReportFile.get(), "ID: %llu, MSE: %.3f\n",
+					        static_cast<unsigned long long>(waitWork.presentId),
+					        mseHistory[NumHistoryFrames - 1]);
+				}
+			}
+#endif
+
 			// Measure a meaningful difference, which we presume was caused by (synthetic) player stimulus.
-			constexpr double MinimumPixelDelta = 5.0;
+			constexpr double MinimumPixelDelta = 2.0;
 			if (mseHistory[NumHistoryFrames - 1] > 16.0 * maxHistoryMSE &&
 				mseHistory[NumHistoryFrames - 1] > MinimumPixelDelta * MinimumPixelDelta &&
 				waitWork.presentId > NumHistoryFrames && !lastCandidateFrameId)
@@ -881,8 +897,8 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 
 	timeOffset = double(getTimeNS()) * 1e-9;
 
-	representativeWidth = std::min<uint32_t>(width, 256);
-	representativeHeight = std::min<uint32_t>(height, 256);
+	representativeWidth = std::min<uint32_t>(width, 128);
+	representativeHeight = std::min<uint32_t>(height, 128);
 
 	uint32_t count;
 	device->table.GetSwapchainImagesKHR(device->device, swapchain, &count, nullptr);
@@ -946,12 +962,6 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 
 void Swapchain::reportCompleteEventLocked(const FeedbackQueueEntry &entry)
 {
-#if 0
-	fprintf(stderr, "ID: %u, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
-	        unsigned(entry.presentId), entry.submitted * 1e-6,
-	        entry.queueDone * 1e-6, entry.presentDone * 1e-6);
-#endif
-
 	Work analyzeWork = {};
 	analyzeWork.type = WorkType::HandleFeedback;
 	analyzeWork.u.feedbackEntry = entry;
@@ -1351,7 +1361,8 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 
 	if (timingCaps.presentTimingSupported &&
 		(timingCaps.presentStageQueries & VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT) &&
-	    (timingCaps.presentStageQueries & (VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT |
+	    (timingCaps.presentStageQueries & (VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT |
+	                                       VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT |
 	                                       VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)))
 	{
 		tmpInfo.flags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
