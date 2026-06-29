@@ -504,27 +504,16 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 
 			if (representativeWidth >= 16 && representativeHeight >= 16)
 			{
-				VkBufferImageCopy regions[4] = {};
-				for (auto &region : regions)
-				{
-					region.bufferOffset = representativeWidth * representativeHeight * sizeof(uint32_t);
-					region.bufferRowLength = 8;
-					region.bufferImageHeight = 8;
-					region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-					region.imageExtent = { 8, 8, 1 };
-				}
-
-				auto bottomRightOffset = copy.imageOffset;
-				bottomRightOffset.x += int(representativeWidth - 8);
-				bottomRightOffset.y += int(representativeHeight - 8);
-
-				regions[0].imageOffset = { copy.imageOffset.x, copy.imageOffset.y };
-				regions[1].imageOffset = { bottomRightOffset.x, copy.imageOffset.y };
-				regions[2].imageOffset = { copy.imageOffset.x, bottomRightOffset.y };
-				regions[3].imageOffset = { bottomRightOffset.x, bottomRightOffset.y };
+				VkBufferImageCopy region = {};
+				region.bufferOffset = representativeWidth * representativeHeight * sizeof(uint32_t);
+				region.bufferRowLength = representativeWidth;
+				region.bufferImageHeight = representativeHeight;
+				region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+				region.imageExtent = { representativeWidth, representativeHeight, 1 };
+				region.imageOffset = copy.imageOffset;
 
 				table.CmdCopyBufferToImage(cmd, image.buffer.buffer, image.image,
-				                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 4, regions);
+				                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 			}
 
 			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -776,6 +765,43 @@ void Swapchain::runFakeInputStimulus()
 	gamepad.report_state(state);
 }
 
+static inline void copyDarkenRGBA8(uint32_t *dst, const uint32_t *src, size_t count)
+{
+	for (size_t i = 0; i < count; i++)
+		dst[i] = (src[i] >> 1) & 0x7f7f7f7f;
+}
+
+static inline void copyErrorSignalRGBA8(uint32_t *dst, const uint32_t *as, const uint32_t *bs, size_t count)
+{
+	for (size_t i = 0; i < count; i++)
+	{
+		uint32_t a = as[i];
+		uint32_t b = bs[i];
+
+		int ra, ga, ba, rb, gb, bb;
+
+		// RGBA vs BGRA flip is not important.
+		// Any mismatch will cancel itself out.
+		ra = int((a >> 0) & 0xff);
+		ga = int((a >> 8) & 0xff);
+		ba = int((a >> 16) & 0xff);
+
+		rb = int((b >> 0) & 0xff);
+		gb = int((b >> 8) & 0xff);
+		bb = int((b >> 16) & 0xff);
+
+		int rdiff = std::abs(ra - rb);
+		int gdiff = std::abs(ga - gb);
+		int bdiff = std::abs(ba - bb);
+
+		rdiff = std::min<int>(rdiff * 10, 255);
+		gdiff = std::min<int>(gdiff * 10, 255);
+		bdiff = std::min<int>(bdiff * 10, 255);
+
+		dst[i] = (rdiff << 0) | (gdiff << 8) | (bdiff << 16);
+	}
+}
+
 void Swapchain::runWorker()
 {
 	Work work = {};
@@ -816,6 +842,30 @@ void Swapchain::runWorker()
 			std::swap(prev, current);
 			memmove(mseHistory, mseHistory + 1, sizeof(mseHistory) - sizeof(mseHistory[0]));
 			memcpy(current.get(), images[waitWork.index].buffer.mapped, representativeWidth * representativeHeight * sizeof(uint32_t));
+
+			bool hasLatencyFile = false;
+			{
+				std::lock_guard<std::mutex> holder{fakeInputMutex};
+				if (latencyReportFile)
+					hasLatencyFile = true;
+			}
+
+			if (true || hasLatencyFile)
+			{
+				// Show a negative of the history buffer to make it easier to tell where the damage rect is.
+				copyErrorSignalRGBA8(
+					static_cast<uint32_t *>(images[waitWork.index].buffer.mapped) +
+					representativeWidth * representativeHeight,
+					current.get(), prev.get(), representativeWidth * representativeHeight);
+			}
+			else
+			{
+				// Show a darkened version of the history buffer to make it easier to tell where the damage rect is.
+				copyDarkenRGBA8(static_cast<uint32_t *>(images[waitWork.index].buffer.mapped) +
+				           representativeWidth * representativeHeight,
+				           static_cast<const uint32_t *>(images[waitWork.index].buffer.mapped),
+				           representativeWidth * representativeHeight);
+			}
 
 			// Unblock early.
 			{
