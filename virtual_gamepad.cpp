@@ -19,7 +19,7 @@ static const int button_mapping[] =
 	//BTN_MODE, Causes too much annoyance and confusion when this is piped through.
 };
 
-VirtualGamepad::VirtualGamepad()
+VirtualGamepad::VirtualGamepad(uint32_t fake_vid, uint32_t fake_pid, const char *fake_name)
 {
 	uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 	if (uinput_fd < 0)
@@ -85,9 +85,9 @@ VirtualGamepad::VirtualGamepad()
 
 	uinput_setup usetup = {};
 	usetup.id.bustype = BUS_USB;
-	usetup.id.vendor = FAKE_VID; // Dummy values.
-	usetup.id.product = FAKE_PID;
-	strcpy(usetup.name, "PyroFling virtual gamepad");
+	usetup.id.vendor = fake_vid ? fake_vid : uint32_t(FAKE_VID); // Dummy values.
+	usetup.id.product = fake_pid ? fake_pid : uint32_t(FAKE_PID);
+	strcpy(usetup.name, fake_name ? fake_name : "PyroFling virtual gamepad");
 
 	if (ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0 || ioctl(uinput_fd, UI_DEV_CREATE) < 0)
 	{
@@ -98,7 +98,7 @@ VirtualGamepad::VirtualGamepad()
 
 static void write_event(int fd, int type, int code, int val)
 {
-	struct input_event e = {};
+	input_event e = {};
 	e.code = code;
 	e.type = type;
 	e.value = val;

@@ -1,5 +1,6 @@
 add_library(VkLayer_pyrofling_latency_measurement SHARED latency_measurement_layer.cpp)
-target_link_libraries(VkLayer_pyrofling_latency_measurement PRIVATE pyrofling-layer-util pyrofling-ipc granite-volk-headers)
+target_link_libraries(VkLayer_pyrofling_latency_measurement PRIVATE
+        pyrofling-layer-util pyrofling-ipc granite-volk-headers pyrofling-virtual-gamepad)
 
 target_include_directories(VkLayer_pyrofling_latency_measurement PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(VkLayer_pyrofling_latency_measurement PRIVATE ${PYROFLING_CXX_FLAGS})

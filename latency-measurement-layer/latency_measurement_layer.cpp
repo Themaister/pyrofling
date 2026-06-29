@@ -27,8 +27,11 @@
 #include <condition_variable>
 #include <queue>
 #include <chrono>
+#include <atomic>
+#include <random>
 #include <unistd.h>
 #include <stdio.h>
+#include "virtual_gamepad.hpp"
 
 extern "C"
 {
@@ -185,6 +188,8 @@ struct Swapchain
 
 	uint32_t width = 0;
 	uint32_t height = 0;
+	uint32_t representativeWidth = 0;
+	uint32_t representativeHeight = 0;
 	VkFormat format = {};
 
 	struct FeedbackQueueEntry
@@ -226,6 +231,8 @@ struct Swapchain
 	bool appDrivenID = false;
 	bool presentTiming = false;
 	VkPresentStageFlagsEXT supportedStages = 0;
+	uint64_t lastCandidateFrameId = 0;
+	uint64_t lastStimulusTime = 0;
 
 	uint64_t domainCounter = 0;
 	uint64_t timeDomainId = 0;
@@ -240,6 +247,12 @@ struct Swapchain
 	void pollFeedback();
 	void updateFeedback(const VkPastPresentationTimingEXT &timing);
 	void reportCompleteEventLocked(const FeedbackQueueEntry &entry);
+
+	void runFakeInputStimulus();
+	std::condition_variable fakeInputCond;
+	std::thread fakeInputThread;
+	std::mutex fakeInputMutex;
+	bool fakeInputValid = false;
 };
 
 struct Device
@@ -461,7 +474,8 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 			                         1, &barrier);
 
 			VkBufferImageCopy copy = {};
-			copy.imageExtent = { width, height, 1 };
+			copy.imageOffset = { int32_t(width - representativeWidth) / 2, int32_t(height - representativeHeight) / 2 };
+			copy.imageExtent = { representativeWidth, representativeHeight, 1 };
 			copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
 			table.CmdCopyImageToBuffer(cmd,
 			                           image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -494,13 +508,13 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 	return VK_SUCCESS;
 }
 
-VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateInfo, VkImage image, uint32_t index)
+VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *, VkImage image, uint32_t index)
 {
 	auto &img = images[index];
 	img.image = image;
 
 	VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-	bufferInfo.size = pCreateInfo->imageExtent.width * pCreateInfo->imageExtent.height * sizeof(uint32_t);
+	bufferInfo.size = representativeWidth * representativeHeight * sizeof(uint32_t);
 	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
 	auto vr = device->table.CreateBuffer(device->device, &bufferInfo, nullptr, &img.buffer.buffer);
@@ -581,17 +595,97 @@ static double computeMSE8(const uint32_t *a, const uint32_t *b, size_t count)
 	return mse / double(3 * count);
 }
 
+static uint64_t getTimeNS()
+{
+	timespec ts = {};
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+void Swapchain::runFakeInputStimulus()
+{
+	PyroFling::VirtualGamepad gamepad(PyroFling::VirtualGamepad::FAKE_VID,
+		PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
+
+	// Report the neutral position.
+	pyro_gamepad_state state = {};
+	gamepad.report_state(state);
+
+	// Seed doesn't matter.
+	std::mt19937 rng(0);
+
+	bool lastInputWasActive = false;
+
+	for (;;)
+	{
+		std::unique_lock<std::mutex> holder{fakeInputMutex};
+		// An arbitrary heartbeat.
+		fakeInputCond.wait_for(holder, std::chrono::milliseconds(7), [this]()
+		{
+			return swapchainStatus < 0;
+		});
+
+		if (swapchainStatus < 0)
+			break;
+
+		if (lastStimulusTime == 0)
+			lastInputWasActive = false;
+
+		if (lastCandidateFrameId == 0)
+		{
+			auto delta = getTimeNS() - lastStimulusTime;
+			int edge = int(delta / (200 * 1000 * 1000));
+
+			// Positive edge. Lasts for 200ms, then idles for 1400ms.
+			if (edge % 8 == 0 || lastStimulusTime == 0)
+			{
+				if (!lastInputWasActive)
+				{
+					// Trigger input stimulus. Grace period of 1 second. If we didn't get a clear
+					// confirmation of feedback, retry.
+					lastStimulusTime = getTimeNS();
+					state = {};
+					state.axis_rx = rng() & 1 ? 0x7fff : -0x7fff;
+					state.axis_ry = rng() & 1 ? 0x7fff : -0x7fff;
+				}
+
+				// Right analog stick usually controls the camera.
+				// TODO: Add more configurability here, custom mouse input for FPS games, etc, etc.
+				gamepad.report_state(state);
+				lastInputWasActive = true;
+			}
+			else
+			{
+				// Negative edge. We didn't register the input to cause any delta.
+				state = {};
+				gamepad.report_state(state);
+				lastInputWasActive = false;
+			}
+		}
+		else
+		{
+			// We have a confirmed MSE delta that we're waiting for present feedback on.
+			// Idle the input stimulus immediately.
+			state = {};
+			gamepad.report_state(state);
+			lastInputWasActive = false;
+		}
+	}
+
+	state = {};
+	gamepad.report_state(state);
+}
+
 void Swapchain::runWorker()
 {
 	Work work = {};
 
-	constexpr int NumHistoryFrames = 4;
-	std::unique_ptr<uint32_t[]> frameHistory[NumHistoryFrames];
-	for (auto &hist : frameHistory)
-		hist = std::unique_ptr<uint32_t[]>(new uint32_t[width * height]);
+	constexpr int NumHistoryFrames = 16;
+	auto prev = std::unique_ptr<uint32_t[]>(new uint32_t[representativeWidth * representativeHeight]);
+	auto current = std::unique_ptr<uint32_t[]>(new uint32_t[representativeWidth * representativeHeight]);
 	double mseHistory[NumHistoryFrames] = {};
-
-	uint64_t lastCandidateFrameId = 0;
+	uint64_t numFeedbacksSinceDelta = 0;
+	uint64_t stimulusTime = 0;
 
 	for (;;)
 	{
@@ -619,17 +713,9 @@ void Swapchain::runWorker()
 				break;
 			}
 
-			auto tmp = std::move(frameHistory[0]);
-			for (int i = 0; i < NumHistoryFrames - 1; i++)
-			{
-				frameHistory[i] = std::move(frameHistory[i + 1]);
-				mseHistory[i] = mseHistory[i + 1];
-			}
-			frameHistory[NumHistoryFrames - 1] = std::move(tmp);
-
-			// TODO: Only store a representative part of the frame to lighten the processing load.
-			memcpy(frameHistory[NumHistoryFrames - 1].get(), images[waitWork.index].buffer.mapped,
-			       width * height * sizeof(uint32_t));
+			std::swap(prev, current);
+			memmove(mseHistory, mseHistory + 1, sizeof(mseHistory) - sizeof(mseHistory[0]));
+			memcpy(current.get(), images[waitWork.index].buffer.mapped, representativeWidth * representativeHeight * sizeof(uint32_t));
 
 			// Unblock early.
 			{
@@ -638,9 +724,9 @@ void Swapchain::runWorker()
 				cond.notify_one();
 			}
 
-			mseHistory[NumHistoryFrames - 1] = computeMSE8(
-				frameHistory[NumHistoryFrames - 1].get(), frameHistory[NumHistoryFrames - 2].get(), width * height);
+			mseHistory[NumHistoryFrames - 1] = computeMSE8(current.get(), prev.get(), representativeWidth * representativeHeight);
 
+			// Ensure the image was stable for the last N frames before we accept a delta.
 			double maxHistoryMSE = 0.0;
 			for (int i = 0; i < NumHistoryFrames - 1; i++)
 				maxHistoryMSE = std::max<double>(maxHistoryMSE, mseHistory[i]);
@@ -651,26 +737,43 @@ void Swapchain::runWorker()
 					mseHistory[NumHistoryFrames - 1]);
 #endif
 
-			// Measure a meaningful difference.
+			// Measure a meaningful difference, which we presume was caused by (synthetic) player stimulus.
 			constexpr double MinimumPixelDelta = 5.0;
 			if (mseHistory[NumHistoryFrames - 1] > 16.0 * maxHistoryMSE &&
 				mseHistory[NumHistoryFrames - 1] > MinimumPixelDelta * MinimumPixelDelta &&
-				waitWork.presentId > NumHistoryFrames &&
-				(!lastCandidateFrameId || waitWork.presentId > lastCandidateFrameId + 100))
+				waitWork.presentId > NumHistoryFrames && !lastCandidateFrameId)
 			{
+				numFeedbacksSinceDelta = 0;
+				std::lock_guard<std::mutex> holder{fakeInputMutex};
+				// Once input thread sees that we have an MSE candidate, stop generating input.
 				lastCandidateFrameId = waitWork.presentId;
+				stimulusTime = lastStimulusTime;
 				fprintf(stderr, "Got significant delta for present ID: %llu.\n",
 				        static_cast<unsigned long long>(waitWork.presentId));
+				fakeInputCond.notify_one();
 			}
 		}
 		else if (work.type == WorkType::HandleFeedback)
 		{
 			auto &entry = work.u.feedbackEntry;
-			if (entry.presentId == lastCandidateFrameId)
+			if (entry.presentId == lastCandidateFrameId && stimulusTime)
 			{
-				fprintf(stderr, "Feedback: ID: %u, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
-						unsigned(entry.presentId), entry.submitted * 1e-6,
-						entry.queueDone * 1e-6, entry.presentDone * 1e-6);
+				fprintf(stderr,
+					"Feedback: ID: %u, stimulus: %.3f ms, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
+					unsigned(entry.presentId),
+					stimulusTime * 1e-6,
+					entry.submitted * 1e-6,
+					entry.queueDone * 1e-6, entry.presentDone * 1e-6);
+			}
+
+			// Ensure there is a grace period where we can capture "idle" frames.
+			if (numFeedbacksSinceDelta++ == 2 * NumHistoryFrames)
+			{
+				// Restart generating input.
+				std::lock_guard<std::mutex> holder{fakeInputMutex};
+				lastCandidateFrameId = 0;
+				lastStimulusTime = 0;
+				fakeInputCond.notify_one();
 			}
 		}
 	}
@@ -725,6 +828,9 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 	height = pCreateInfo->imageExtent.height;
 	format = pCreateInfo->imageFormat;
 	swapchain = swapchain_;
+
+	representativeWidth = std::min<uint32_t>(width, 256);
+	representativeHeight = std::min<uint32_t>(height, 256);
 
 	uint32_t count;
 	device->table.GetSwapchainImagesKHR(device->device, swapchain, &count, nullptr);
@@ -782,6 +888,7 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 	}
 
 	worker = std::thread(&Swapchain::runWorker, this);
+	fakeInputThread = std::thread(&Swapchain::runFakeInputStimulus, this);
 	return VK_SUCCESS;
 }
 
@@ -816,8 +923,10 @@ void Swapchain::updateFeedback(const VkPastPresentationTimingEXT &timing)
 		if (stage.stage == VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT)
 			queueDone = stage.time;
 
-		if (stage.stage == VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT ||
-			stage.stage == VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)
+		if ((stage.stage & (
+			VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT |
+			VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT |
+			VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)) != 0 && stage.stage > presentStage)
 		{
 			presentDone = stage.time;
 			presentStage = stage.stage;
@@ -923,10 +1032,13 @@ Swapchain::~Swapchain()
 		std::lock_guard<std::mutex> holder{lock};
 		swapchainStatus = VK_ERROR_SURFACE_LOST_KHR;
 		cond.notify_one();
+		fakeInputCond.notify_one();
 	}
 
 	if (worker.joinable())
 		worker.join();
+	if (fakeInputThread.joinable())
+		fakeInputThread.join();
 
 	for (auto &image : images)
 	{
@@ -1294,9 +1406,7 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 			timingsInfo.pNext = tmpInfo.pNext;
 			tmpInfo.pNext = &timingsInfo;
 
-			timespec ts = {};
-			clock_gettime(CLOCK_MONOTONIC, &ts);
-			uint64_t submittedTime = ts.tv_sec * 1000000000ull + ts.tv_nsec;
+			uint64_t submittedTime = getTimeNS();
 			swap->feedbackQueue[swap->feedbackQueueSize++] = { presentId, submittedTime };
 		}
 	}
