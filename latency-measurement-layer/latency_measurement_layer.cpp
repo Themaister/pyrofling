@@ -28,6 +28,7 @@
 #include <queue>
 #include <chrono>
 #include <unistd.h>
+#include <stdio.h>
 
 extern "C"
 {
@@ -213,6 +214,7 @@ struct Swapchain
 	struct FeedbackQueueEntry
 	{
 		uint64_t presentId;
+		uint64_t submitted;
 		uint64_t queueDone;
 		uint64_t presentDone;
 		VkPresentStageFlagsEXT presentStage;
@@ -677,7 +679,9 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 
 void Swapchain::reportCompleteEvent(const FeedbackQueueEntry &entry)
 {
-
+	fprintf(stderr, "ID: %u, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
+	        unsigned(entry.presentId), entry.submitted * 1e-6,
+	        entry.queueDone * 1e-6, entry.presentDone * 1e-6);
 }
 
 void Swapchain::updateFeedback(const VkPastPresentationTimingEXT &timing)
@@ -1039,6 +1043,7 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	auto *layer = getDeviceLayer(device);
 
 	auto tmpInfo = *pCreateInfo;
+	tmpInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
 	VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR };
 	surfaceInfo.surface = pCreateInfo->surface;
@@ -1173,7 +1178,10 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 			timingsInfo.pNext = tmpInfo.pNext;
 			tmpInfo.pNext = &timingsInfo;
 
-			swap->feedbackQueue[swap->feedbackQueueSize++] = { presentId };
+			timespec ts = {};
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			uint64_t submittedTime = ts.tv_sec * 1000000000ull + ts.tv_nsec;
+			swap->feedbackQueue[swap->feedbackQueueSize++] = { presentId, submittedTime };
 		}
 	}
 

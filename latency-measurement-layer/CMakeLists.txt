@@ -23,7 +23,7 @@ else()
     set(PYROFLING_LAYER_PATH "./libVkLayer_pyrofling_latency_measurement${PYROFLING_ABI_TAG}.so")
 endif()
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/VkLayer_pyrofling_latency_measurement.json.in ${CMAKE_BINARY_DIR}/cross-wsi-layer/VkLayer_pyrofling_latency_measurement${PYROFLING_ABI_TAG}.json @ONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/VkLayer_pyrofling_latency_measurement.json.in ${CMAKE_BINARY_DIR}/latency-measurement-layer/VkLayer_pyrofling_latency_measurement${PYROFLING_ABI_TAG}.json @ONLY)
 
 if (WIN32)
     set_target_properties(VkLayer_pyrofling_latency_measurement PROPERTIES PREFIX "" LIBRARY_OUTPUT_NAME VkLayer_pyrofling_latency_measurement${PYROFLING_ABI_TAG})
