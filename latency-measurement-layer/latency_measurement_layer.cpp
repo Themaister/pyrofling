@@ -185,13 +185,34 @@ struct Swapchain
 
 	uint32_t width = 0;
 	uint32_t height = 0;
+	VkFormat format = {};
+
+	struct FeedbackQueueEntry
+	{
+		uint64_t presentId;
+		uint64_t submitted;
+		uint64_t queueDone;
+		uint64_t presentDone;
+		VkPresentStageFlagsEXT presentStage;
+	};
+
+	enum class WorkType { WaitGPUWork, HandleFeedback };
 
 	struct Work
 	{
-		uint64_t presentId;
-		uint32_t index;
+		WorkType type;
+		union
+		{
+			struct
+			{
+				uint64_t presentId;
+				uint32_t index;
+			} waitWork;
+
+			FeedbackQueueEntry feedbackEntry;
+		} u;
 	};
-	Work nextWork = {};
+
 	std::queue<Work> workQueue;
 
 	static VkCommandPool createCommandPool(VkDevice device, const VkLayerDispatchTable &table, uint32_t family);
@@ -211,21 +232,14 @@ struct Swapchain
 	VkTimeDomainKHR timeDomain = {};
 
 	enum { FeedbackQueueSize = 64 };
-	struct FeedbackQueueEntry
-	{
-		uint64_t presentId;
-		uint64_t submitted;
-		uint64_t queueDone;
-		uint64_t presentDone;
-		VkPresentStageFlagsEXT presentStage;
-	};
+
 	FeedbackQueueEntry feedbackQueue[FeedbackQueueSize];
 	uint32_t feedbackQueueSize = 0;
 	uint64_t internalPresentId = 0;
 
 	void pollFeedback();
 	void updateFeedback(const VkPastPresentationTimingEXT &timing);
-	void reportCompleteEvent(const FeedbackQueueEntry &entry);
+	void reportCompleteEventLocked(const FeedbackQueueEntry &entry);
 };
 
 struct Device
@@ -537,9 +551,47 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *pCreateI
 	return VK_SUCCESS;
 }
 
+static double computeMSE8(const uint32_t *a, const uint32_t *b, size_t count)
+{
+	double mse = 0.0;
+
+	for (size_t i = 0; i < count; i++)
+	{
+		auto pix_a = a[i];
+		auto pix_b = b[i];
+
+		int ra, ga, ba, rb, gb, bb;
+
+		// RGBA vs BGRA flip is not important.
+		ra = int((pix_a >> 0) & 0xff);
+		ga = int((pix_a >> 8) & 0xff);
+		ba = int((pix_a >> 16) & 0xff);
+
+		rb = int((pix_b >> 0) & 0xff);
+		gb = int((pix_b >> 8) & 0xff);
+		bb = int((pix_b >> 16) & 0xff);
+
+		int rdiff = ra - rb;
+		int gdiff = ga - gb;
+		int bdiff = ba - bb;
+
+		mse += double(rdiff * rdiff + gdiff * gdiff + bdiff * bdiff);
+	}
+
+	return mse / double(3 * count);
+}
+
 void Swapchain::runWorker()
 {
 	Work work = {};
+
+	constexpr int NumHistoryFrames = 4;
+	std::unique_ptr<uint32_t[]> frameHistory[NumHistoryFrames];
+	for (auto &hist : frameHistory)
+		hist = std::unique_ptr<uint32_t[]>(new uint32_t[width * height]);
+	double mseHistory[NumHistoryFrames] = {};
+
+	uint64_t lastCandidateFrameId = 0;
 
 	for (;;)
 	{
@@ -556,17 +608,71 @@ void Swapchain::runWorker()
 			workQueue.pop();
 		}
 
-		if (device->table.WaitForFences(
-			    device->device, 1, &images[work.index].fence,
-			    VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
-		    device->table.ResetFences(device->device, 1, &images[work.index].fence) != VK_SUCCESS)
+		if (work.type == WorkType::WaitGPUWork)
 		{
-			break;
-		}
+			auto &waitWork = work.u.waitWork;
+			if (device->table.WaitForFences(
+					device->device, 1, &images[waitWork.index].fence,
+					VK_TRUE, UINT64_MAX) != VK_SUCCESS ||
+				device->table.ResetFences(device->device, 1, &images[waitWork.index].fence) != VK_SUCCESS)
+			{
+				break;
+			}
 
-		std::lock_guard<std::mutex> holder{lock};
-		images[work.index].busy = false;
-		cond.notify_one();
+			auto tmp = std::move(frameHistory[0]);
+			for (int i = 0; i < NumHistoryFrames - 1; i++)
+			{
+				frameHistory[i] = std::move(frameHistory[i + 1]);
+				mseHistory[i] = mseHistory[i + 1];
+			}
+			frameHistory[NumHistoryFrames - 1] = std::move(tmp);
+
+			// TODO: Only store a representative part of the frame to lighten the processing load.
+			memcpy(frameHistory[NumHistoryFrames - 1].get(), images[waitWork.index].buffer.mapped,
+			       width * height * sizeof(uint32_t));
+
+			// Unblock early.
+			{
+				std::lock_guard<std::mutex> holder{lock};
+				images[waitWork.index].busy = false;
+				cond.notify_one();
+			}
+
+			mseHistory[NumHistoryFrames - 1] = computeMSE8(
+				frameHistory[NumHistoryFrames - 1].get(), frameHistory[NumHistoryFrames - 2].get(), width * height);
+
+			double maxHistoryMSE = 0.0;
+			for (int i = 0; i < NumHistoryFrames - 1; i++)
+				maxHistoryMSE = std::max<double>(maxHistoryMSE, mseHistory[i]);
+
+#if 0
+			fprintf(stderr, "present ID %llu, MSE: %10.3f.\n",
+					static_cast<unsigned long long>(waitWork.presentId),
+					mseHistory[NumHistoryFrames - 1]);
+#endif
+
+			// Measure a meaningful difference.
+			constexpr double MinimumPixelDelta = 5.0;
+			if (mseHistory[NumHistoryFrames - 1] > 16.0 * maxHistoryMSE &&
+				mseHistory[NumHistoryFrames - 1] > MinimumPixelDelta * MinimumPixelDelta &&
+				waitWork.presentId > NumHistoryFrames &&
+				(!lastCandidateFrameId || waitWork.presentId > lastCandidateFrameId + 100))
+			{
+				lastCandidateFrameId = waitWork.presentId;
+				fprintf(stderr, "Got significant delta for present ID: %llu.\n",
+				        static_cast<unsigned long long>(waitWork.presentId));
+			}
+		}
+		else if (work.type == WorkType::HandleFeedback)
+		{
+			auto &entry = work.u.feedbackEntry;
+			if (entry.presentId == lastCandidateFrameId)
+			{
+				fprintf(stderr, "Feedback: ID: %u, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
+						unsigned(entry.presentId), entry.submitted * 1e-6,
+						entry.queueDone * 1e-6, entry.presentDone * 1e-6);
+			}
+		}
 	}
 
 	std::lock_guard<std::mutex> holder{lock};
@@ -604,11 +710,12 @@ VkResult Swapchain::submitSourceWork(VkQueue queue, uint32_t index, uint64_t pre
 	images[index].busy = true;
 
 	Work work = {};
-	work.presentId = presentId;
-	work.index = index;
+	work.type = WorkType::WaitGPUWork;
+	work.u.waitWork.presentId = presentId;
+	work.u.waitWork.index = index;
 	workQueue.push(work);
-
 	cond.notify_one();
+
 	return result;
 }
 
@@ -616,6 +723,7 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 {
 	width = pCreateInfo->imageExtent.width;
 	height = pCreateInfo->imageExtent.height;
+	format = pCreateInfo->imageFormat;
 	swapchain = swapchain_;
 
 	uint32_t count;
@@ -677,11 +785,19 @@ VkResult Swapchain::init(const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchai
 	return VK_SUCCESS;
 }
 
-void Swapchain::reportCompleteEvent(const FeedbackQueueEntry &entry)
+void Swapchain::reportCompleteEventLocked(const FeedbackQueueEntry &entry)
 {
+#if 0
 	fprintf(stderr, "ID: %u, submitted: %.3f ms, queue done: %.3f ms, screen done: %.3f ms.\n",
 	        unsigned(entry.presentId), entry.submitted * 1e-6,
 	        entry.queueDone * 1e-6, entry.presentDone * 1e-6);
+#endif
+
+	Work analyzeWork = {};
+	analyzeWork.type = WorkType::HandleFeedback;
+	analyzeWork.u.feedbackEntry = entry;
+	workQueue.push(analyzeWork);
+	cond.notify_one();
 }
 
 void Swapchain::updateFeedback(const VkPastPresentationTimingEXT &timing)
@@ -708,7 +824,7 @@ void Swapchain::updateFeedback(const VkPastPresentationTimingEXT &timing)
 		}
 	}
 
-	// TODO: It's wasteful to calibrate *all* the time.
+	// TODO: It's wasteful to calibrate *all* the time, but w/e.
 	if (presentDone != 0 && queueDone != 0)
 	{
 		VkSwapchainCalibratedTimestampInfoEXT queueDoneStage = { VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT };
@@ -766,7 +882,7 @@ void Swapchain::updateFeedback(const VkPastPresentationTimingEXT &timing)
 	}
 
 	if (completeEntry.presentDone && completeEntry.queueDone)
-		reportCompleteEvent(completeEntry);
+		reportCompleteEventLocked(completeEntry);
 }
 
 void Swapchain::pollFeedback()
