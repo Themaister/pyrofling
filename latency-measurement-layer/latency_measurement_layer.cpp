@@ -489,7 +489,46 @@ VkResult Swapchain::initSourceCommands(uint32_t familyIndex)
 			                           image.buffer.buffer,
 			                           1, &copy);
 
+			// Show the capture area.
 			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			barrier.srcAccessMask = 0;
+			barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+			table.CmdPipelineBarrier(cmd,
+				 VK_PIPELINE_STAGE_TRANSFER_BIT,
+				 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+				 0, nullptr,
+				 0, nullptr,
+				 1, &barrier);
+
+			if (representativeWidth >= 16 && representativeHeight >= 16)
+			{
+				VkBufferImageCopy regions[4] = {};
+				for (auto &region : regions)
+				{
+					region.bufferOffset = representativeWidth * representativeHeight * sizeof(uint32_t);
+					region.bufferRowLength = 8;
+					region.bufferImageHeight = 8;
+					region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+					region.imageExtent = { 8, 8, 1 };
+				}
+
+				auto bottomRightOffset = copy.imageOffset;
+				bottomRightOffset.x += int(representativeWidth - 8);
+				bottomRightOffset.y += int(representativeHeight - 8);
+
+				regions[0].imageOffset = { copy.imageOffset.x, copy.imageOffset.y };
+				regions[1].imageOffset = { bottomRightOffset.x, copy.imageOffset.y };
+				regions[2].imageOffset = { copy.imageOffset.x, bottomRightOffset.y };
+				regions[3].imageOffset = { bottomRightOffset.x, bottomRightOffset.y };
+
+				table.CmdCopyBufferToImage(cmd, image.buffer.buffer, image.image,
+				                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 4, regions);
+			}
+
+			barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 			barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 			barrier.dstAccessMask = 0;
 
@@ -521,7 +560,7 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *, VkImag
 	img.image = image;
 
 	VkBufferCreateInfo bufferInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-	bufferInfo.size = representativeWidth * representativeHeight * sizeof(uint32_t);
+	bufferInfo.size = representativeWidth * representativeHeight * sizeof(uint32_t) * 2;
 	bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
 	auto vr = device->table.CreateBuffer(device->device, &bufferInfo, nullptr, &img.buffer.buffer);
@@ -563,6 +602,10 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *, VkImag
 	res = device->table.MapMemory(device->device, img.buffer.memory, 0, VK_WHOLE_SIZE, 0, &img.buffer.mapped);
 	if (res != VK_SUCCESS)
 		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+	// Use the upper half of the buffer to store a dummy image.
+	for (uint32_t pix = 0; pix < 2 * representativeWidth * representativeHeight; pix++)
+		static_cast<uint32_t *>(img.buffer.mapped)[pix] = 0xff00;
 
 	VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	res = device->table.CreateFence(device->device, &fenceInfo, nullptr, &img.fence);
@@ -801,7 +844,7 @@ void Swapchain::runWorker()
 #endif
 
 			// Measure a meaningful difference, which we presume was caused by (synthetic) player stimulus.
-			constexpr double MinimumPixelDelta = 2.0;
+			constexpr double MinimumPixelDelta = 0.5;
 			if (mseHistory[NumHistoryFrames - 1] > 16.0 * maxHistoryMSE &&
 				mseHistory[NumHistoryFrames - 1] > MinimumPixelDelta * MinimumPixelDelta &&
 				waitWork.presentId > NumHistoryFrames && !lastCandidateFrameId)
@@ -1333,7 +1376,7 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	auto *layer = getDeviceLayer(device);
 
 	auto tmpInfo = *pCreateInfo;
-	tmpInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+	tmpInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 	VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR };
 	surfaceInfo.surface = pCreateInfo->surface;
@@ -1511,7 +1554,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceSupportKHR(
 	                                                          &count,
 	                                                          props.data());
 
-	constexpr VkQueueFlags flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+	constexpr VkQueueFlags flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
 	if (queueFamilyIndex >= count || (props[queueFamilyIndex].queueFlags & flags) == 0)
 	{
 		*pSupported = VK_FALSE;
