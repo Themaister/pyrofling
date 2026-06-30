@@ -19,6 +19,7 @@ public:
 	virtual int64_t sample_reference_pts() = 0;
 	virtual void set_phase_offset(int phase_us) = 0;
 	virtual void set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state) = 0;
+	virtual void reset_gamepad_ownership() = 0;
 };
 
 class PyroStreamConnection : public PyroFling::Handler, public Util::ThreadSafeIntrusivePtrEnabled<PyroStreamConnection>
@@ -92,6 +93,7 @@ public:
 	void handle_udp_datagram(PyroFling::Dispatcher &dispatcher, const PyroFling::RemoteAddress &remote,
 	                         const void *msg, unsigned size);
 	void release_connection(PyroStreamConnection *conn) override;
+	void reset_gamepad_ownership() override;
 	bool should_force_idr();
 	void set_phase_offset(int phase_offset_us) override;
 	int get_phase_offset_us() const;

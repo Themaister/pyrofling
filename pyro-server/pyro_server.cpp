@@ -132,6 +132,9 @@ bool PyroStreamConnection::handle(const PyroFling::FileHandle &fd, uint32_t id)
 					return false;
 			}
 
+			if (kick_flags & PYRO_KICK_STATE_GAMEPAD_BIT)
+				server.reset_gamepad_ownership();
+
 			// Start timeout.
 			struct itimerspec tv = {};
 			tv.it_value.tv_sec = 15;
@@ -504,6 +507,11 @@ void PyroStreamServer::set_forward_error_correction(bool enable)
 void PyroStreamServer::set_idr_on_packet_loss(bool enable)
 {
 	idr_on_packet_loss = enable;
+}
+
+void PyroStreamServer::reset_gamepad_ownership()
+{
+	current_gamepad_remote = {};
 }
 
 void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)
