@@ -87,6 +87,7 @@ if (NOT WIN32)
     target_compile_options(pyrofling-virtual-gamepad PRIVATE ${PYROFLING_CXX_FLAGS})
     target_include_directories(pyrofling-virtual-gamepad PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(pyrofling-virtual-gamepad PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(pyrofling-socket PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_link_libraries(pyrofling-virtual-gamepad PUBLIC pyro-protocol PRIVATE granite-util)
 endif()
 

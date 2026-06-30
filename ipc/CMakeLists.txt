@@ -9,5 +9,7 @@ target_compile_options(pyrofling-ipc PRIVATE ${PYROFLING_CXX_FLAGS})
 
 if (NOT WIN32)
     target_link_libraries(pyrofling-ipc PUBLIC -pthread)
+else()
+    set_target_properties(pyrofling-ipc PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 

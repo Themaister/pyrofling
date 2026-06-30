@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include "virtual_gamepad.hpp"
+#include "pyro_client.hpp"
 #include <sys/stat.h>
 
 extern "C"
@@ -649,12 +650,33 @@ void Swapchain::runFakeInputStimulus()
 	else
 		fakeStimulusTriggerPath = "/tmp/latency-measurement-trigger";
 
-	PyroFling::VirtualGamepad gamepad(PyroFling::VirtualGamepad::FAKE_VID,
-		PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
+	std::unique_ptr<PyroFling::VirtualGamepad> virtualGamepad;
+	PyroFling::PyroStreamClient client;
+	bool hasPyroClient = true;
+
+	// Many games don't like it if we connect a controller late like this.
+	// If we can, piggyback off pyrofling server instead which can live "persistently".
+	if (!client.connect("127.0.0.1", "9000") ||
+		!client.handshake(PYRO_KICK_STATE_GAMEPAD_BIT))
+	{
+		hasPyroClient = false;
+		virtualGamepad = std::make_unique<PyroFling::VirtualGamepad>(
+			PyroFling::VirtualGamepad::FAKE_VID,
+			PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
+	}
 
 	// Report the neutral position.
 	pyro_gamepad_state state = {};
-	gamepad.report_state(state);
+
+	const auto send_gamepad_state = [&]()
+	{
+		if (hasPyroClient)
+			client.send_gamepad_state(state);
+		else
+			virtualGamepad->report_state(state);
+	};
+
+	send_gamepad_state();
 
 	// Seed doesn't matter.
 	std::mt19937 rng(0);
@@ -663,6 +685,9 @@ void Swapchain::runFakeInputStimulus()
 
 	for (;;)
 	{
+		if (hasPyroClient)
+			client.flush_packet_queue();
+
 		std::unique_lock<std::mutex> holder{fakeInputMutex};
 		// An arbitrary heartbeat.
 		fakeInputCond.wait_for(holder, std::chrono::milliseconds(23), [this]()
@@ -686,7 +711,7 @@ void Swapchain::runFakeInputStimulus()
 			lastStimulusTime = 0;
 			latencyReportFile.reset();
 			state = {};
-			gamepad.report_state(state);
+			send_gamepad_state();
 			continue;
 		}
 
@@ -752,14 +777,14 @@ void Swapchain::runFakeInputStimulus()
 
 				// Right analog stick usually controls the camera.
 				// TODO: Add more configurability here, custom mouse input for FPS games, etc, etc.
-				gamepad.report_state(state);
+				send_gamepad_state();
 				lastInputWasActive = true;
 			}
 			else
 			{
 				// Negative edge. We didn't register the input to cause any delta.
 				state = {};
-				gamepad.report_state(state);
+				send_gamepad_state();
 				lastInputWasActive = false;
 			}
 		}
@@ -768,13 +793,13 @@ void Swapchain::runFakeInputStimulus()
 			// We have a confirmed MSE delta that we're waiting for present feedback on.
 			// Idle the input stimulus immediately.
 			state = {};
-			gamepad.report_state(state);
+			send_gamepad_state();
 			lastInputWasActive = false;
 		}
 	}
 
 	state = {};
-	gamepad.report_state(state);
+	send_gamepad_state();
 }
 
 static inline void copyDarkenRGBA8(uint32_t *dst, const uint32_t *src, size_t count)
