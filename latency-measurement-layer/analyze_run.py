@@ -107,11 +107,15 @@ def main():
     data_points, present_done_type = read_csv(args.csv)
     analyze_frame_rate(data_points)
 
+    if len(data_points) == 0:
+        print('The log is empty. There were likely no valid data points made.')
+        sys.exit(1)
+
     print('')
     print('PresentComplete is determined by stage:', present_done_type)
     print('\tDequeued: Used on Xwayland.\n\t\tDoes not exactly represent when image is flipped on screen,\n\t\tbut rather when compositor commits to displaying the image. A few milliseconds are expected.')
     print('\tFirstPixelOut: Used on most compositors.\n\t\tRepresents when GPU flips image on display controller.')
-    print('\tFirstPixelVisible: Represents when photons are actually emitted by displayed.\n\t\tNot supported by any known implementation.')
+    print('\tFirstPixelVisible: Represents when photons are actually emitted by display.\n\t\tNot supported by any known implementation.')
 
     analyze_full_system_latency(data_points)
     analyze_input_gpu_latency(data_points)
