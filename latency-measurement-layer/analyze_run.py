@@ -13,14 +13,16 @@ DataPoint = collections.namedtuple('DataPoint', 'id stimulus submit queue_done p
 
 def read_csv(path):
     data_points = []
+    done_type = ''
     with open(path, 'r') as csvfile:
         reader = csv.reader(csvfile)
         for row in reader:
             if row[0] == 'id':
+                done_type = row[4]
                 continue
             data_points.append(DataPoint(int(row[0]), float(row[1]), float(row[2]), float(row[3]), float(row[4])))
 
-    return data_points
+    return data_points, done_type
 
 def analyze_frame_rate(data_points):
     total_time = data_points[-1].present_done - data_points[0].present_done
@@ -102,8 +104,14 @@ def main():
     if not args.csv:
         raise AssertionError('Need --csv.')
 
-    data_points = read_csv(args.csv)
+    data_points, present_done_type = read_csv(args.csv)
     analyze_frame_rate(data_points)
+
+    print('')
+    print('PresentComplete is determined by stage:', present_done_type)
+    print('\tDequeued: Used on Xwayland.\n\t\tDoes not exactly represent when image is flipped on screen,\n\t\tbut rather when compositor commits to displaying the image. A few milliseconds are expected.')
+    print('\tFirstPixelOut: Used on most compositors.\n\t\tRepresents when GPU flips image on display controller.')
+    print('\tFirstPixelVisible: Represents when photons are actually emitted by displayed.\n\t\tNot supported by any known implementation.')
 
     analyze_full_system_latency(data_points)
     analyze_input_gpu_latency(data_points)

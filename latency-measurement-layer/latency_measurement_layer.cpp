@@ -717,7 +717,19 @@ void Swapchain::runFakeInputStimulus()
 
 			latencyReportFile.reset(fopen(path, "w"));
 			if (latencyReportFile)
-				fprintf(latencyReportFile.get(), "id,stimulus,queuepresent,queuedone,presentdone\n");
+			{
+				const char *stage;
+				if (supportedStages & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT)
+					stage = "FirstPixelVisible";
+				else if (supportedStages & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT)
+					stage = "FirstPixelOut";
+				else if (supportedStages & VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT)
+					stage = "Dequeued";
+				else
+					stage = "???";
+
+				fprintf(latencyReportFile.get(), "id,stimulus,queuepresent,queuedone,%s\n", stage);
+			}
 		}
 
 		if (lastCandidateFrameId == 0)
@@ -1614,6 +1626,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceSupportKHR(
 	return layer->getTable()->GetPhysicalDeviceSurfaceSupportKHR(physicalDevice, queueFamilyIndex, surface, pSupported);
 }
 
+static bool isSupportedFormat(const VkSurfaceFormatKHR format)
+{
+	if (format.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+		return false;
+
+	switch (format.format)
+	{
+	case VK_FORMAT_B8G8R8A8_UNORM:
+	case VK_FORMAT_B8G8R8A8_SRGB:
+	case VK_FORMAT_R8G8B8A8_UNORM:
+	case VK_FORMAT_R8G8B8A8_SRGB:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 		VkPhysicalDevice                            physicalDevice,
 		VkSurfaceKHR                                surface,
@@ -1629,12 +1659,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 	// We need to analyze the image on CPU. Only accept most basic format for now.
 	auto itr = std::remove_if(formats.begin(), formats.end(), [](const VkSurfaceFormatKHR &fmt)
 	{
-		if (fmt.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-			return true;
-		if (fmt.format != VK_FORMAT_R8G8B8A8_UNORM && fmt.format != VK_FORMAT_R8G8B8A8_SRGB &&
-		    fmt.format != VK_FORMAT_B8G8R8A8_UNORM && fmt.format != VK_FORMAT_B8G8R8A8_SRGB)
-			return true;
-		return false;
+		return !isSupportedFormat(fmt);
 	});
 	formats.erase(itr, formats.end());
 
@@ -1669,11 +1694,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
 	// We need to analyze the image on CPU. Only accept most basic format for now.
 	auto itr = std::remove_if(formats.begin(), formats.end(), [](const VkSurfaceFormat2KHR &fmt)
 	{
-		if (fmt.surfaceFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-			return true;
-		if (fmt.surfaceFormat.format != VK_FORMAT_R8G8B8A8_UNORM && fmt.surfaceFormat.format != VK_FORMAT_R8G8B8A8_SRGB)
-			return true;
-		return false;
+		return !isSupportedFormat(fmt.surfaceFormat);
 	});
 	formats.erase(itr, formats.end());
 
