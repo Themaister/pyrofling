@@ -35,6 +35,10 @@
 #include "pyro_client.hpp"
 #include <sys/stat.h>
 
+#include <linux/uinput.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+
 extern "C"
 {
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
@@ -63,8 +67,7 @@ struct Device;
 
 struct Instance
 {
-	void init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vkSetInstanceLoaderData setInstanceLoaderData_,
-	          PFN_vkLayerCreateDevice layerCreateDevice_, PFN_vkLayerDestroyDevice layerDestroyDevice_);
+	void init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vkSetInstanceLoaderData setInstanceLoaderData_);
 
 	const VkLayerInstanceDispatchTable *getTable() const
 	{
@@ -82,72 +85,17 @@ struct Instance
 	}
 
 	VkInstance instance = VK_NULL_HANDLE;
-	VkPhysicalDevice sinkGpu = VK_NULL_HANDLE;
-	VkPhysicalDevice sourceGpu = VK_NULL_HANDLE;
 	VkLayerInstanceDispatchTable table = {};
 	PFN_vkGetInstanceProcAddr gpa = nullptr;
 	PFN_vkSetInstanceLoaderData setInstanceLoaderData = nullptr;
-	PFN_vkLayerCreateDevice layerCreateDevice = nullptr;
-	PFN_vkLayerDestroyDevice layerDestroyDevice = nullptr;
-	uint32_t sinkGpuQueueFamily = VK_QUEUE_FAMILY_IGNORED;
-
-	VkPhysicalDevice findPhysicalDevice(const char *tag) const;
 };
 
-VkPhysicalDevice Instance::findPhysicalDevice(const char *tag) const
-{
-	uint32_t count = 0;
-	table.EnumeratePhysicalDevices(instance, &count, nullptr);
-	std::vector<VkPhysicalDevice> gpus(count);
-	table.EnumeratePhysicalDevices(instance, &count, gpus.data());
-
-	for (uint32_t i = 0; i < count; i++)
-	{
-		VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
-		table.GetPhysicalDeviceProperties2KHR(gpus[i], &props2);
-
-		if (strstr(props2.properties.deviceName, tag) != nullptr)
-			return gpus[i];
-	}
-
-	return VK_NULL_HANDLE;
-}
-
-void Instance::init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vkSetInstanceLoaderData setInstanceLoaderData_,
-                    PFN_vkLayerCreateDevice layerCreateDevice_, PFN_vkLayerDestroyDevice layerDestroyDevice_)
+void Instance::init(VkInstance instance_, PFN_vkGetInstanceProcAddr gpa_, PFN_vkSetInstanceLoaderData setInstanceLoaderData_)
 {
 	instance = instance_;
 	gpa = gpa_;
 	setInstanceLoaderData = setInstanceLoaderData_;
-	layerCreateDevice = layerCreateDevice_;
-	layerDestroyDevice = layerDestroyDevice_;
 	layerInitInstanceDispatchTable(instance, &table, gpa);
-
-	if (const char *env = getenv("LATENCY_MEASUREMENT_SINK"))
-		sinkGpu = findPhysicalDevice(env);
-	if (const char *env = getenv("LATENCY_MEASUREMENT_SOURCE"))
-		sourceGpu = findPhysicalDevice(env);
-
-	if (sinkGpu)
-	{
-		uint32_t count = 0;
-		table.GetPhysicalDeviceQueueFamilyProperties(sinkGpu, &count, nullptr);
-		std::vector<VkQueueFamilyProperties> props(count);
-		table.GetPhysicalDeviceQueueFamilyProperties(sinkGpu, &count, props.data());
-
-		// Assume we can present with this queue. Somewhat sloppy, but whatever.
-		for (uint32_t i = 0; i < count; i++)
-		{
-			if (props[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
-			{
-				sinkGpuQueueFamily = i;
-				break;
-			}
-		}
-
-		if (sinkGpuQueueFamily == VK_QUEUE_FAMILY_IGNORED)
-			sinkGpu = VK_NULL_HANDLE;
-	}
 }
 
 struct Swapchain
@@ -642,6 +590,68 @@ static uint64_t getTimeNS()
 	return ts.tv_sec * 1000000000ull + ts.tv_nsec;
 }
 
+struct FakeMouse
+{
+	bool init();
+	~FakeMouse();
+	void sendRelativeImpulse(int x, int y);
+	int fd = -1;
+	void emit(int type, int code, int val);
+};
+
+void FakeMouse::emit(int type, int code, int val)
+{
+	input_event ie = {};
+	ie.type = type;
+	ie.code = code;
+	ie.value = val;
+	write(fd, &ie, sizeof(ie));
+}
+
+bool FakeMouse::init()
+{
+	uinput_setup usetup = {};
+
+	fd = ::open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+	if (fd < 0)
+		return false;
+
+	if (::ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0) return false;
+	if (::ioctl(fd, UI_SET_KEYBIT, BTN_LEFT) < 0) return false;
+	if (::ioctl(fd, UI_SET_KEYBIT, BTN_RIGHT) < 0) return false;
+
+	if (::ioctl(fd, UI_SET_EVBIT, EV_REL) < 0) return false;
+	if (::ioctl(fd, UI_SET_RELBIT, REL_X) < 0) return false;
+	if (::ioctl(fd, UI_SET_RELBIT, REL_Y) < 0) return false;
+
+	memset(&usetup, 0, sizeof(usetup));
+	usetup.id.bustype = BUS_USB;
+	usetup.id.vendor = PyroFling::VirtualGamepad::FAKE_VID;
+	usetup.id.product = PyroFling::VirtualGamepad::FAKE_PID + 2;
+	strcpy(usetup.name, "PyroFling Fake Mouse");
+
+	if (::ioctl(fd, UI_DEV_SETUP, &usetup) < 0) return false;
+	if (::ioctl(fd, UI_DEV_CREATE) < 0) return false;
+
+	return true;
+}
+
+FakeMouse::~FakeMouse()
+{
+	if (fd >= 0)
+	{
+		ioctl(fd, UI_DEV_DESTROY);
+		close(fd);
+	}
+}
+
+void FakeMouse::sendRelativeImpulse(int x, int y)
+{
+	emit(EV_REL, REL_X, x);
+	emit(EV_REL, REL_Y, y);
+	emit(EV_SYN, SYN_REPORT, 0);
+}
+
 void Swapchain::runFakeInputStimulus()
 {
 	std::string fakeStimulusTriggerPath;
@@ -650,19 +660,40 @@ void Swapchain::runFakeInputStimulus()
 	else
 		fakeStimulusTriggerPath = "/tmp/latency-measurement-trigger";
 
+	FakeMouse fakeMouse;
 	std::unique_ptr<PyroFling::VirtualGamepad> virtualGamepad;
 	PyroFling::PyroStreamClient client;
 	bool hasPyroClient = true;
 
-	// Many games don't like it if we connect a controller late like this.
-	// If we can, piggyback off pyrofling server instead which can live "persistently".
-	if (!client.connect("127.0.0.1", "9000") ||
-		!client.handshake(PYRO_KICK_STATE_GAMEPAD_BIT))
+	const char *pyroAddr = nullptr;
+	const char *pyroPort = nullptr;
+
+	if (const char *env = getenv("PYROFLING_IP"))
+		pyroAddr = env;
+	if (const char *env = getenv("PYROFLING_PORT"))
+		pyroPort = env;
+
+	bool hasFakeMouse = false;
+	int mouseImpulseRange = 0;
+
+	if (const char *env = getenv("LATENCY_MEASUREMENT_MOUSE"))
+		mouseImpulseRange = atoi(env);
+
+	if (mouseImpulseRange > 0)
+		hasFakeMouse = fakeMouse.init();
+
+	if (!hasFakeMouse)
 	{
-		hasPyroClient = false;
-		virtualGamepad = std::make_unique<PyroFling::VirtualGamepad>(
-			PyroFling::VirtualGamepad::FAKE_VID,
-			PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
+		// Many games don't like it if we connect a controller late like this.
+		// If we can, piggyback off pyrofling server instead which can live "persistently".
+		if (!pyroAddr || !pyroPort || !client.connect(pyroAddr, pyroPort) ||
+			!client.handshake(PYRO_KICK_STATE_GAMEPAD_BIT))
+		{
+			hasPyroClient = false;
+			virtualGamepad = std::make_unique<PyroFling::VirtualGamepad>(
+				PyroFling::VirtualGamepad::FAKE_VID,
+				PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
+		}
 	}
 
 	// Report the neutral position.
@@ -670,6 +701,9 @@ void Swapchain::runFakeInputStimulus()
 
 	const auto send_gamepad_state = [&]()
 	{
+		if (hasFakeMouse)
+			return;
+
 		if (hasPyroClient)
 			client.send_gamepad_state(state);
 		else
@@ -773,6 +807,13 @@ void Swapchain::runFakeInputStimulus()
 					state = {};
 					state.axis_rx = rng() & 1 ? 0x7fff : -0x7fff;
 					state.axis_ry = rng() & 1 ? 0x7fff : -0x7fff;
+
+					if (hasFakeMouse)
+					{
+						int mouse_x = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
+						int mouse_y = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
+						fakeMouse.sendRelativeImpulse(mouse_x, mouse_y);
+					}
 				}
 
 				// Right analog stick usually controls the camera.
@@ -1247,10 +1288,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo 
 {
 	auto *chainInfo = getChainInfo(pCreateInfo, VK_LAYER_LINK_INFO);
 	auto *callbackInfo = getChainInfo(pCreateInfo, VK_LOADER_DATA_CALLBACK);
-	auto *createDeviceCallback = getChainInfo(pCreateInfo, VK_LOADER_LAYER_CREATE_DEVICE_CALLBACK);
 	auto fpSetInstanceLoaderData = callbackInfo->u.pfnSetInstanceLoaderData;
-	auto fpCreateDevice = createDeviceCallback->u.layerDevice.pfnLayerCreateDevice;
-	auto fpDestroyDevice = createDeviceCallback->u.layerDevice.pfnLayerDestroyDevice;
 
 	auto fpGetInstanceProcAddr = chainInfo->u.pLayerInfo->pfnNextGetInstanceProcAddr;
 	auto fpCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(fpGetInstanceProcAddr(nullptr, "vkCreateInstance"));
@@ -1285,7 +1323,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateInstance(const VkInstanceCreateInfo 
 		std::lock_guard<std::mutex> holder{globalLock};
 		layer = createLayerData(getDispatchKey(*pInstance), instanceData);
 	}
-	layer->init(*pInstance, fpGetInstanceProcAddr, fpSetInstanceLoaderData, fpCreateDevice, fpDestroyDevice);
+	layer->init(*pInstance, fpGetInstanceProcAddr, fpSetInstanceLoaderData);
 
 	return VK_SUCCESS;
 }
