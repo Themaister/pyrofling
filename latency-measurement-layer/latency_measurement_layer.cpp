@@ -725,7 +725,7 @@ void Swapchain::runFakeInputStimulus()
 	// Report the neutral position.
 	pyro_gamepad_state state = {};
 
-	const auto send_gamepad_state = [&]()
+	const auto sendGamepadState = [&]()
 	{
 		if (hasFakeMouse)
 			return;
@@ -736,12 +736,16 @@ void Swapchain::runFakeInputStimulus()
 			virtualGamepad->report_state(state);
 	};
 
-	send_gamepad_state();
+	sendGamepadState();
 
 	// Seed doesn't matter.
 	std::mt19937 rng(0);
 
 	bool lastInputWasActive = false;
+
+	bool debugOutput = false;
+	if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+		debugOutput = strcmp(env, "1") == 0;
 
 	for (;;)
 	{
@@ -771,7 +775,7 @@ void Swapchain::runFakeInputStimulus()
 			lastStimulusTime = 0;
 			latencyReportFile.reset();
 			state = {};
-			send_gamepad_state();
+			sendGamepadState();
 			continue;
 		}
 
@@ -840,24 +844,24 @@ void Swapchain::runFakeInputStimulus()
 						int mouseY = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
 						fakeMouse.sendRelativeImpulse(mouseX, mouseY);
 
-						if (latencyReportFile)
+						if (latencyReportFile && debugOutput)
 							fprintf(latencyReportFile.get(), "DEBUG: Trigger fake mouse input (%d, %d)\n", mouseX, mouseY);
 					}
-					else
+					else if (debugOutput && latencyReportFile)
 						fprintf(latencyReportFile.get(), "DEBUG: Trigger fake gamepad input.\n");
 				}
 
 				// Right analog stick usually controls the camera.
 				// TODO: Add more configurability here, custom mouse input for FPS games, etc, etc.
 
-				send_gamepad_state();
+				sendGamepadState();
 				lastInputWasActive = true;
 			}
 			else
 			{
 				// Negative edge. We didn't register the input to cause any delta.
 				state = {};
-				send_gamepad_state();
+				sendGamepadState();
 				lastInputWasActive = false;
 			}
 		}
@@ -866,13 +870,13 @@ void Swapchain::runFakeInputStimulus()
 			// We have a confirmed MSE delta that we're waiting for present feedback on.
 			// Idle the input stimulus immediately.
 			state = {};
-			send_gamepad_state();
+			sendGamepadState();
 			lastInputWasActive = false;
 		}
 	}
 
 	state = {};
-	send_gamepad_state();
+	sendGamepadState();
 }
 
 static void copyErrorSignalRGB10(uint32_t *dst, const uint32_t *as, const uint32_t *bs, size_t count)
@@ -948,6 +952,11 @@ void Swapchain::runWorker()
 	double mseHistory[NumHistoryFrames] = {};
 	uint64_t numFeedbacksSinceDelta = 0;
 	uint64_t stimulusTime = 0;
+	uint64_t lastFeedbackId = 0;
+
+	bool debugOutput = false;
+	if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+		debugOutput = strcmp(env, "1") == 0;
 
 	for (;;)
 	{
@@ -1013,7 +1022,7 @@ void Swapchain::runWorker()
 			if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
-				if (latencyReportFile && strcmp(env, "1") == 0)
+				if (latencyReportFile && debugOutput)
 				{
 					fprintf(latencyReportFile.get(),
 					        "DEBUG: PresentID: %llu, MSE: %.3f (current threshold: %.3f)\n",
@@ -1036,13 +1045,10 @@ void Swapchain::runWorker()
 				stimulusTime = lastStimulusTime;
 				fakeInputCond.notify_one();
 
-				if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+				if (latencyReportFile && debugOutput)
 				{
-					if (latencyReportFile && strcmp(env, "1") == 0)
-					{
-						fprintf(latencyReportFile.get(), "DEBUG: PresentID: %llu committing to feedback\n",
-								static_cast<unsigned long long>(waitWork.presentId));
-					}
+					fprintf(latencyReportFile.get(), "DEBUG: PresentID: %llu committing to feedback\n",
+							static_cast<unsigned long long>(waitWork.presentId));
 				}
 			}
 		}
@@ -1053,11 +1059,12 @@ void Swapchain::runWorker()
 			if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
-				if (latencyReportFile && strcmp(env, "1") == 0)
+				if (latencyReportFile && debugOutput)
 					fprintf(latencyReportFile.get(), "DEBUG: PresentID: feedback received\n");
 			}
 
-			if (entry.presentId == lastCandidateFrameId && stimulusTime)
+			// Deal with MAILBOX/IMMEDIATE which may discard frames in favor of replaced frames that actually hit screen.
+			if (entry.presentId >= lastCandidateFrameId && lastFeedbackId < lastCandidateFrameId && stimulusTime)
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
 				if (latencyReportFile)
@@ -1081,6 +1088,8 @@ void Swapchain::runWorker()
 				lastStimulusTime = 0;
 				fakeInputCond.notify_one();
 			}
+
+			lastFeedbackId = entry.presentId;
 		}
 	}
 
