@@ -179,7 +179,6 @@ struct Swapchain
 	void runWorker();
 
 	VkResult swapchainStatus = VK_SUCCESS;
-	bool appDrivenID = false;
 	bool presentTiming = false;
 	VkPresentStageFlagsEXT supportedStages = 0;
 	uint64_t lastCandidateFrameId = 0;
@@ -1019,16 +1018,16 @@ void Swapchain::runWorker()
 			for (int i = 0; i < NumHistoryFrames - 1; i++)
 				maxHistoryMSE = std::max<double>(maxHistoryMSE, mseHistory[i]);
 
-			if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+			if (debugOutput)
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
-				if (latencyReportFile && debugOutput)
+				if (latencyReportFile)
 				{
 					fprintf(latencyReportFile.get(),
-					        "DEBUG: PresentID: %llu, MSE: %.3f (current threshold: %.3f)\n",
-					        static_cast<unsigned long long>(waitWork.presentId),
-					        mseHistory[NumHistoryFrames - 1],
-					        maxHistoryMSE);
+							"DEBUG: PresentID: %llu, MSE: %.3f (current threshold: %.3f)\n",
+							static_cast<unsigned long long>(waitWork.presentId),
+							mseHistory[NumHistoryFrames - 1],
+							maxHistoryMSE);
 				}
 			}
 
@@ -1056,10 +1055,10 @@ void Swapchain::runWorker()
 		{
 			auto &entry = work.u.feedbackEntry;
 
-			if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+			if (debugOutput)
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
-				if (latencyReportFile && debugOutput)
+				if (latencyReportFile)
 					fprintf(latencyReportFile.get(), "DEBUG: PresentID: feedback received\n");
 			}
 
@@ -1603,8 +1602,6 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	layer->getInstance()->getTable()->GetPhysicalDeviceSurfaceCapabilities2KHR(layer->gpu,
 			&surfaceInfo, &surfaceCaps);
 
-	bool appDrivenID = (tmpInfo.flags & VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR) != 0;
-
 	if (timingCaps.presentTimingSupported &&
 		(timingCaps.presentStageQueries & VK_PRESENT_STAGE_QUEUE_OPERATIONS_END_BIT_EXT) &&
 	    (timingCaps.presentStageQueries & (VK_PRESENT_STAGE_REQUEST_DEQUEUED_BIT_EXT |
@@ -1623,7 +1620,6 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 
 	auto swap = std::make_unique<Swapchain>(layer);
 
-	swap->appDrivenID = appDrivenID;
 	swap->presentTiming = (tmpInfo.flags & VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT) != 0;
 	swap->supportedStages = timingCaps.presentStageQueries;
 
@@ -1688,7 +1684,9 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 		if (!swap->presentTiming)
 			continue;
 
-		if (!swap->appDrivenID)
+		// Hazard: If application flips between not using IDs and using IDs, we might end up with weirdness.
+		// FIXME: Could add virtualization of IDs.
+		if (!presentId)
 		{
 			presentId = ++swap->internalPresentId;
 
@@ -1697,6 +1695,10 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 
 			fallbackId.pNext = tmpInfo.pNext;
 			tmpInfo.pNext = &fallbackId;
+		}
+		else
+		{
+			swap->internalPresentId = std::max<uint64_t>(swap->internalPresentId, presentId);
 		}
 
 		auto res = swap->submitSourceWork(queue, pPresentInfo->pImageIndices[i], presentId);
