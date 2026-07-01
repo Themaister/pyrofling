@@ -175,3 +175,11 @@ which doesn't directly represent when images are flipped on screen,
 and it's possible that Xwayland may appear to have lower latency than Wayland.
 NVIDIA does not support present timing on Xwayland at all.
 The CSV contains information about which present stage is used for feedback to verify this.
+
+Since input events are generated at any time, it is not necessarily synchronized to the game loop of the application.
+This matches real world too since humans are not phase locked with the game's polling loop.
+If frame times are on average N ms, we expect additional lag in the [0, N] ms range, with N / 2 ms being the average
+time from input is done until game polls the input, with some tiny additional latency to account for IPC propagation to compositors, etc.
+Sometimes games do trickery to get late polling behavior which could narrow this range down and should be visible in this analysis.
+This is reflected in the report where we see that the range
+for gaps between input stimulus and output is as we expect.
