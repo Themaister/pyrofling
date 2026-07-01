@@ -24,10 +24,6 @@ def read_csv(path):
 
     return data_points, done_type
 
-def analyze_frame_rate(data_points):
-    total_time = data_points[-1].present_done - data_points[0].present_done
-    frame_delta = data_points[-1].id - data_points[0].id
-    print(f'Average frame time: {1000.0 * total_time / frame_delta:.5} ms ({frame_delta / total_time:.5} Hz)')
 
 def avg_stddev_min_max_med(values):
     lo = 1e30
@@ -54,6 +50,14 @@ def print_gap(text, comment, data):
     print(f'      Standard Deviation +/- {stddev:.5} ms')
     print(f'    Median {med:.3} ms')
     print(f'    Range [{lo:.3}, {hi:.3}] ms')
+
+def analyze_frame_rate(data_points):
+    if len(data_points) < 2:
+        print('Need at least two data points to estimate frame rate ...')
+        return
+    total_time = data_points[-1].present_done - data_points[0].present_done
+    frame_delta = data_points[-1].id - data_points[0].id
+    print(f'Average frame time: {1000.0 * total_time / frame_delta:.5} ms ({frame_delta / total_time:.5} Hz)')
 
 def analyze_present_gaps(data_points):
     total_gaps = []
@@ -98,30 +102,32 @@ def analyze_input_gpu_latency(data_points):
 
 def main():
     parser = argparse.ArgumentParser(description = 'Script for parsing profiling data.')
-    parser.add_argument('--csv', type = str, help = 'The CSV.')
+    parser.add_argument('filename', type = str, nargs = '+', help = 'The CSV.')
 
     args = parser.parse_args()
-    if not args.csv:
-        raise AssertionError('Need --csv.')
 
-    data_points, present_done_type = read_csv(args.csv)
-    analyze_frame_rate(data_points)
+    for filename in args.filename:
+        print('\n======================')
+        print(f'Analyzing {filename}')
+        data_points, present_done_type = read_csv(filename)
 
-    if len(data_points) == 0:
-        print('The log is empty. There were likely no valid data points made.')
-        sys.exit(1)
+        analyze_frame_rate(data_points)
 
-    print('')
-    print('PresentComplete is determined by stage:', present_done_type)
-    print('\tDequeued: Used on Xwayland.\n\t\tDoes not exactly represent when image is flipped on screen,\n\t\tbut rather when compositor commits to displaying the image. A few milliseconds are expected.')
-    print('\tFirstPixelOut: Used on most compositors.\n\t\tRepresents when GPU flips image on display controller.')
-    print('\tFirstPixelVisible: Represents when photons are actually emitted by display.\n\t\tNot supported by any known implementation.')
+        if len(data_points) == 0:
+            print('The log is empty. There were likely no valid data points made.')
+            sys.exit(1)
 
-    analyze_full_system_latency(data_points)
-    analyze_input_gpu_latency(data_points)
-    analyze_stimulus_latency(data_points)
-    analyze_submission_latency(data_points)
-    analyze_present_gaps(data_points)
+        print('')
+        print('PresentComplete is determined by stage:', present_done_type)
+        print('\tDequeued: Used on Xwayland.\n\t\tDoes not exactly represent when image is flipped on screen,\n\t\tbut rather when compositor commits to displaying the image. A few milliseconds are expected.')
+        print('\tFirstPixelOut: Used on most compositors.\n\t\tRepresents when GPU flips image on display controller.')
+        print('\tFirstPixelVisible: Represents when photons are actually emitted by display.\n\t\tNot supported by any known implementation.')
+
+        analyze_full_system_latency(data_points)
+        analyze_input_gpu_latency(data_points)
+        analyze_stimulus_latency(data_points)
+        analyze_submission_latency(data_points)
+        analyze_present_gaps(data_points)
 
 if __name__ == '__main__':
     main()
