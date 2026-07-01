@@ -541,10 +541,6 @@ VkResult Swapchain::setupSwapchainImage(const VkSwapchainCreateInfoKHR *, VkImag
 	if (res != VK_SUCCESS)
 		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-	// Use the upper half of the buffer to store a dummy image.
-	for (uint32_t pix = 0; pix < 2 * representativeWidth * representativeHeight; pix++)
-		static_cast<uint32_t *>(img.buffer.mapped)[pix] = 0xff00;
-
 	VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	res = device->table.CreateFence(device->device, &fenceInfo, nullptr, &img.fence);
 	if (res != VK_SUCCESS)
@@ -572,6 +568,36 @@ static double computeMSE8(const uint32_t *a, const uint32_t *b, size_t count)
 		rb = int((pix_b >> 0) & 0xff);
 		gb = int((pix_b >> 8) & 0xff);
 		bb = int((pix_b >> 16) & 0xff);
+
+		int rdiff = ra - rb;
+		int gdiff = ga - gb;
+		int bdiff = ba - bb;
+
+		mse += double(rdiff * rdiff + gdiff * gdiff + bdiff * bdiff);
+	}
+
+	return mse / double(3 * count);
+}
+
+static double computeMSE10(const uint32_t *a, const uint32_t *b, size_t count)
+{
+	double mse = 0.0;
+
+	for (size_t i = 0; i < count; i++)
+	{
+		auto pix_a = a[i];
+		auto pix_b = b[i];
+
+		int ra, ga, ba, rb, gb, bb;
+
+		// RGBA vs BGRA flip is not important.
+		ra = int((pix_a >> 0) & 0x3ff);
+		ga = int((pix_a >> 10) & 0x3ff);
+		ba = int((pix_a >> 20) & 0x3ff);
+
+		rb = int((pix_b >> 0) & 0x3ff);
+		gb = int((pix_b >> 10) & 0x3ff);
+		bb = int((pix_b >> 20) & 0x3ff);
 
 		int rdiff = ra - rb;
 		int gdiff = ga - gb;
@@ -810,14 +836,20 @@ void Swapchain::runFakeInputStimulus()
 
 					if (hasFakeMouse)
 					{
-						int mouse_x = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
-						int mouse_y = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
-						fakeMouse.sendRelativeImpulse(mouse_x, mouse_y);
+						int mouseX = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
+						int mouseY = rng() & 1 ? mouseImpulseRange : -mouseImpulseRange;
+						fakeMouse.sendRelativeImpulse(mouseX, mouseY);
+
+						if (latencyReportFile)
+							fprintf(latencyReportFile.get(), "DEBUG: Trigger fake mouse input (%d, %d)\n", mouseX, mouseY);
 					}
+					else
+						fprintf(latencyReportFile.get(), "DEBUG: Trigger fake gamepad input.\n");
 				}
 
 				// Right analog stick usually controls the camera.
 				// TODO: Add more configurability here, custom mouse input for FPS games, etc, etc.
+
 				send_gamepad_state();
 				lastInputWasActive = true;
 			}
@@ -843,13 +875,39 @@ void Swapchain::runFakeInputStimulus()
 	send_gamepad_state();
 }
 
-static inline void copyDarkenRGBA8(uint32_t *dst, const uint32_t *src, size_t count)
+static void copyErrorSignalRGB10(uint32_t *dst, const uint32_t *as, const uint32_t *bs, size_t count)
 {
 	for (size_t i = 0; i < count; i++)
-		dst[i] = (src[i] >> 1) & 0x7f7f7f7f;
+	{
+		uint32_t a = as[i];
+		uint32_t b = bs[i];
+
+		int ra, ga, ba, rb, gb, bb;
+
+		// RGBA vs BGRA flip is not important.
+		// Any mismatch will cancel itself out.
+		ra = int((a >> 0) & 0x3ff);
+		ga = int((a >> 10) & 0x3ff);
+		ba = int((a >> 20) & 0x3ff);
+
+		rb = int((b >> 0) & 0x3ff);
+		gb = int((b >> 10) & 0x3ff);
+		bb = int((b >> 20) & 0x3ff);
+
+		int rdiff = std::abs(ra - rb);
+		int gdiff = std::abs(ga - gb);
+		int bdiff = std::abs(ba - bb);
+
+		// If HDR10, clamp to something that won't sear users eyes.
+		rdiff = std::min<int>(rdiff * 10, 700);
+		gdiff = std::min<int>(gdiff * 10, 700);
+		bdiff = std::min<int>(bdiff * 10, 700);
+
+		dst[i] = (rdiff << 0) | (gdiff << 10) | (bdiff << 20);
+	}
 }
 
-static inline void copyErrorSignalRGBA8(uint32_t *dst, const uint32_t *as, const uint32_t *bs, size_t count)
+static void copyErrorSignalRGBA8(uint32_t *dst, const uint32_t *as, const uint32_t *bs, size_t count)
 {
 	for (size_t i = 0; i < count; i++)
 	{
@@ -921,28 +979,20 @@ void Swapchain::runWorker()
 			memmove(mseHistory, mseHistory + 1, sizeof(mseHistory) - sizeof(mseHistory[0]));
 			memcpy(current.get(), images[waitWork.index].buffer.mapped, representativeWidth * representativeHeight * sizeof(uint32_t));
 
-			bool hasLatencyFile = false;
+			// Show a negative of the history buffer to make it easier to tell where the damage rect is.
+			if (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32)
 			{
-				std::lock_guard<std::mutex> holder{fakeInputMutex};
-				if (latencyReportFile)
-					hasLatencyFile = true;
-			}
-
-			if (true || hasLatencyFile)
-			{
-				// Show a negative of the history buffer to make it easier to tell where the damage rect is.
-				copyErrorSignalRGBA8(
+				copyErrorSignalRGB10(
 					static_cast<uint32_t *>(images[waitWork.index].buffer.mapped) +
 					representativeWidth * representativeHeight,
 					current.get(), prev.get(), representativeWidth * representativeHeight);
 			}
 			else
 			{
-				// Show a darkened version of the history buffer to make it easier to tell where the damage rect is.
-				copyDarkenRGBA8(static_cast<uint32_t *>(images[waitWork.index].buffer.mapped) +
-				           representativeWidth * representativeHeight,
-				           static_cast<const uint32_t *>(images[waitWork.index].buffer.mapped),
-				           representativeWidth * representativeHeight);
+				copyErrorSignalRGBA8(
+					static_cast<uint32_t *>(images[waitWork.index].buffer.mapped) +
+					representativeWidth * representativeHeight,
+					current.get(), prev.get(), representativeWidth * representativeHeight);
 			}
 
 			// Unblock early.
@@ -952,24 +1002,26 @@ void Swapchain::runWorker()
 				cond.notify_one();
 			}
 
-			mseHistory[NumHistoryFrames - 1] = computeMSE8(current.get(), prev.get(), representativeWidth * representativeHeight);
+			auto mseFunc = format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ? &computeMSE10 : &computeMSE8;
+			mseHistory[NumHistoryFrames - 1] = mseFunc(current.get(), prev.get(), representativeWidth * representativeHeight);
 
 			// Ensure the image was stable for the last N frames before we accept a delta.
 			double maxHistoryMSE = 0.0;
 			for (int i = 0; i < NumHistoryFrames - 1; i++)
 				maxHistoryMSE = std::max<double>(maxHistoryMSE, mseHistory[i]);
 
-#if 0
+			if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
-				if (latencyReportFile)
+				if (latencyReportFile && strcmp(env, "1") == 0)
 				{
-					fprintf(latencyReportFile.get(), "ID: %llu, MSE: %.3f\n",
+					fprintf(latencyReportFile.get(),
+					        "DEBUG: PresentID: %llu, MSE: %.3f (current threshold: %.3f)\n",
 					        static_cast<unsigned long long>(waitWork.presentId),
-					        mseHistory[NumHistoryFrames - 1]);
+					        mseHistory[NumHistoryFrames - 1],
+					        maxHistoryMSE);
 				}
 			}
-#endif
 
 			// Measure a meaningful difference, which we presume was caused by (synthetic) player stimulus.
 			constexpr double MinimumPixelDelta = 0.5;
@@ -983,11 +1035,28 @@ void Swapchain::runWorker()
 				lastCandidateFrameId = waitWork.presentId;
 				stimulusTime = lastStimulusTime;
 				fakeInputCond.notify_one();
+
+				if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+				{
+					if (latencyReportFile && strcmp(env, "1") == 0)
+					{
+						fprintf(latencyReportFile.get(), "DEBUG: PresentID: %llu committing to feedback\n",
+								static_cast<unsigned long long>(waitWork.presentId));
+					}
+				}
 			}
 		}
 		else if (work.type == WorkType::HandleFeedback)
 		{
 			auto &entry = work.u.feedbackEntry;
+
+			if (const char *env = getenv("LATENCY_MEASUREMENT_DEBUG"))
+			{
+				std::lock_guard<std::mutex> holder{fakeInputMutex};
+				if (latencyReportFile && strcmp(env, "1") == 0)
+					fprintf(latencyReportFile.get(), "DEBUG: PresentID: feedback received\n");
+			}
+
 			if (entry.presentId == lastCandidateFrameId && stimulusTime)
 			{
 				std::lock_guard<std::mutex> holder{fakeInputMutex};
@@ -1691,7 +1760,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceSupportKHR(
 
 static bool isSupportedFormat(const VkSurfaceFormatKHR format)
 {
-	if (format.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+	if (format.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR && format.colorSpace != VK_COLOR_SPACE_HDR10_ST2084_EXT)
 		return false;
 
 	switch (format.format)
@@ -1700,6 +1769,7 @@ static bool isSupportedFormat(const VkSurfaceFormatKHR format)
 	case VK_FORMAT_B8G8R8A8_SRGB:
 	case VK_FORMAT_R8G8B8A8_UNORM:
 	case VK_FORMAT_R8G8B8A8_SRGB:
+	case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
 		return true;
 
 	default:
