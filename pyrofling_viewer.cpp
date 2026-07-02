@@ -74,11 +74,11 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	                       float target_latency_,
 	                       double phase_locked_offset_, bool phase_locked_enable_,
 	                       bool frr_adaptive_, bool host_gpu_timestamp_,
-	                       double deadline_, bool deadline_enable_, const char *hwdevice_)
+	                       double deadline_, bool deadline_enable_, const char *hwdevice_, bool gamepad_)
 		: phase_locked_offset(phase_locked_offset_), phase_locked_enable(phase_locked_enable_)
 		, frr_adaptive(frr_adaptive_), host_gpu_timestamp(host_gpu_timestamp_)
 		, deadline(deadline_), deadline_enable(deadline_enable_)
-		, target_latency(target_latency_), hwdevice(hwdevice_)
+		, target_latency(target_latency_), hwdevice(hwdevice_), gamepad(gamepad_)
 	{
 		sent_button_mask = 0;
 		get_wsi().set_present_low_latency_mode(true);
@@ -211,7 +211,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				return false;
 			}
 
-			if (!pyro.handshake(PYRO_KICK_STATE_VIDEO_BIT | PYRO_KICK_STATE_AUDIO_BIT | PYRO_KICK_STATE_GAMEPAD_BIT))
+			if (!pyro.handshake(PYRO_KICK_STATE_VIDEO_BIT | PYRO_KICK_STATE_AUDIO_BIT | (gamepad ? PYRO_KICK_STATE_GAMEPAD_BIT : 0)))
 			{
 				show_message_box("Failed handshake.", Vulkan::WSIPlatform::MessageType::Error);
 				return false;
@@ -278,7 +278,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 
 	void check_poll_thread()
 	{
-		if (is_running_pyro && running_lifetime && !poll_thread.joinable())
+		if (is_running_pyro && running_lifetime && gamepad && !poll_thread.joinable())
 		{
 			poll_thread_dead = false;
 			poll_thread = std::thread{&VideoPlayerApplication::poll_thread_main, this};
@@ -397,6 +397,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 	bool deadline_enable;
 	float target_latency;
 	const char *hwdevice;
+	bool gamepad;
 	unsigned long long missed_deadlines = 0;
 	std::thread poll_thread;
 	std::atomic_bool poll_thread_dead;
@@ -1156,7 +1157,7 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 static void print_help()
 {
 	LOGI("pyrofling-viewer "
-	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE] [--frr-adaptive] [--host-gpu-timestamp]\n");
+	     "[--latency TARGET_LATENCY] [--phase-locked OFFSET_SECONDS] [--deadline SECONDS] [--hwdevice TYPE] [--frr-adaptive] [--host-gpu-timestamp] [--no-gamepad]\n");
 }
 
 namespace Granite
@@ -1183,6 +1184,7 @@ Application *application_create(int argc, char **argv)
 	bool frr_adaptive = false;
 	bool host_gpu_timestamp = false;
 	const char *hwdevice = nullptr;
+	bool gamepad = true;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--help", [&](Util::CLIParser &parser) { parser.end(); });
@@ -1192,6 +1194,7 @@ Application *application_create(int argc, char **argv)
 	cbs.add("--host-gpu-timestamp", [&](Util::CLIParser &) { host_gpu_timestamp = true; });
 	cbs.add("--deadline", [&](Util::CLIParser &parser) { deadline = parser.next_double(); deadline_enable = true; });
 	cbs.add("--hwdevice", [&](Util::CLIParser &parser) { hwdevice = parser.next_string(); });
+	cbs.add("--no-gamepad", [&](Util::CLIParser &) { gamepad = false; });
 	cbs.default_handler = [&](const char *path_) { path = path_; };
 	Util::CLIParser parser(std::move(cbs), argc - 1, argv + 1);
 
@@ -1211,7 +1214,7 @@ Application *application_create(int argc, char **argv)
 		auto *app = new VideoPlayerApplication(path, target_delay,
 		                                       phase_locked_offset, phase_locked_enable,
 		                                       frr_adaptive, host_gpu_timestamp,
-		                                       deadline, deadline_enable, hwdevice);
+		                                       deadline, deadline_enable, hwdevice, gamepad);
 		return app;
 	}
 	catch (const std::exception &e)
