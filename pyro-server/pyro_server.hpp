@@ -105,13 +105,16 @@ public:
 	void set_forward_error_correction(bool enable);
 	void set_idr_on_packet_loss(bool enable);
 
+	int consume_bitrate_change_request();
+
 private:
 	uint64_t cookie = 1000;
 	std::mutex lock;
 	std::vector<Util::IntrusivePtr<PyroStreamConnection>> connections;
 	pyro_codec_parameters codec = {};
 	uint64_t idr_counter = 0;
-	mutable std::atomic<int> phase_offset_us;
+	mutable std::atomic<int> phase_offset_us = {};
+	std::atomic<int> bitrate_change_request = {};
 
 	// Current owner of virtual device. Super crude system, but hey :)
 	RemoteAddress current_gamepad_remote;

@@ -1099,8 +1099,27 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		const Vulkan::Image *img;
 	};
 
+	void update_bitrate()
+	{
+		if (int delta = pyro.consume_bitrate_change_request())
+		{
+			if (delta > 0)
+				video_encode.bitrate_kbits = std::min<uint32_t>(10000000, (video_encode.bitrate_kbits * 110) / 100);
+			else
+				video_encode.bitrate_kbits = std::max<uint32_t>(100, (video_encode.bitrate_kbits * 90) / 100);
+
+			if (encoder)
+			{
+				encoder->update_bitrate_kbits(video_encode.bitrate_kbits);
+				LOGI("Adjusting bitrate to %u kbits/s.\n", video_encode.bitrate_kbits);
+			}
+		}
+	}
+
 	void encode_surface(const ReadySurface &surface, uint64_t period_ns)
 	{
+		update_bitrate();
+
 		Granite::VideoEncoder::YCbCrPipeline *ycbcr_pipeline = nullptr;
 		if (encoder)
 			ycbcr_pipeline = &pipeline[next_encode_task_slot];

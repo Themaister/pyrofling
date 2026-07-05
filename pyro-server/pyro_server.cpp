@@ -514,6 +514,11 @@ void PyroStreamServer::reset_gamepad_ownership()
 	current_gamepad_remote = {};
 }
 
+int PyroStreamServer::consume_bitrate_change_request()
+{
+	return bitrate_change_request.exchange(0, std::memory_order_acq_rel);
+}
+
 void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro_gamepad_state &state)
 {
 	// Use mode bit to take control of session. Super crude, but good enough for POC.
@@ -526,6 +531,12 @@ void PyroStreamServer::set_gamepad_state(const RemoteAddress &remote, const pyro
 
 	if (remote == current_gamepad_remote || !current_gamepad_remote || button_combo_takes_control)
 	{
+		// Experimental change bitrate on the fly.
+		if (button_combo_takes_control && (state.hat_y == -1 && current_gamepad_state.hat_y == 0))
+			bitrate_change_request.exchange(+1, std::memory_order_acq_rel);
+		else if (button_combo_takes_control && (state.hat_y == +1 && current_gamepad_state.hat_y == 0))
+			bitrate_change_request.exchange(-1, std::memory_order_acq_rel);
+
 		current_gamepad_state = state;
 		current_gamepad_remote = remote;
 		new_gamepad_state = true;
