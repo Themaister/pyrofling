@@ -901,6 +901,18 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 					y_offset += 50.0f;
 				}
 
+				if (is_running_pyro)
+				{
+					char text[128];
+					snprintf(text, sizeof(text), "Bitrate: %.3f mbit/s\n",
+					         pyro.get_estimated_incoming_bitrate() * 1e-6);
+					flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(Granite::UI::FontSize::Normal), text,
+					                          {15.0f + 320.0f + 10.0f, y_offset + 10.0f, 0},
+					                          {300.0f - 10.0f, 45.0f - 10.0f});
+
+					y_offset += 30.0f;
+				}
+
 				if (frr_adaptive && has_working_stats)
 				{
 					auto &pacer = get_wsi().get_fixed_rate_pacer();

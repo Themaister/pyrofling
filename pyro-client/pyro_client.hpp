@@ -67,6 +67,8 @@ public:
 
 	bool estimate_remote_pts_to_local_time(double remote_pts, double &local_pts);
 
+	double get_estimated_incoming_bitrate() const;
+
 private:
 	PyroFling::Socket tcp, udp;
 	pyro_kick_state_flags kick_flags = 0;
@@ -93,6 +95,16 @@ private:
 	double last_ping_delay = 0.0;
 	int64_t last_reference_pts = 0;
 	int64_t last_local_pts = 0;
+
+	mutable std::mutex history_ring_lock;
+	enum { HistoryRingSize = 8192 };
+	struct
+	{
+		int64_t ts;
+		size_t size;
+	} history[HistoryRingSize] = {};
+	int history_ring_index = 0;
+	void register_received_packet_size(size_t size);
 
 	ReconstructedPacket *get_stream_packet(ReconstructedPacket *stream_base,
 	                                       uint32_t packet_seq);

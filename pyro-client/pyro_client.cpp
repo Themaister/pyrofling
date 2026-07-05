@@ -202,6 +202,25 @@ double PyroStreamClient::get_current_ping_delay() const
 	return last_ping_delay;
 }
 
+double PyroStreamClient::get_estimated_incoming_bitrate() const
+{
+	std::lock_guard<std::mutex> holder{history_ring_lock};
+	int64_t lo = INT64_MAX;
+	int64_t hi = 0;
+	size_t size = 0;
+	for (auto &hist : history)
+	{
+		lo = std::min<int64_t>(lo, hist.ts);
+		hi = std::max<int64_t>(hi, hist.ts);
+		size += hist.size;
+	}
+
+	if (lo == 0)
+		return 0.0;
+
+	return 8e9 * double(size) / double(hi - lo);
+}
+
 bool PyroStreamClient::estimate_remote_pts_to_local_time(double remote_pts, double &local_pts)
 {
 	if (last_reference_pts == 0 || last_local_pts == 0)
@@ -482,8 +501,11 @@ bool PyroStreamClient::iterate()
 		payload.size = udp.read_thread_packet(&payload, PYRO_MAX_UDP_DATAGRAM_SIZE);
 	}
 
+	register_received_packet_size(payload.size);
+
 	if (payload.size < sizeof(pyro_payload_header) || payload.size > PYRO_MAX_UDP_DATAGRAM_SIZE)
 		return false;
+
 	payload.size -= sizeof(pyro_payload_header);
 
 	write_debug_header(payload.header);
@@ -637,6 +659,16 @@ bool PyroStreamClient::iterate()
 	}
 
 	return true;
+}
+
+void PyroStreamClient::register_received_packet_size(size_t size)
+{
+	std::lock_guard<std::mutex> holder{history_ring_lock};
+	history[history_ring_index] = {
+		std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - base_time).count(),
+		size
+	};
+	history_ring_index = (history_ring_index + 1) % HistoryRingSize;
 }
 
 bool PyroStreamClient::check_send_progress()
