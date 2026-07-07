@@ -19,34 +19,53 @@ static const int button_mapping[] =
 	//BTN_MODE, Causes too much annoyance and confusion when this is piped through.
 };
 
-VirtualGamepad::VirtualGamepad(uint32_t fake_vid, uint32_t fake_pid, const char *fake_name)
+void VirtualGamepad::init_debug_mouse()
+{
+	uinput_setup usetup = {};
+
+	if (::ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0 ||
+		::ioctl(uinput_fd, UI_SET_KEYBIT, BTN_LEFT) < 0 ||
+		::ioctl(uinput_fd, UI_SET_KEYBIT, BTN_RIGHT) < 0 ||
+		::ioctl(uinput_fd, UI_SET_EVBIT, EV_REL) < 0 ||
+		::ioctl(uinput_fd, UI_SET_RELBIT, REL_X) < 0 ||
+		::ioctl(uinput_fd, UI_SET_RELBIT, REL_Y) < 0)
+	{
+		throw std::runtime_error("Failed to setup uinput.");
+	}
+
+	memset(&usetup, 0, sizeof(usetup));
+	usetup.id.bustype = BUS_USB;
+	usetup.id.vendor = FAKE_VID;
+	usetup.id.product = FAKE_PID_MOUSE;
+	strcpy(usetup.name, "PyroFling Fake Mouse");
+
+	if (::ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0 ||
+		::ioctl(uinput_fd, UI_DEV_CREATE) < 0)
+	{
+		throw std::runtime_error("Failed to setup uinput.");
+	}
+}
+
+VirtualGamepad::VirtualGamepad()
 {
 	uinput_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 	if (uinput_fd < 0)
 		throw std::runtime_error("Failed to open /dev/uinput.");
+}
 
+void VirtualGamepad::init_gamepad(uint32_t fake_vid, uint32_t fake_pid, const char *fake_name)
+{
 	if (ioctl(uinput_fd, UI_SET_EVBIT, EV_KEY) < 0)
-	{
-		close(uinput_fd);
 		throw std::runtime_error("Failed to set EV_KEY.");
-	}
 
 	if (ioctl(uinput_fd, UI_SET_EVBIT, EV_ABS) < 0)
-	{
-		close(uinput_fd);
 		throw std::runtime_error("Failed to set EV_KEY.");
-	}
 
 	// Emulate a generic pad according that conforms to Linux evdev specs and basically emulates a PS4 controller.
 
 	for (auto btn : button_mapping)
-	{
 		if (ioctl(uinput_fd, UI_SET_KEYBIT, btn) < 0)
-		{
-			close(uinput_fd);
 			throw std::runtime_error("Failed to set keybit.");
-		}
-	}
 
 	static const int axes[] =
 	{
@@ -58,10 +77,7 @@ VirtualGamepad::VirtualGamepad(uint32_t fake_vid, uint32_t fake_pid, const char 
 	for (auto axis : axes)
 	{
 		if (ioctl(uinput_fd, UI_SET_ABSBIT, axis) < 0)
-		{
-			close(uinput_fd);
 			throw std::runtime_error("Failed to set absbit.");
-		}
 
 		int range;
 		if (axis == ABS_HAT0X || axis == ABS_HAT0Y)
@@ -71,7 +87,7 @@ VirtualGamepad::VirtualGamepad(uint32_t fake_vid, uint32_t fake_pid, const char 
 		else
 			range = 0x7fff;
 
-		struct uinput_abs_setup abs_setup = {};
+		uinput_abs_setup abs_setup = {};
 		abs_setup.code = axis;
 		abs_setup.absinfo.minimum = (axis == ABS_Z || axis == ABS_RZ) ? 0 : -range;
 		abs_setup.absinfo.maximum = range;
@@ -90,10 +106,18 @@ VirtualGamepad::VirtualGamepad(uint32_t fake_vid, uint32_t fake_pid, const char 
 	strcpy(usetup.name, fake_name ? fake_name : "PyroFling virtual gamepad");
 
 	if (ioctl(uinput_fd, UI_DEV_SETUP, &usetup) < 0 || ioctl(uinput_fd, UI_DEV_CREATE) < 0)
-	{
-		close(uinput_fd);
 		throw std::runtime_error("Failed to setup uinput device.");
-	}
+}
+
+VirtualGamepad::VirtualGamepad(DebugMode mode, uint32_t fake_vid, uint32_t fake_pid, const char *fake_name)
+	: VirtualGamepad()
+{
+	debug_mode = mode;
+
+	if (mode == DebugMode::None)
+		init_gamepad(fake_vid, fake_pid, fake_name);
+	else if (mode == DebugMode::RightAnalogToMouse)
+		init_debug_mouse();
 }
 
 static void write_event(int fd, int type, int code, int val)
@@ -108,24 +132,42 @@ static void write_event(int fd, int type, int code, int val)
 
 void VirtualGamepad::report_state(const pyro_gamepad_state &state)
 {
-	uint16_t delta_btn = state.buttons ^ last_state.buttons;
+	if (debug_mode == DebugMode::RightAnalogToMouse)
+	{
+		// Designed for doing latency measurements with the layer when doing remote gamepad path.
+		bool delta_x = state.axis_rx && state.axis_rx != last_state.axis_rx;
+		bool delta_y = state.axis_ry && state.axis_ry != last_state.axis_ry;
 
-	Util::for_each_bit(delta_btn, [this, v = state.buttons](unsigned bit) {
-		if (bit < sizeof(button_mapping) / sizeof(button_mapping[0]))
-			write_event(uinput_fd, EV_KEY, button_mapping[bit], (v & (1u << bit)) ? 1 : 0);
-	});
+		if (delta_x)
+			write_event(uinput_fd, EV_REL, REL_X, (state.axis_rx - last_state.axis_rx) / 3000);
+		if (delta_y)
+			write_event(uinput_fd, EV_REL, REL_Y, (state.axis_ry - last_state.axis_ry) / 3000);
+
+		if (delta_x || delta_y)
+			write_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
+	}
+	else if (debug_mode == DebugMode::None)
+	{
+		uint16_t delta_btn = state.buttons ^ last_state.buttons;
+
+		Util::for_each_bit(delta_btn, [this, v = state.buttons](unsigned bit) {
+			if (bit < sizeof(button_mapping) / sizeof(button_mapping[0]))
+				write_event(uinput_fd, EV_KEY, button_mapping[bit], (v & (1u << bit)) ? 1 : 0);
+		});
 
 #define AXIS(v, code) do { if (state.v != last_state.v) write_event(uinput_fd, EV_ABS, code, state.v); } while(0)
-	AXIS(axis_lx, ABS_X);
-	AXIS(axis_ly, ABS_Y);
-	AXIS(axis_rx, ABS_RX);
-	AXIS(axis_ry, ABS_RY);
-	AXIS(lz, ABS_Z);
-	AXIS(rz, ABS_RZ);
-	AXIS(hat_x, ABS_HAT0X);
-	AXIS(hat_y, ABS_HAT0Y);
+		AXIS(axis_lx, ABS_X);
+		AXIS(axis_ly, ABS_Y);
+		AXIS(axis_rx, ABS_RX);
+		AXIS(axis_ry, ABS_RY);
+		AXIS(lz, ABS_Z);
+		AXIS(rz, ABS_RZ);
+		AXIS(hat_x, ABS_HAT0X);
+		AXIS(hat_y, ABS_HAT0Y);
 
-	write_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
+		write_event(uinput_fd, EV_SYN, SYN_REPORT, 0);
+	}
+
 	last_state = state;
 }
 

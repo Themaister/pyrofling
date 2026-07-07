@@ -377,8 +377,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		assert(handlers.empty());
 	}
 
-	explicit SwapchainServer(Dispatcher &dispatcher_)
-		: dispatcher(dispatcher_)
+	explicit SwapchainServer(Dispatcher &dispatcher_, bool gamepad_to_mouse)
+		: dispatcher(dispatcher_),
+		  uinput(gamepad_to_mouse ? VirtualGamepad::DebugMode::RightAnalogToMouse : VirtualGamepad::DebugMode::None)
 	{
 		if (!Vulkan::Context::init_loader(nullptr))
 			throw std::runtime_error("Failed to load Vulkan.");
@@ -1808,6 +1809,7 @@ static void print_help()
 	     "\t[--low-latency]\n"
 	     "\t[--no-audio]\n"
 	     "\t[--immediate-encode]\n"
+	     "\t[--debug-gamepad-to-mouse]\n"
 #ifdef HAVE_PIPEWIRE
 		 "\t[--pipewire]\n"
 #endif
@@ -1818,6 +1820,7 @@ static int main_inner(int argc, char **argv)
 {
 	std::string socket_path = "/tmp/pyrofling-socket";
 	unsigned client_rate_multiplier = 1;
+	bool debug_gamepad_to_mouse = false;
 	SwapchainServer::Options opts;
 	unsigned device_index = 0;
 	std::string port;
@@ -1854,6 +1857,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--444", [&](Util::CLIParser &) { opts.chroma_444 = true; });
 	cbs.add("--fec", [&](Util::CLIParser &) { opts.fec = true; });
 	cbs.add("--offline", [&](Util::CLIParser &) { opts.walltime_to_pts = false; });
+	cbs.add("--debug-gamepad-to-mouse", [&](Util::CLIParser &) { debug_gamepad_to_mouse = true; });
 #ifdef HAVE_PIPEWIRE
 	cbs.add("--pipewire", [&](Util::CLIParser &) { opts.pipewire = true; });
 #endif
@@ -1888,7 +1892,7 @@ static int main_inner(int argc, char **argv)
 	     opts.bitrate_kbits, opts.max_bitrate_kbits, opts.vbv_size_kbits, opts.gop_seconds);
 
 	Dispatcher dispatcher{socket_path.c_str(), port.c_str()};
-	SwapchainServer server{dispatcher};
+	SwapchainServer server{dispatcher, debug_gamepad_to_mouse};
 	server.set_client_rate_multiplier(client_rate_multiplier);
 	server.set_encode_options(opts);
 	if (!server.init_encoder_for_device(device_index))
@@ -1899,7 +1903,7 @@ static int main_inner(int argc, char **argv)
 	if (!timer_fd)
 		return EXIT_FAILURE;
 
-	struct itimerspec new_period = {};
+	itimerspec new_period = {};
 	new_period.it_value.tv_nsec = 1000000000 / (opts.fps * client_rate_multiplier);
 	new_period.it_interval.tv_nsec = 1000000000 / (opts.fps * client_rate_multiplier);
 	if (timerfd_settime(timer_fd.get_native_handle(), 0, &new_period, nullptr) < 0)

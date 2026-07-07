@@ -716,6 +716,7 @@ void Swapchain::runFakeInputStimulus()
 		{
 			hasPyroClient = false;
 			virtualGamepad = std::make_unique<PyroFling::VirtualGamepad>(
+				PyroFling::VirtualGamepad::DebugMode::None,
 				PyroFling::VirtualGamepad::FAKE_VID,
 				PyroFling::VirtualGamepad::FAKE_PID + 1, "PyroFling Test Stimulus");
 		}
