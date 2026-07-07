@@ -729,6 +729,8 @@ void Swapchain::runFakeInputStimulus()
 		if (hasFakeMouse)
 			return;
 
+		state.buttons |= PYRO_PAD_MODE_BIT;
+
 		if (hasPyroClient)
 			client.send_gamepad_state(state);
 		else
