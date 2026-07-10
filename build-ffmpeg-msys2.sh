@@ -1,6 +1,11 @@
 #!/bin/bash
 export CFLAGS="-static -static-libgcc -static-libstdc++"
 
+cd ffmpeg
+git reset --hard
+git apply -p1 ../patches/vvl-sanity.patch
+cd ..
+
 mkdir -p ffmpeg-build-msys2
 cd ffmpeg-build-msys2
 

@@ -1,0 +1,13 @@
+diff --git a/libavcodec/vulkan_decode.c b/libavcodec/vulkan_decode.c
+index 9ab8d45aa9..c94f894ef5 100644
+--- a/libavcodec/vulkan_decode.c
++++ b/libavcodec/vulkan_decode.c
+@@ -233,7 +233,7 @@ int ff_vk_decode_prepare_frame(FFVulkanDecodeContext *dec, AVFrame *pic,
+                                 (AVVkFrame *)pic->data[0],
+                                 hwfc->format[0],
+                                 VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR |
+-                                (!is_current ? VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR : 0));
++                                VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR);
+         if (err < 0)
+             return err;
+ 
