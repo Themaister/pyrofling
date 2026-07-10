@@ -129,6 +129,7 @@ if (NOT PYROFLING_LAYER_ONLY)
     install(TARGETS pyrofling-latency-tester)
 
     add_granite_offline_tool(pyrofling-gamepad pyrofling_gamepad.cpp)
+    set_target_properties(pyrofling-gamepad PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
     target_link_libraries(pyrofling-gamepad PRIVATE pyro-client SDL3-static granite-input-sdl)
     if (WIN32)
         target_link_libraries(pyrofling-gamepad PRIVATE winmm)

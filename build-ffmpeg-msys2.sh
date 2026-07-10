@@ -19,3 +19,6 @@ cd ffmpeg-build-msys2
 
 make -j$(nproc) install
 
+# Hack to make static linking work.
+sed -i output/lib/pkgconfig/libavfilter.pc -e 's|-lstdc++||g'
+
