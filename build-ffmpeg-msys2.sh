@@ -3,7 +3,8 @@ export CFLAGS="-static -static-libgcc -static-libstdc++"
 
 cd ffmpeg
 git reset --hard
-git apply -p1 ../patches/vvl-sanity.patch
+# Seems to be needed to shut NV validation up, but conflicts with AMD, so it's not a complete fix.
+#git apply -p1 ../patches/vvl-sanity.patch
 cd ..
 
 mkdir -p ffmpeg-build-msys2
