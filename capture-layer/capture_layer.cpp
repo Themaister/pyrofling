@@ -731,21 +731,16 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	if (khrPresentId != 0)
 		usesPresentWait = true;
 
-	bool isFastForwardPresentMode = presentMode == VK_PRESENT_MODE_MAILBOX_KHR ||
-	                                presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR;
-
 	// The assumption here is that if a fast present mode is engaged,
 	// the application generally stops using present wait temporarily, kick in manual waits to deal with this.
-	if (wire.period > 0 && (!usesPresentWait || (instance->getSyncMode() == SyncMode::Server && isFastForwardPresentMode)))
+	if (wire.period > 0 && (!usesPresentWait || instance->getSyncMode() == SyncMode::Server))
 	{
 		std::unique_lock<std::mutex> holder{clientLock};
 
-		// Ensure proper pacing.
-		// Acquire/Retire events may arrive in un-paced order, but completion events are well-paced.
-		// In 2 image mode, we basically need to block until next heartbeat completes.
-		// If app uses present ID, assumes that it paces itself with present wait.
-
-		while (completePresentId + (image.size() - 2) < presentId)
+		// Let there be max one pending heartbeat left before we call the real QueuePresentKHR.
+		// For server sync mode, this will add latency to the server process,
+		// but it improves frame pacing for streaming purposes.
+		while (completePresentId + 1 < presentId)
 		{
 			if (client->wait_reply(holder) < 0)
 			{
