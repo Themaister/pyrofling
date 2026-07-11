@@ -745,8 +745,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			auto cmd = device.request_command_buffer(cmd_type);
 
-			bool wait_early = false;
-
 			if (img.src_cross_device_buffer)
 			{
 				cmd->acquire_image_barrier(*img.image, old_layout, new_layout,
@@ -767,9 +765,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 				cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
-
-				// We must have a roundtrip between the GPUs when it's remote GPU presenting.
-				wait_early = true;
 			}
 			else
 			{
@@ -784,10 +779,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				}
 			}
 
-			// If we're not doing immediate encode, we should make sure GPU is idle before we commit to a cycle.
-			if (!server.video_encode.immediate)
-				wait_early = true;
-
 			Vulkan::Fence fence;
 			device.submit(cmd, &fence);
 
@@ -795,37 +786,23 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			add_reference();
 			server.group.create_task(
 					[this, index = present.wire.index, serial = image_group_serial,
-						f = std::move(fence), ts, wait_early]() mutable {
+						f = std::move(fence), ts]() mutable {
 
 						Util::TimelineTraceFile::ScopedEvent scoped {
 							server.group.get_timeline_trace_file(), "GPU drain", uint32_t(index),
 						};
 
-						// Don't want to create a bubble here if we can help it.
-						if (wait_early)
-						{
-							f->wait();
-							const uint64_t buf[3] = { serial, index, uint64_t(ts) };
-							ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
-							if (ret < 0 && errno != EPIPE)
-								LOGE("Failed to write to pipe.\n");
-						}
-
-						// Need to block before we can release the reference at least ...
 						f->wait();
+						const uint64_t buf[3] = { serial, index, uint64_t(ts) };
+						ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
+						if (ret < 0 && errno != EPIPE)
+							LOGE("Failed to write to pipe.\n");
+
 						release_reference();
 					});
 
 			if (!send_message(fd, MessageType::OK, present.get_serial()))
 				return false;
-
-			if (!wait_early)
-			{
-				// Don't roundtrip to a socket and epoll loop when we can just handle the event inline.
-				const uint64_t buf[3] = { image_group_serial, present.wire.index, uint64_t(ts) };
-				if (!handle_async(buf))
-					return false;
-			}
 
 			if (!retire_obsolete_images())
 				return false;
@@ -1019,6 +996,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			if (complete_id)
 			{
+				Util::TimelineTraceFile::ScopedEvent scoped {
+					server.group.get_timeline_trace_file(), "Heartbeat", 0,
+				};
+
 				FrameCompleteMessage::WireFormat complete = {};
 				complete.image_group_serial = image_group_serial;
 				complete.period_ns = time_ns;
