@@ -745,6 +745,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			auto cmd = device.request_command_buffer(cmd_type);
 
+			bool wait_early = false;
+
 			if (img.src_cross_device_buffer)
 			{
 				cmd->acquire_image_barrier(*img.image, old_layout, new_layout,
@@ -765,6 +767,9 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 				cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+				// We must have a roundtrip between the GPUs when it's remote GPU presenting.
+				wait_early = true;
 			}
 			else
 			{
@@ -779,11 +784,27 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				}
 			}
 
+			// If we're not doing immediate encode, we should make sure GPU is idle before we commit to a cycle.
+			if (!server.video_encode.immediate)
+				wait_early = true;
+
 			Vulkan::Fence fence;
 			device.submit(cmd, &fence);
 
 			// Mark the buffer async.
 			add_reference();
+
+			if (!send_message(fd, MessageType::OK, present.get_serial()))
+				return false;
+
+			if (!wait_early)
+			{
+				// Don't roundtrip to a socket and epoll loop when we can just handle the event inline.
+				const uint64_t buf[3] = { image_group_serial, present.wire.index, uint64_t(ts) };
+				if (!handle_async(buf, false))
+					return false;
+			}
+
 			server.group.create_task(
 					[this, index = present.wire.index, serial = image_group_serial,
 						f = std::move(fence), ts]() mutable {
@@ -792,6 +813,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 							server.group.get_timeline_trace_file(), "GPU drain", uint32_t(index),
 						};
 
+						// Notify when the GPU is actually done.
+						// We will not consider the image complete until GPU is done rendering.
 						f->wait();
 						const uint64_t buf[3] = { serial, index, uint64_t(ts) };
 						ssize_t ret = ::write(pipe_fd.get_native_handle(), buf, sizeof(buf));
@@ -800,9 +823,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 						release_reference();
 					});
-
-			if (!send_message(fd, MessageType::OK, present.get_serial()))
-				return false;
 
 			if (!retire_obsolete_images())
 				return false;
@@ -821,7 +841,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			return ts;
 		}
 
-		bool handle_async(const uint64_t *buf)
+		bool handle_async(const uint64_t *buf, bool confirmed_gpu_done)
 		{
 			// Sentinel.
 			if (buf[1] == uint64_t(-1))
@@ -834,14 +854,20 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			uint64_t index = buf[1];
 			assert(index < images.size());
 
-			assert(images[index].state == State::PresentQueued);
-			images[index].state = State::PresentReady;
-			images[index].event = { server.group.get_timeline_trace_file(), "PresentReady", uint32_t(index) };
+			bool was_queued = images[index].state == State::PresentQueued;
+			assert(was_queued || images[index].state == State::PresentPendingReady);
 
-			// If we're using immediate mode, we'll want to encode this frame right away and send it.
-			// It will be retired late.
-			timestamp_complete_mappings.push_back({ images[index].target_timestamp, images[index].present_id });
-			server.notify_async_surface({ this, int(index), int64_t(buf[2]) });
+			images[index].state = confirmed_gpu_done ? State::PresentReady : State::PresentPendingReady;
+			images[index].event = { server.group.get_timeline_trace_file(),
+				confirmed_gpu_done ? "PresentPendingReady" : "PresentReady", uint32_t(index) };
+
+			if (was_queued)
+			{
+				// If we're using immediate mode, we'll want to encode this frame right away and send it.
+				// It will be retired late.
+				timestamp_complete_mappings.push_back({ images[index].target_timestamp, images[index].present_id });
+				server.notify_async_surface({ this, int(index), int64_t(buf[2]) });
+			}
 
 			// If we're doing immediate encode, every user image can be retired now.
 			// We've already blitted it.
@@ -859,7 +885,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			uint64_t buf[3];
 			if (size_t(::read(fd.get_native_handle(), buf, sizeof(buf))) != sizeof(buf))
 				return false;
-			return handle_async(buf);
+			return handle_async(buf, true);
 		}
 
 		bool handle(const FileHandle &fd, uint32_t id) override
@@ -1018,6 +1044,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		{
 			ClientOwned,
 			PresentQueued,
+			PresentPendingReady,
 			PresentReady
 		};
 
