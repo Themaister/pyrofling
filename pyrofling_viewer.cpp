@@ -121,6 +121,15 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 #endif
 	}
 
+	Vulkan::ContextCreationFlags get_disable_context_creation_flags() override
+	{
+		// We want to make use of YCbCr samplers to be friendlier to weaker hardware.
+		// We only implement that for legacy descriptor model.
+		// Something trivial like pyrofling really does not need the CPU wins from these modern models.
+		return Vulkan::CONTEXT_CREATION_ENABLE_DESCRIPTOR_BUFFER_BIT |
+		       Vulkan::CONTEXT_CREATION_ENABLE_DESCRIPTOR_HEAP_BIT;
+	}
+
 	bool on_soft_keyboard_update(const Vulkan::ApplicationSoftKeyboardUpdateEvent &e)
 	{
 		cliptext = e.get_text();
@@ -820,22 +829,53 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			cmd->begin_render_pass(rp);
 			if (frame.view)
 			{
-				if (frame.view->get_format() == VK_FORMAT_R16G16B16A16_SFLOAT &&
-				    get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::scRGB)
+				if (frame.immutable_sampler)
 				{
-					LOGI("Flipping over to scRGB color space.\n");
-					get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::scRGB);
+					if (frame.color_space == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+					    get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::HDR10)
+					{
+						LOGI("Flipping over to HDR10 color space.\n");
+						get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::HDR10);
+					}
+					else if (frame.color_space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
+					         get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::UNORM)
+					{
+						LOGI("Flipping over to UNORM color space.\n");
+						get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::UNORM);
+					}
 				}
-				else if (frame.view->get_format() == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
-				         get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::HDR10)
+				else
 				{
-					LOGI("Flipping over to HDR10 color space.\n");
-					get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::HDR10);
+					if (frame.view->get_format() == VK_FORMAT_R16G16B16A16_SFLOAT &&
+						get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::scRGB)
+					{
+						LOGI("Flipping over to scRGB color space.\n");
+						get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::scRGB);
+					}
+					else if (frame.view->get_format() == VK_FORMAT_A2B10G10R10_UNORM_PACK32 &&
+							 get_wsi().get_backbuffer_format() != Vulkan::BackbufferFormat::HDR10)
+					{
+						LOGI("Flipping over to HDR10 color space.\n");
+						get_wsi().set_backbuffer_format(Vulkan::BackbufferFormat::HDR10);
+					}
 				}
 
 				cmd->set_opaque_sprite_state();
-				cmd->set_program(blit);
-				cmd->set_texture(0, 0, *frame.view, Vulkan::StockSampler::LinearClamp);
+
+				if (frame.immutable_sampler)
+				{
+					auto *vert = blit->get_shader(Vulkan::ShaderStage::Vertex);
+					auto *frag = blit->get_shader(Vulkan::ShaderStage::Fragment);
+					Vulkan::ImmutableSamplerBank bank = {};
+					bank.samplers[0][0] = frame.immutable_sampler;
+					cmd->set_program(device.request_program(vert, frag, &bank));
+					cmd->set_texture(0, 0, *frame.view);
+				}
+				else
+				{
+					cmd->set_program(blit);
+					cmd->set_texture(0, 0, *frame.view, Vulkan::StockSampler::LinearClamp);
+				}
 
 				auto vp = cmd->get_viewport();
 				float video_aspect = float(decoder.get_width()) / float(decoder.get_height());
