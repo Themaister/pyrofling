@@ -143,17 +143,18 @@ Should generally be left alone.
 
 `h264_pyro`, `h265_pyro` and `pyrowave` (my own intra-only codec) are good for this.
 For the H.264 and H.265 codecs, Vulkan video support is required.
+For `h264_pyro` and `h265_pyro`, intra refresh is used if supported.
+To use on-demand IDR refresh `--gop-seconds -1` can be added instead.
 
 ```shell
-$ pyrofling --encoder h264_pyro --width 1920 --height 1080 --bitrate-kbits 50000 --immediate-encode --port 9000 --fps 60 --low-latency --gop-seconds -1
+$ pyrofling --encoder h264_pyro --width 1920 --height 1080 --bitrate-kbits 50000 --immediate-encode --port 9000 --fps 60 --low-latency
+$ pyrofling --encoder h265_pyro --width 1920 --height 1080 --bitrate-kbits 50000 --immediate-encode --port 9000 --fps 60 --low-latency --10-bit
 $ pyrofling --encoder pyrowave --width 1920 --height 1080 --bitrate-kbits 250000 --immediate-encode --port 9000 --fps 60 --low-latency
 ```
 
 ```shell
 PYROFLING=1 PYROFLING_SYNC=server somevulkanapp
 ```
-
-Negative GOP seconds means infinite GOP. IDR frames are automatically sent on packet losses.
 
 #### --fec
 
