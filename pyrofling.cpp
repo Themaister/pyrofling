@@ -1824,11 +1824,24 @@ static void print_help()
 		 "\turl\n");
 }
 
+static unsigned pyrowave_auto_bitrate(unsigned width, unsigned height, unsigned fps, bool chroma444, bool hdr10)
+{
+	double kbits = 125000.0 * std::pow((double(width * height) / (1280.0 * 720.0)), 0.38);
+	kbits *= chroma444 ? 1.15 : 1.0;
+	kbits *= hdr10 ? 1.2 : 1.0;
+	kbits *= fps / 60.0;
+	// Clamp to reasonable bounds.
+	kbits = std::max(kbits, 50000.0);
+	kbits = std::min(kbits, 900000.0);
+	return unsigned(kbits);
+}
+
 static int main_inner(int argc, char **argv)
 {
 	std::string socket_path = "/tmp/pyrofling-socket";
 	unsigned client_rate_multiplier = 1;
 	bool debug_gamepad_to_mouse = false;
+	bool has_explicit_bitrate = false;
 	SwapchainServer::Options opts;
 	unsigned device_index = 0;
 	std::string port;
@@ -1848,7 +1861,7 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--gop-seconds", [&](Util::CLIParser &parser) { opts.gop_seconds = float(parser.next_double()); });
 	cbs.add("--preset", [&](Util::CLIParser &parser) { opts.x264_preset = parser.next_string(); });
 	cbs.add("--tune", [&](Util::CLIParser &parser) { opts.x264_tune = parser.next_string(); });
-	cbs.add("--bitrate-kbits", [&](Util::CLIParser &parser) { opts.bitrate_kbits = parser.next_uint(); });
+	cbs.add("--bitrate-kbits", [&](Util::CLIParser &parser) { opts.bitrate_kbits = parser.next_uint(); has_explicit_bitrate = true; });
 	cbs.add("--vbv-size-kbits", [&](Util::CLIParser &parser) { opts.vbv_size_kbits = parser.next_uint(); });
 	cbs.add("--max-bitrate-kbits", [&](Util::CLIParser &parser) { opts.max_bitrate_kbits = parser.next_uint(); });
 	cbs.add("--threads", [&](Util::CLIParser &parser) { opts.threads = parser.next_uint(); });
@@ -1893,6 +1906,23 @@ static int main_inner(int argc, char **argv)
 		LOGE("Cannot use both TCP output and URL output.\n");
 		print_help();
 		return EXIT_FAILURE;
+	}
+
+	if (opts.encoder == "pyrowave" && !has_explicit_bitrate)
+	{
+		opts.bitrate_kbits = pyrowave_auto_bitrate(opts.width, opts.height, opts.fps, opts.chroma_444, opts.hdr10);
+		opts.max_bitrate_kbits = opts.bitrate_kbits;
+		LOGI("Automatically selected %u kbits for pyrowave based on subjective heuristics.\n", opts.bitrate_kbits);
+
+		opts.low_latency = true;
+		opts.immediate = true;
+		LOGI("Automatically engaging low-latency and immediate encode modes for pyrowave.\n");
+
+		if (port.empty())
+		{
+			LOGE("No --port specified for pyrowave. pyrowave only supports streaming.\n");
+			return EXIT_FAILURE;
+		}
 	}
 
 	LOGI("Encoding: %u x %u @ %u fps (client %u fps) to \"%s\" || rate = %u kb/s || maxrate = %u kb/s || vbvsize = %u kb/s || gop = %f seconds\n",
