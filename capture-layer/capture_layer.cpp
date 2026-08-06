@@ -679,8 +679,9 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	if ((res = table.QueueSubmit(queue, 1, &submit, img.fence)) != VK_SUCCESS)
 		return res;
 
+	// Just assume SYNC_FD is supported.
 	VkSemaphoreGetFdInfoKHR semGetFdInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR };
-	semGetFdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+	semGetFdInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
 	semGetFdInfo.semaphore = img.releaseSemaphore;
 	int fd;
 	if ((res = table.GetSemaphoreFdKHR(device->getDevice(), &semGetFdInfo, &fd)) != VK_SUCCESS)
@@ -690,7 +691,10 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	PyroFling::PresentImageMessage::WireFormat wire = {};
 	wire.image_group_serial = imageGroupSerial;
 	wire.index = clientIndex;
-	wire.vk_external_semaphore_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+	// SyncFD might be -1 if the signal is already satisfied somehow.
+	if (fd >= 0)
+		wire.vk_external_semaphore_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
 
 	if (updatePresentMode)
 		presentMode = *updatePresentMode;
@@ -719,7 +723,7 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	img.ready = false;
 	img.fencePending = true;
 
-	if (!client->send_wire_message(wire, &release_fd, 1))
+	if (!client->send_wire_message(wire, &release_fd, release_fd ? 1 : 0))
 	{
 		std::unique_lock<std::mutex> holder{clientLock};
 		// If there are concurrent WSI callers, defer destroying the client handle.
@@ -844,7 +848,7 @@ bool SurfaceState::initImageGroup(uint32_t count)
 		info.pNext = &formatList;
 	}
 
-	VkExternalMemoryImageCreateInfo externalInfo = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
+	VkExternalMemoryImageCreateInfo externalInfo = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
 	externalInfo.pNext = info.pNext;
 	info.pNext = &externalInfo;
 #ifndef _WIN32
@@ -900,7 +904,7 @@ bool SurfaceState::initImageGroup(uint32_t count)
 		if (table.CreateSemaphore(device->getDevice(), &semCreateInfo, nullptr, &exp.acquireSemaphore) != VK_SUCCESS)
 			return false;
 		semCreateInfo.pNext = &semExportInfo;
-		semExportInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+		semExportInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
 		if (table.CreateSemaphore(device->getDevice(), &semCreateInfo, nullptr, &exp.releaseSemaphore) != VK_SUCCESS)
 			return false;
 
@@ -1358,6 +1362,19 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
                    VkSwapchainKHR *pSwapchain)
 {
 	auto *layer = getDeviceLayer(device);
+
+	VkPhysicalDeviceExternalSemaphoreInfo semaphore_info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO };
+	VkExternalSemaphoreProperties sem_props = { VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
+	semaphore_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+	layer->getInstance()->getTable()->GetPhysicalDeviceExternalSemaphorePropertiesKHR(
+		layer->getPhysicalDevice(), &semaphore_info, &sem_props);
+
+	if ((sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) == 0 ||
+		(sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) == 0)
+	{
+		fprintf(stderr, "pyrofling: GPU does not support SYNC_FD. Skipping capture.\n");
+		return layer->getTable()->CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+	}
 
 	// Probably need to query support for this, but really ...
 	auto info = *pCreateInfo;

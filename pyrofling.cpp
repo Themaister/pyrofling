@@ -388,7 +388,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		if (!instance_context.init_instance(nullptr, 0,
 		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
 		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
-		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT))
+		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
+		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT))
 			throw std::runtime_error("Failed to create Vulkan instance.");
 		instance.reset(instance_context.get_instance());
 		instance_context.release_instance();
@@ -405,6 +406,18 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
 			props2.pNext = &id_props;
 			vkGetPhysicalDeviceProperties2(gpu, &props2);
+
+			VkPhysicalDeviceExternalSemaphoreInfo semaphore_info = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO };
+			VkExternalSemaphoreProperties sem_props = { VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
+			semaphore_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+			vkGetPhysicalDeviceExternalSemaphoreProperties(gpu, &semaphore_info, &sem_props);
+
+			if ((sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) == 0 ||
+				(sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) == 0)
+			{
+				LOGI("GPU: %s does not support SYNC_FD. Skipping.\n", props2.properties.deviceName);
+				continue;
+			}
 
 			PhysicalDevice dev = {};
 			dev.gpu = gpu;
@@ -926,7 +939,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			{
 				auto h = img.last_read_semaphore->export_to_handle();
 				fd = FileHandle{h.handle};
-				acquire.vk_external_semaphore_type = h.semaphore_handle_type;
+				if (fd)
+					acquire.vk_external_semaphore_type = h.semaphore_handle_type;
 				img.last_read_semaphore.reset();
 			}
 
@@ -1238,7 +1252,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				if (&surface.chain->association.ctx->device == encoder_device)
 				{
 					auto sem = encoder_device->request_semaphore_external(
-							VK_SEMAPHORE_TYPE_BINARY_KHR, Vulkan::ExternalHandle::get_opaque_semaphore_handle_type());
+							VK_SEMAPHORE_TYPE_BINARY_KHR,
+							VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
 					encoder_device->submit_empty(Vulkan::CommandBuffer::Type::AsyncCompute, nullptr, sem.get());
 					surf.last_read_semaphore = std::move(sem);
 				}
@@ -1525,6 +1540,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (!gpu.context->context.init_instance(nullptr, 0,
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
 				return false;
@@ -1533,6 +1549,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, nullptr, 0,
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
 			{
