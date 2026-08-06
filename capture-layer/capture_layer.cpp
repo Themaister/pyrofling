@@ -273,6 +273,7 @@ struct Device
 	VkDevice device = VK_NULL_HANDLE;
 	Instance *instance = nullptr;
 	VkLayerDispatchTable table = {};
+	bool supportsModifiers = false;
 
 	struct QueueInfo
 	{
@@ -766,7 +767,7 @@ bool SurfaceState::sendImageGroup()
 	{
 		VkMemoryGetFdInfoKHR memoryGetInfo = { VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR };
 		memoryGetInfo.memory = image[i].memory;
-		memoryGetInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+		memoryGetInfo.handleType = static_cast<VkExternalMemoryHandleTypeFlagBits>(imageGroupWire.vk_external_memory_type);
 		int fd;
 		if (device->getTable()->GetMemoryFdKHR(device->getDevice(), &memoryGetInfo, &fd) == VK_SUCCESS)
 			fds[i] = PyroFling::FileHandle{fd};
@@ -851,9 +852,49 @@ bool SurfaceState::initImageGroup(uint32_t count)
 	VkExternalMemoryImageCreateInfo externalInfo = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
 	externalInfo.pNext = info.pNext;
 	info.pNext = &externalInfo;
-#ifndef _WIN32
+
+	VkImageDrmFormatModifierListCreateInfoEXT drm_format_modifier_list =
+		{ VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT };
+	std::vector<uint64_t> drm_format_modifiers;
 	externalInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-#endif
+
+	// Modifiers need a view format list if mutable is used. If full mutable is used, just fallback to default.
+	if (device->supportsModifiers &&
+		((info.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) == 0 || formatList.viewFormatCount != 0))
+	{
+		VkDrmFormatModifierPropertiesListEXT modifiers = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+		VkFormatProperties2 props2 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &modifiers };
+		device->getInstance()->getTable()->GetPhysicalDeviceFormatProperties2KHR(
+			device->getPhysicalDevice(), info.format, &props2);
+		std::vector<VkDrmFormatModifierPropertiesEXT> modifier_props(modifiers.drmFormatModifierCount);
+		modifiers.pDrmFormatModifierProperties = modifier_props.data();
+		device->getInstance()->getTable()->GetPhysicalDeviceFormatProperties2KHR(
+			device->getPhysicalDevice(), info.format, &props2);
+
+		for (auto &prop : modifier_props)
+		{
+			constexpr VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+			                                          VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+			                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+
+			if (prop.drmFormatModifierPlaneCount == 1 &&
+				(prop.drmFormatModifierTilingFeatures & required) == required)
+			{
+				drm_format_modifiers.push_back(prop.drmFormatModifier);
+			}
+		}
+
+		if (!drm_format_modifiers.empty())
+		{
+			externalInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+			info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+
+			drm_format_modifier_list.drmFormatModifierCount = uint32_t(drm_format_modifiers.size());
+			drm_format_modifier_list.pDrmFormatModifiers = drm_format_modifiers.data();
+			drm_format_modifier_list.pNext = info.pNext;
+			info.pNext = &drm_format_modifier_list;
+		}
+	}
 
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -892,7 +933,7 @@ bool SurfaceState::initImageGroup(uint32_t count)
 		allocInfo.pNext = &dedicatedInfo;
 		dedicatedInfo.image = exp.image;
 		dedicatedInfo.pNext = &exportInfo;
-		exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+		exportInfo.handleTypes = externalInfo.handleTypes;
 
 		if (table.AllocateMemory(device->getDevice(), &allocInfo, nullptr, &exp.memory) != VK_SUCCESS)
 			return false;
@@ -919,10 +960,27 @@ bool SurfaceState::initImageGroup(uint32_t count)
 	imageGroupWire.vk_color_space = format.colorSpace;
 	imageGroupWire.vk_num_view_formats = formatList.viewFormatCount;
 	memcpy(imageGroupWire.vk_view_formats, formatList.pViewFormats, formatList.viewFormatCount * sizeof(VkFormat));
-	imageGroupWire.vk_external_memory_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+	imageGroupWire.vk_external_memory_type = externalInfo.handleTypes;
 	imageGroupWire.num_images = count;
 	imageGroupWire.vk_image_flags = info.flags;
 	imageGroupWire.vk_image_usage = info.usage;
+
+	if (info.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+	{
+		// An assumption is made that equivalent image create infos will create the same modifier layouts.
+		// Surely that's okay, right? :|
+
+		VkImageDrmFormatModifierPropertiesEXT props = { VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT };
+		device->getTable()->GetImageDrmFormatModifierPropertiesEXT(device->getDevice(), image[0].image, &props);
+
+		VkImageSubresource subres = { VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT, 0, 0 };
+		VkSubresourceLayout layout;
+		device->getTable()->GetImageSubresourceLayout(device->getDevice(), image[0].image, &subres, &layout);
+
+		imageGroupWire.drm_modifier = props.drmFormatModifier;
+		imageGroupWire.drm_modifier_offset = layout.offset;
+		imageGroupWire.drm_modifier_row_pitch = layout.rowPitch;
+	}
 
 	if (const char *env = getenv("PYROFLING_FORCE_VK_COLOR_SPACE"))
 	{
@@ -1325,6 +1383,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 #ifndef _WIN32
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+	bool supportsModifiers = addUniqueExtension(enabledExtensions, supportedExts, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_MAINTENANCE2_EXTENSION_NAME);
 #endif
 	tmpCreateInfo.enabledExtensionCount = enabledExtensions.size();
 	tmpCreateInfo.ppEnabledExtensionNames = enabledExtensions.data();
@@ -1339,6 +1403,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 	{
 		std::lock_guard<std::mutex> holder{globalLock};
 		auto *device = createLayerData(getDispatchKey(*pDevice), deviceData);
+		device->supportsModifiers = supportsModifiers;
 		device->init(gpu, *pDevice, layer, fpGetDeviceProcAddr, fpSetDeviceLoaderData, &tmpCreateInfo);
 	}
 

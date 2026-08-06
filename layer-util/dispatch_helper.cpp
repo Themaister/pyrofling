@@ -76,6 +76,8 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(GetSwapchainTimeDomainPropertiesEXT);
 	F(GetPastPresentationTimingEXT);
 	F(GetCalibratedTimestampsKHR);
+	F(GetImageSubresourceLayout);
+	F(GetImageDrmFormatModifierPropertiesEXT);
 #ifndef _WIN32
 	F(GetSemaphoreFdKHR);
 	F(ImportSemaphoreFdKHR);
@@ -120,6 +122,8 @@ void layerInitInstanceDispatchTable(VkInstance instance, VkLayerInstanceDispatch
 	F(GetDisplayPlaneCapabilities2KHR);
 	F(GetPhysicalDeviceDisplayPlaneProperties2KHR);
 	F(GetPhysicalDeviceDisplayProperties2KHR);
+	F(GetPhysicalDeviceImageFormatProperties2KHR);
+	F(GetPhysicalDeviceFormatProperties2KHR);
 
 	F(GetPhysicalDeviceSurfaceCapabilities2EXT);
 	F(GetPhysicalDevicePresentRectanglesKHR);

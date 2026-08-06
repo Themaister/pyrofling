@@ -533,6 +533,35 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			info.samples = VK_SAMPLE_COUNT_1_BIT;
 			info.misc = Vulkan::IMAGE_MISC_EXTERNAL_MEMORY_BIT;
 
+			VkImageDrmFormatModifierExplicitCreateInfoEXT drm_modifier_info =
+				{ VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT };
+			VkSubresourceLayout subresource_layout = {};
+
+			if (image_create.wire.vk_external_memory_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
+			{
+				drm_modifier_info.drmFormatModifierPlaneCount = 1;
+				drm_modifier_info.drmFormatModifier = image_create.wire.drm_modifier;
+				drm_modifier_info.pPlaneLayouts = &subresource_layout;
+				subresource_layout.offset = image_create.wire.drm_modifier_offset;
+				subresource_layout.rowPitch = image_create.wire.drm_modifier_row_pitch;
+				LOGI("Image group uses DRM modifiers (#%016llx), offset %u, rowPitch %u\n",
+				     static_cast<unsigned long long>(image_create.wire.drm_modifier),
+				     image_create.wire.drm_modifier_offset,
+				     image_create.wire.drm_modifier_row_pitch);
+
+				drm_modifier_info.pNext = info.pnext;
+				info.pnext = &drm_modifier_info;
+			}
+			else if (image_create.wire.vk_external_memory_type != Vulkan::ExternalHandle::get_opaque_memory_handle_type())
+			{
+				LOGE("Only opaque FD and DMABUF is currently supported.\n");
+				return send_message(fd, MessageType::ErrorParameter, image_create.get_serial());
+			}
+			else
+			{
+				LOGI("Image group uses plain OPAQUE_FD.\n");
+			}
+
 			if ((image_create.wire.vk_image_usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0)
 			{
 				LOGE("VK_IMAGE_USAGE_SAMPLED_BIT required.\n");
@@ -542,12 +571,6 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			if ((image_create.wire.vk_image_usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)
 			{
 				LOGE("VK_IMAGE_USAGE_TRANSFER_SRC required.\n");
-				return send_message(fd, MessageType::ErrorParameter, image_create.get_serial());
-			}
-
-			if (image_create.wire.vk_external_memory_type != Vulkan::ExternalHandle::get_opaque_memory_handle_type())
-			{
-				LOGE("Only opaque FD is currently supported.\n");
 				return send_message(fd, MessageType::ErrorParameter, image_create.get_serial());
 			}
 
@@ -570,6 +593,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			{
 				format_info.viewFormatCount = image_create.wire.vk_num_view_formats;
 				format_info.pViewFormats = reinterpret_cast<const VkFormat *>(image_create.wire.vk_view_formats);
+
+				format_info.pNext = info.pnext;
 				info.pnext = &format_info;
 
 				for (uint32_t i = 0; i < format_info.viewFormatCount; i++)
@@ -614,6 +639,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				cross_info.external = {};
 				cross_info.misc &= ~Vulkan::IMAGE_MISC_EXTERNAL_MEMORY_BIT;
 				cross_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+				auto cross_format_info = format_info;
+				cross_info.pnext = cross_format_info.viewFormatCount ? &cross_format_info : nullptr;
+				cross_format_info.pNext = nullptr;
 
 				SwapchainImage image;
 				image.image = device.create_image(info);

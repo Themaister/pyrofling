@@ -177,9 +177,11 @@ struct ImageGroup
 	uint32_t vk_color_space;
 	uint32_t vk_image_usage;
 	uint32_t vk_image_flags;
-	uint32_t vk_external_memory_type; // OPAQUE or DRM modifier. TODO: Figure out how to use DRM modifiers.
+	uint32_t vk_external_memory_type; // OPAQUE or DRM modifier.
 	uint32_t vk_num_view_formats;
-	uint32_t vk_view_formats[15]; // If MUTABLE and vk_num_formats != 0.
+	uint32_t vk_view_formats[13]; // If MUTABLE and vk_num_formats != 0.
+	uint32_t drm_modifier_offset;
+	uint32_t drm_modifier_row_pitch;
 	uint64_t drm_modifier;
 };
 
