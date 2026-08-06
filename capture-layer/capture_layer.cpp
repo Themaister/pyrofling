@@ -25,6 +25,9 @@
 #include <mutex>
 #include <memory>
 #include <limits>
+#include <atomic>
+#include <assert.h>
+#include <thread>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -58,6 +61,9 @@ struct ExportableImage
 	bool acquired;
 	bool ready;
 	bool fencePending;
+
+	PyroFling::FileHandle acquireFd;
+	VkExternalSemaphoreHandleTypeFlagBits acquireFdHandleType;
 };
 
 struct Instance;
@@ -71,7 +77,7 @@ struct SurfaceState
 	VkResult processPresent(VkQueue queue, uint32_t index, uint64_t presentId, const VkPresentModeKHR *updatePresentMode);
 	void setActiveDeviceAndSwapchain(Device *device, const VkSwapchainCreateInfoKHR *pCreateInfo, VkSwapchainKHR chain);
 	void freeImage(ExportableImage &img);
-	bool initImageGroup(uint32_t count);
+	bool initImageGroup(uint32_t count, const VkSwapchainCreateInfoKHR *pCreateInfo);
 	bool sendImageGroup();
 
 	VkResult waitForPresent(uint64_t presentId, uint64_t timeout);
@@ -104,7 +110,7 @@ struct SurfaceState
 	void initClient(VkPhysicalDevice gpu);
 	bool handleEvent(PyroFling::Message &msg);
 	bool pollConnection();
-	bool waitConnection(std::unique_lock<std::mutex> &lock);
+	bool waitConnectionLocked(std::unique_lock<std::mutex> &lock);
 	bool acquire(uint32_t &index);
 
 	struct WaitPair
@@ -154,11 +160,17 @@ struct Instance
 		return forceImages;
 	}
 
+	bool isHeadless() const
+	{
+		return headless;
+	}
+
 	void unregisterSurface(VkSurfaceKHR surface);
 	SurfaceState *registerSurface(VkSurfaceKHR surface);
 	void unregisterDevice(Device *device);
 	void unregisterSwapchain(Device *device, VkSwapchainKHR swapchain);
 	SurfaceState *findActiveSurfaceLocked(Device *device, VkSwapchainKHR swapchain);
+	SurfaceState *findActiveSurface(Device *device, VkSwapchainKHR swapchain);
 
 	VkInstance instance = VK_NULL_HANDLE;
 	VkLayerInstanceDispatchTable table = {};
@@ -167,6 +179,7 @@ struct Instance
 	std::string engineName;
 	SyncMode syncMode = SyncMode::Default;
 	unsigned forceImages = 0;
+	bool headless = false;
 
 	std::mutex surfaceLock;
 	std::unordered_map<VkSurfaceKHR, std::unique_ptr<SurfaceState>> surfaces;
@@ -214,6 +227,12 @@ SurfaceState *Instance::findActiveSurfaceLocked(Device *device, VkSwapchainKHR s
 	return nullptr;
 }
 
+SurfaceState *Instance::findActiveSurface(Device *device, VkSwapchainKHR swapchain)
+{
+	std::lock_guard<std::mutex> holder{surfaceLock};
+	return findActiveSurfaceLocked(device, swapchain);
+}
+
 void Instance::init(VkInstance instance_, const VkApplicationInfo *pApplicationInfo, PFN_vkGetInstanceProcAddr gpa_)
 {
 	if (pApplicationInfo)
@@ -240,6 +259,13 @@ void Instance::init(VkInstance instance_, const VkApplicationInfo *pApplicationI
 	env = getenv("PYROFLING_IMAGES");
 	if (env)
 		forceImages = strtoul(env, nullptr, 0);
+
+	env = getenv("PYROFLING_HEADLESS");
+	if (env && strcmp(env, "1") == 0)
+	{
+		headless = true;
+		syncMode = SyncMode::Server;
+	}
 }
 
 struct Device
@@ -274,6 +300,7 @@ struct Device
 	Instance *instance = nullptr;
 	VkLayerDispatchTable table = {};
 	bool supportsModifiers = false;
+	std::atomic_uint64_t uniqueCounter = {};
 
 	struct QueueInfo
 	{
@@ -349,7 +376,15 @@ bool SurfaceState::handleEvent(PyroFling::Message &msg)
 			sem_info.handleType = static_cast<VkExternalSemaphoreHandleTypeFlagBits>(acq->wire.vk_external_semaphore_type);
 			sem_info.semaphore = img.acquireSemaphore;
 			sem_info.fd = acq->fd.get_native_handle();
-			if (device->getTable()->ImportSemaphoreFdKHR(device->getDevice(), &sem_info) == VK_SUCCESS)
+
+			if (device->getInstance()->isHeadless())
+			{
+				// We intend to import this into another semaphore.
+				img.acquireFd = std::move(acq->fd);
+				img.acquireFdHandleType = sem_info.handleType;
+				img.liveAcquirePayload = false;
+			}
+			else if (device->getTable()->ImportSemaphoreFdKHR(device->getDevice(), &sem_info) == VK_SUCCESS)
 			{
 				img.liveAcquirePayload = true;
 				acq->fd.release();
@@ -474,6 +509,9 @@ void SurfaceState::initClient(VkPhysicalDevice gpu)
 bool SurfaceState::pollConnection()
 {
 	std::unique_lock<std::mutex> holder{clientLock};
+	if (!client)
+		return false;
+
 	int ret;
 	while ((ret = client->wait_reply(holder, 0)) > 0)
 	{
@@ -485,15 +523,25 @@ bool SurfaceState::pollConnection()
 	return ret >= 0;
 }
 
-bool SurfaceState::waitConnection(std::unique_lock<std::mutex> &lock)
+bool SurfaceState::waitConnectionLocked(std::unique_lock<std::mutex> &lock)
 {
 	return client->wait_reply(lock) > 0;
 }
 
 bool SurfaceState::acquire(uint32_t &index)
 {
+	while (!client)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		initClient(activePhysicalDevice);
+	}
+
+	// TODO: timeout handling.
 	std::unique_lock<std::mutex> holder{clientLock};
 	index = UINT32_MAX;
+
+	if (!client)
+		return false;
 
 	do
 	{
@@ -507,7 +555,7 @@ bool SurfaceState::acquire(uint32_t &index)
 			}
 		}
 
-		if (index == UINT32_MAX && !waitConnection(holder))
+		if (index == UINT32_MAX && !waitConnectionLocked(holder))
 			break;
 	} while (index == UINT32_MAX);
 
@@ -575,10 +623,11 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	if (!pollConnection())
 		return VK_SUCCESS;
 
-	// Blocking in present isn't great.
-	// If we implement WSI ourselves, we would deal with it more properly where acquire ties to client acquire.
 	uint32_t clientIndex;
-	if (!acquire(clientIndex))
+
+	if (device->getInstance()->isHeadless())
+		clientIndex = index;
+	else if (!acquire(clientIndex))
 		return VK_SUCCESS;
 
 	auto &img = image[clientIndex];
@@ -623,51 +672,74 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 
 	VkImageMemoryBarrier imgBarriers[2] = {};
 
-	imgBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	imgBarriers[0].image = img.image;
-	imgBarriers[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imgBarriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	imgBarriers[0].srcAccessMask = 0;
-	imgBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	imgBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	imgBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	imgBarriers[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	auto isHeadless = device->getInstance()->isHeadless();
 
-	imgBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	imgBarriers[1].image = swapImages[index];
-	imgBarriers[1].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-	imgBarriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	imgBarriers[1].srcAccessMask = 0;
-	imgBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-	imgBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	imgBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	imgBarriers[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+	if (!isHeadless)
+	{
+		imgBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imgBarriers[0].image = img.image;
+		imgBarriers[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		imgBarriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		imgBarriers[0].srcAccessMask = 0;
+		imgBarriers[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		imgBarriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imgBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imgBarriers[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
-	table.CmdPipelineBarrier(img.cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-	                         0, 0, nullptr, 0, nullptr, 2, imgBarriers);
+		imgBarriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imgBarriers[1].image = swapImages[index];
+		imgBarriers[1].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		imgBarriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		imgBarriers[1].srcAccessMask = 0;
+		imgBarriers[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+		imgBarriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imgBarriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		imgBarriers[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
 
-	VkImageCopy region = {};
-	region.extent.width = width;
-	region.extent.height = height;
-	region.extent.depth = 1;
-	region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-	region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-	table.CmdCopyImage(img.cmdBuffer, swapImages[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					   img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+		table.CmdPipelineBarrier(img.cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+								 0, 0, nullptr, 0, nullptr,
+								 2, imgBarriers);
 
-	imgBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	imgBarriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	imgBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	imgBarriers[0].dstAccessMask = 0;
-	imgBarriers[0].srcQueueFamilyIndex = img.currentQueueFamily;
-	imgBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
-	imgBarriers[1].srcAccessMask = 0;
-	imgBarriers[1].dstAccessMask = 0;
-	imgBarriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-	imgBarriers[1].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		VkImageCopy region = {};
+		region.extent.width = width;
+		region.extent.height = height;
+		region.extent.depth = 1;
+		region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		table.CmdCopyImage(img.cmdBuffer, swapImages[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						   img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-	table.CmdPipelineBarrier(img.cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-	                         0, 0, nullptr, 0, nullptr, 2, imgBarriers);
+		imgBarriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		imgBarriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imgBarriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		imgBarriers[0].dstAccessMask = 0;
+		imgBarriers[0].srcQueueFamilyIndex = img.currentQueueFamily;
+		imgBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+		imgBarriers[1].srcAccessMask = 0;
+		imgBarriers[1].dstAccessMask = 0;
+		imgBarriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		imgBarriers[1].newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		table.CmdPipelineBarrier(img.cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+								 0, 0, nullptr, 0, nullptr, 2, imgBarriers);
+	}
+	else
+	{
+		// Just release the image to external queue.
+		imgBarriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+		imgBarriers[0].image = img.image;
+		imgBarriers[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		imgBarriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imgBarriers[0].srcAccessMask = 0;
+		imgBarriers[0].dstAccessMask = 0;
+		imgBarriers[0].srcQueueFamilyIndex = img.currentQueueFamily;
+		imgBarriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+		imgBarriers[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+		table.CmdPipelineBarrier(img.cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+								 0, 0, nullptr, 0, nullptr,
+								 1, imgBarriers);
+	}
 
 	if ((res = table.EndCommandBuffer(img.cmdBuffer)) != VK_SUCCESS)
 		return res;
@@ -706,11 +778,12 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 		wire.period = 0;
 	else
 	{
-		wire.period = presentMode == VK_PRESENT_MODE_FIFO_KHR ||
-		              presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? 1 : 0;
+		wire.period = int(presentMode == VK_PRESENT_MODE_FIFO_KHR ||
+		                  presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ||
+		                  presentMode == VK_PRESENT_MODE_FIFO_LATEST_READY_KHR);
 	}
 
-	wire.vk_old_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	wire.vk_old_layout = isHeadless ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	wire.vk_new_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	wire.id = ++presentId;
 
@@ -723,6 +796,8 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 	img.acquired = false;
 	img.ready = false;
 	img.fencePending = true;
+	img.acquireFd = {};
+	img.acquireFdHandleType = {};
 
 	if (!client->send_wire_message(wire, &release_fd, release_fd ? 1 : 0))
 	{
@@ -730,7 +805,7 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 		// If there are concurrent WSI callers, defer destroying the client handle.
 		if (presentWaiters == 0)
 			client.reset();
-		return VK_SUCCESS;
+		return isHeadless ? VK_ERROR_OUT_OF_DATE_KHR : VK_SUCCESS;
 	}
 
 	if (khrPresentId != 0)
@@ -751,7 +826,7 @@ VkResult SurfaceState::processPresent(VkQueue queue, uint32_t index, uint64_t kh
 			{
 				if (presentWaiters == 0)
 					client.reset();
-				return VK_SUCCESS;
+				return isHeadless ? VK_ERROR_OUT_OF_DATE_KHR : VK_SUCCESS;
 			}
 		}
 	}
@@ -800,13 +875,26 @@ bool SurfaceState::sendImageGroup()
 	return true;
 }
 
-bool SurfaceState::initImageGroup(uint32_t count)
+bool SurfaceState::initImageGroup(uint32_t count, const VkSwapchainCreateInfoKHR *pCreateInfo)
 {
 	auto &table = *device->getTable();
 
 	VkImageFormatListCreateInfoKHR formatList = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO };
 	VkFormat mutableFormats[2];
 	formatList.pViewFormats = mutableFormats;
+
+	VkImageCreateFlags additionalFlags = 0;
+	if (pCreateInfo)
+	{
+		if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR)
+			additionalFlags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+		if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT)
+			additionalFlags |= VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
+		if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR)
+			additionalFlags |= VK_IMAGE_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT;
+		if (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR)
+			additionalFlags |= VK_IMAGE_CREATE_PROTECTED_BIT;
+	}
 
 	VkImageCreateInfo info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	info.extent.width = width;
@@ -816,13 +904,23 @@ bool SurfaceState::initImageGroup(uint32_t count)
 	info.format = format.format;
 	info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	             VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-	             VK_IMAGE_USAGE_SAMPLED_BIT;
+	             VK_IMAGE_USAGE_SAMPLED_BIT |
+	             (pCreateInfo ? pCreateInfo->imageUsage : 0);
 	info.samples = VK_SAMPLE_COUNT_1_BIT;
 	info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	info.arrayLayers = 1;
 	info.mipLevels = 1;
 	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	info.flags |= additionalFlags;
+
+	if (pCreateInfo)
+	{
+		// We don't have a way to communicate this over wire, but it should not be meaningful (probably?).
+		info.sharingMode = pCreateInfo->imageSharingMode;
+		info.pQueueFamilyIndices = pCreateInfo->pQueueFamilyIndices;
+		info.queueFamilyIndexCount = pCreateInfo->queueFamilyIndexCount;
+	}
 
 	if (info.format == VK_FORMAT_R8G8B8A8_SRGB || info.format == VK_FORMAT_R8G8B8A8_UNORM)
 	{
@@ -849,6 +947,10 @@ bool SurfaceState::initImageGroup(uint32_t count)
 		info.pNext = &formatList;
 	}
 
+	// There is no format cast list for swapchain I think?
+	if (additionalFlags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
+		formatList.viewFormatCount = 0;
+
 	VkExternalMemoryImageCreateInfo externalInfo = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO };
 	externalInfo.pNext = info.pNext;
 	info.pNext = &externalInfo;
@@ -874,7 +976,6 @@ bool SurfaceState::initImageGroup(uint32_t count)
 		for (auto &prop : modifier_props)
 		{
 			constexpr VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
-			                                          VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
 			                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
 
 			if (prop.drmFormatModifierPlaneCount == 1 &&
@@ -1029,16 +1130,21 @@ void SurfaceState::setActiveDeviceAndSwapchain(Device *device_, const VkSwapchai
 	presentMode = info.presentMode;
 	activeSwapchain = chain;
 
-	uint32_t count;
-	device->getTable()->GetSwapchainImagesKHR(device->getDevice(), chain, &count, nullptr);
-	swapImages.resize(count);
-	device->getTable()->GetSwapchainImagesKHR(device->getDevice(), chain, &count, swapImages.data());
+	bool isHeadless = device->getInstance()->isHeadless();
 
-	// If nothing meaningfully changed, just go ahead and update the input images.
-	if (info.imageExtent.width == width && info.imageExtent.height == height &&
-	    info.imageFormat == format.format && info.imageColorSpace == format.colorSpace)
+	if (!isHeadless)
 	{
-		return;
+		uint32_t count;
+		device->getTable()->GetSwapchainImagesKHR(device->getDevice(), chain, &count, nullptr);
+		swapImages.resize(count);
+		device->getTable()->GetSwapchainImagesKHR(device->getDevice(), chain, &count, swapImages.data());
+
+		// If nothing meaningfully changed, just go ahead and update the input images.
+		if (info.imageExtent.width == width && info.imageExtent.height == height &&
+		    info.imageFormat == format.format && info.imageColorSpace == format.colorSpace)
+		{
+			return;
+		}
 	}
 
 	width = info.imageExtent.width;
@@ -1051,10 +1157,13 @@ void SurfaceState::setActiveDeviceAndSwapchain(Device *device_, const VkSwapchai
 	image.clear();
 
 	unsigned forced = instance->forcesNumImages();
-	if (forced < 2)
+
+	if (device->getInstance()->isHeadless())
+		forced = std::max<uint32_t>(pCreateInfo->minImageCount, forced);
+	else if (forced < 2)
 		forced = 3;
 
-	if (!initImageGroup(forced))
+	if (!initImageGroup(forced, isHeadless ? pCreateInfo : nullptr))
 		client.reset();
 
 	if (client && !sendImageGroup())
@@ -1100,11 +1209,7 @@ VkResult Device::present(VkQueue queue, VkSwapchainKHR swapchain, uint32_t index
                          const VkPresentModeKHR *presentMode)
 {
 	auto *inst = getInstance();
-	SurfaceState *surface;
-	{
-		std::lock_guard<std::mutex> holder{inst->surfaceLock};
-		surface = inst->findActiveSurfaceLocked(this, swapchain);
-	}
+	auto *surface = inst->findActiveSurface(this, swapchain);
 
 	if (surface)
 		return surface->processPresent(queue, index, presentId, presentMode);
@@ -1242,6 +1347,16 @@ static VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance instance, VkSurfa
 	layer->getTable()->DestroySurfaceKHR(instance, surface, pAllocator);
 }
 
+static const VkSurfaceFormatKHR HeadlessFormats[] = {
+	{ VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+	{ VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+	{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+	{ VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+	{ VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+	{ VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLOR_SPACE_HDR10_ST2084_EXT },
+	{ VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT },
+};
+
 static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 		VkPhysicalDevice physicalDevice, VkSurfaceKHR surface,
 		uint32_t *pSurfaceFormatCount, VkSurfaceFormatKHR *pSurfaceFormats)
@@ -1249,14 +1364,25 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 	auto *layer = getInstanceLayer(physicalDevice);
 	VkResult vr;
 
-	uint32_t count;
-	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr);
-	if (vr != VK_SUCCESS)
-		return vr;
-	std::vector<VkSurfaceFormatKHR> surfaceFormats(count);
-	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, surfaceFormats.data());
-	if (vr != VK_SUCCESS)
-		return vr;
+	std::vector<VkSurfaceFormatKHR> surfaceFormats;
+
+	if (layer->isHeadless())
+	{
+		for (auto &fmt : HeadlessFormats)
+			surfaceFormats.push_back(fmt);
+		vr = VK_SUCCESS;
+	}
+	else
+	{
+		uint32_t count;
+		vr = layer->getTable()->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nullptr);
+		if (vr != VK_SUCCESS)
+			return vr;
+		surfaceFormats.resize(count);
+		vr = layer->getTable()->GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, surfaceFormats.data());
+		if (vr != VK_SUCCESS)
+			return vr;
+	}
 
 	auto itr = std::remove_if(surfaceFormats.begin(), surfaceFormats.end(), [](const VkSurfaceFormatKHR &fmt) {
 		return fmt.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
@@ -1279,6 +1405,40 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormatsKHR(
 	return vr;
 }
 
+static void normalizeSurfaceCapabilities(VkSurfaceCapabilitiesKHR &caps)
+{
+	caps.maxImageCount = 0;
+	caps.minImageCount = 2;
+	caps.supportedUsageFlags =
+			VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+			VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	caps.maxImageArrayLayers = 1;
+	caps.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+
+	// This might lead to unexpected results if the wrapped platform is e.g. X or Win32,
+	// but the software I care about supports it fine and this only applies to PYROFLING_HEADLESS=1.
+	caps.currentExtent.width = UINT32_MAX;
+	caps.currentExtent.height = UINT32_MAX;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceCapabilitiesKHR(
+		VkPhysicalDevice                            physicalDevice,
+		VkSurfaceKHR                                surface,
+		VkSurfaceCapabilitiesKHR*                   pSurfaceCapabilities)
+{
+	auto *layer = getInstanceLayer(physicalDevice);
+	VkResult vr = layer->getTable()->GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, pSurfaceCapabilities);
+	if (vr != VK_SUCCESS)
+		return vr;
+
+	// Even if we're headless, just use the normal WSI caps.
+	// It exposes what we need in the cases we care about.
+	if (layer->isHeadless())
+		normalizeSurfaceCapabilities(*pSurfaceCapabilities);
+
+	return VK_SUCCESS;
+}
+
 static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceCapabilities2KHR(
 		VkPhysicalDevice                            physicalDevice,
 		const VkPhysicalDeviceSurfaceInfo2KHR*      pSurfaceInfo,
@@ -1288,6 +1448,27 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceCapabilities2KHR(
 	VkResult vr = layer->getTable()->GetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, pSurfaceInfo, pSurfaceCapabilities);
 	if (vr != VK_SUCCESS)
 		return vr;
+
+	// Even if we're headless, just use the normal WSI caps.
+	// It exposes what we need in the cases we care about.
+	if (layer->isHeadless())
+	{
+		normalizeSurfaceCapabilities(pSurfaceCapabilities->surfaceCapabilities);
+
+		// We always support present ID/wait since that's how pyro protocol works.
+		auto *id = const_cast<VkSurfaceCapabilitiesPresentId2KHR *>(
+			findChain<VkSurfaceCapabilitiesPresentId2KHR>(
+				pSurfaceCapabilities->pNext, VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR));
+		if (id)
+			id->presentId2Supported = VK_TRUE;
+
+		auto *wait = const_cast<VkSurfaceCapabilitiesPresentWait2KHR *>(
+			findChain<VkSurfaceCapabilitiesPresentWait2KHR>(
+				pSurfaceCapabilities->pNext, VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR));
+
+		if (wait)
+			wait->presentWait2Supported = VK_TRUE;
+	}
 
 	// Present timing will mess with our custom frame pacing and the results are not meaningful.
 	auto *caps = const_cast<VkPresentTimingSurfaceCapabilitiesEXT *>(
@@ -1315,15 +1496,30 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
 	uint32_t count;
 	VkResult vr;
 
-	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, pSurfaceInfo, &count, nullptr);
-	if (vr != VK_SUCCESS)
-		return vr;
-	std::vector<VkSurfaceFormat2KHR> surfaceFormats(count);
-	for (auto &fmt : surfaceFormats)
-		fmt.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR;
-	vr = layer->getTable()->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, pSurfaceInfo, &count, surfaceFormats.data());
-	if (vr != VK_SUCCESS)
-		return vr;
+	std::vector<VkSurfaceFormat2KHR> surfaceFormats;
+
+	if (layer->isHeadless())
+	{
+		// Always expose HDR formats when running headless for convenience.
+		for (auto &fmt : HeadlessFormats)
+		{
+			VkSurfaceFormat2KHR fmt2 = { VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR, nullptr, fmt };
+			surfaceFormats.push_back(fmt2);
+		}
+		vr = VK_SUCCESS;
+	}
+	else
+	{
+		vr = layer->getTable()->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, pSurfaceInfo, &count, nullptr);
+		if (vr != VK_SUCCESS)
+			return vr;
+		surfaceFormats.resize(count);
+		for (auto &fmt : surfaceFormats)
+			fmt.sType = VK_STRUCTURE_TYPE_SURFACE_FORMAT_2_KHR;
+		vr = layer->getTable()->GetPhysicalDeviceSurfaceFormats2KHR(physicalDevice, pSurfaceInfo, &count, surfaceFormats.data());
+		if (vr != VK_SUCCESS)
+			return vr;
+	}
 
 	auto itr = std::remove_if(surfaceFormats.begin(), surfaceFormats.end(), [](const VkSurfaceFormat2KHR &fmt) {
 		return fmt.surfaceFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
@@ -1345,6 +1541,64 @@ static VKAPI_ATTR VkResult VKAPI_CALL GetPhysicalDeviceSurfaceFormats2KHR(
 		*pSurfaceFormatCount = surfaceFormats.size();
 	}
 	return vr;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL EnumerateDeviceExtensionProperties(
+		VkPhysicalDevice                            physicalDevice,
+		const char*                                 pLayerName,
+		uint32_t*                                   pPropertyCount,
+		VkExtensionProperties*                      pProperties)
+{
+	if (pLayerName && strstr(pLayerName, "VK_LAYER_pyrofling_capture"))
+	{
+		*pPropertyCount = 0;
+		return VK_SUCCESS;
+	}
+
+	auto *layer = getInstanceLayer(physicalDevice);
+
+	uint32_t count = 0;
+	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, nullptr);
+	std::vector<VkExtensionProperties> props(count);
+	layer->getTable()->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, props.data());
+
+	// Block WSI extensions that we don't properly support.
+	static const char *blockedExtensions[] = {
+		VK_KHR_DISPLAY_SWAPCHAIN_EXTENSION_NAME,
+		VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
+		VK_KHR_SHARED_PRESENTABLE_IMAGE_EXTENSION_NAME,
+		VK_AMD_DISPLAY_NATIVE_HDR_EXTENSION_NAME,
+		VK_EXT_DISPLAY_CONTROL_EXTENSION_NAME,
+		VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME,
+		VK_NV_PRESENT_BARRIER_EXTENSION_NAME,
+	};
+
+	static const char *headlessBlockedExtensions[] = {
+		VK_NV_LOW_LATENCY_2_EXTENSION_NAME,
+		"VK_EXT_full_screen_exclusive",
+	};
+
+	auto itr = std::remove_if(props.begin(), props.end(), [headless = layer->isHeadless()](const VkExtensionProperties &prop) -> bool {
+		if (findExtension(blockedExtensions, prop.extensionName))
+			return true;
+		if (headless && findExtension(headlessBlockedExtensions, prop.extensionName))
+			return true;
+		return false;
+	});
+	props.erase(itr, props.end());
+
+	if (pProperties)
+	{
+		VkResult res = *pPropertyCount >= props.size() ? VK_SUCCESS : VK_INCOMPLETE;
+		*pPropertyCount = std::min<uint32_t>(*pPropertyCount, props.size());
+		memcpy(pProperties, props.data(), *pPropertyCount * sizeof(*pProperties));
+		return res;
+	}
+	else
+	{
+		*pPropertyCount = uint32_t(props.size());
+		return VK_SUCCESS;
+	}
 }
 
 static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo *pCreateInfo,
@@ -1379,9 +1633,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL CreateDevice(VkPhysicalDevice gpu, const V
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME);
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_FENCE_EXTENSION_NAME);
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
 #ifndef _WIN32
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_FENCE_FD_EXTENSION_NAME);
 	addUniqueExtension(enabledExtensions, supportedExts, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
 	addUniqueExtension(enabledExtensions, supportedExts, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
 	bool supportsModifiers = addUniqueExtension(enabledExtensions, supportedExts, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
@@ -1449,44 +1705,57 @@ CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo,
 	VkSwapchainPresentModesCreateInfoEXT old_modes;
 	VkSwapchainPresentModesCreateInfoEXT *modes = nullptr;
 
-	if (layer->getInstance()->getSyncMode() == SyncMode::Server)
+	if (!layer->getInstance()->isHeadless())
 	{
-		info.presentMode = layer->getUnlockedPresentMode(pCreateInfo->surface);
-		fprintf(stderr, "pyrofling: Overriding to present mode %d.\n", info.presentMode);
-
-		modes = const_cast<VkSwapchainPresentModesCreateInfoKHR *>(
-				findChain<VkSwapchainPresentModesCreateInfoKHR>(
-						info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR));
-
-		// Ugly hackery.
-		if (modes)
+		if (layer->getInstance()->getSyncMode() == SyncMode::Server)
 		{
-			old_modes = *modes;
-			const_cast<VkSwapchainPresentModesCreateInfoKHR *>(modes)->presentModeCount = 1;
-			const_cast<VkSwapchainPresentModesCreateInfoKHR *>(modes)->pPresentModes = &info.presentMode;
+			info.presentMode = layer->getUnlockedPresentMode(pCreateInfo->surface);
+			fprintf(stderr, "pyrofling: Overriding to present mode %d.\n", info.presentMode);
+
+			modes = const_cast<VkSwapchainPresentModesCreateInfoKHR *>(
+					findChain<VkSwapchainPresentModesCreateInfoKHR>(
+							info.pNext, VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR));
+
+			// Ugly hackery.
+			if (modes)
+			{
+				old_modes = *modes;
+				const_cast<VkSwapchainPresentModesCreateInfoKHR *>(modes)->presentModeCount = 1;
+				const_cast<VkSwapchainPresentModesCreateInfoKHR *>(modes)->pPresentModes = &info.presentMode;
+			}
+		}
+
+		// Completely disregard local sync behavior for remote play.
+		// Force immediate so that local presentation progress is not stalled.
+		if (layer->getInstance()->getSyncMode() == SyncMode::Server)
+		{
+			if (modes)
+			{
+				info.minImageCount = std::max<uint32_t>(
+						info.minImageCount, layer->getMinImageCount(pCreateInfo->surface, info.presentMode));
+				fprintf(stderr, "pyrofling: Overriding to %u image count (swapchain maintenance).\n", info.minImageCount);
+			}
+			else
+			{
+				info.minImageCount = std::max<uint32_t>(info.minImageCount, layer->getMinImageCount(pCreateInfo->surface));
+				fprintf(stderr, "pyrofling: Overriding to %u image count (legacy).\n", info.minImageCount);
+			}
 		}
 	}
 
-	// Completely disregard local sync behavior for remote play.
-	// Force immediate so that local presentation progress is not stalled.
-	if (layer->getInstance()->getSyncMode() == SyncMode::Server)
-	{
-		if (modes)
-		{
-			info.minImageCount = std::max<uint32_t>(
-					info.minImageCount, layer->getMinImageCount(pCreateInfo->surface, info.presentMode));
-			fprintf(stderr, "pyrofling: Overriding to %u image count (swapchain maintenance).\n", info.minImageCount);
-		}
-		else
-		{
-			info.minImageCount = std::max<uint32_t>(info.minImageCount, layer->getMinImageCount(pCreateInfo->surface));
-			fprintf(stderr, "pyrofling: Overriding to %u image count (legacy).\n", info.minImageCount);
-		}
-	}
+	VkResult result = VK_SUCCESS;
 
-	auto result = layer->getTable()->CreateSwapchainKHR(device, &info, pAllocator, pSwapchain);
-	if (result != VK_SUCCESS)
-		return result;
+	if (layer->getInstance()->isHeadless())
+	{
+		// Invent a fake handle.
+		*pSwapchain = (VkSwapchainKHR)(uintptr_t)(layer->uniqueCounter.fetch_add(1) + 1);
+	}
+	else
+	{
+		result = layer->getTable()->CreateSwapchainKHR(device, &info, pAllocator, pSwapchain);
+		if (result != VK_SUCCESS)
+			return result;
+	}
 
 	// Ugly hackery.
 	if (modes)
@@ -1504,7 +1773,8 @@ static VKAPI_ATTR void VKAPI_CALL
 DestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks *pAllocator)
 {
 	auto *layer = getDeviceLayer(device);
-	layer->getTable()->DestroySwapchainKHR(device, swapchain, pAllocator);
+	if (!layer->getInstance()->isHeadless())
+		layer->getTable()->DestroySwapchainKHR(device, swapchain, pAllocator);
 	layer->getInstance()->unregisterSwapchain(layer, swapchain);
 }
 
@@ -1515,11 +1785,7 @@ WaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId,
 	auto *inst = layer->getInstance();
 	VkResult result = VK_SUCCESS;
 
-	SurfaceState *surface;
-	{
-		std::lock_guard<std::mutex> holder{inst->surfaceLock};
-		surface = inst->findActiveSurfaceLocked(layer, swapchain);
-	}
+	auto *surface = inst->findActiveSurfaceLocked(layer, swapchain);
 
 	// In client sync mode, we always honor the client's sync.
 	bool doNormalWait = inst->getSyncMode() == SyncMode::Client || !surface;
@@ -1532,12 +1798,15 @@ WaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t presentId,
 		doNormalWait = true;
 	}
 
+	if (inst->isHeadless())
+		doNormalWait = false;
+
 	if (!doNormalWait && surface)
 	{
 		result = surface->waitForPresent(presentId, timeout);
 		// We lost connection with server, fall back to normal present wait.
 		if (result == VK_ERROR_SURFACE_LOST_KHR)
-			doNormalWait = true;
+			doNormalWait = !inst->isHeadless();
 	}
 
 	if (doNormalWait)
@@ -1553,11 +1822,7 @@ WaitForPresent2KHR(VkDevice device, VkSwapchainKHR swapchain, const VkPresentWai
 	auto *inst = layer->getInstance();
 	VkResult result = VK_SUCCESS;
 
-	SurfaceState *surface;
-	{
-		std::lock_guard<std::mutex> holder{inst->surfaceLock};
-		surface = inst->findActiveSurfaceLocked(layer, swapchain);
-	}
+	auto *surface = inst->findActiveSurfaceLocked(layer, swapchain);
 
 	// In client sync mode, we always honor the client's sync.
 	bool doNormalWait = inst->getSyncMode() == SyncMode::Client || !surface;
@@ -1570,12 +1835,15 @@ WaitForPresent2KHR(VkDevice device, VkSwapchainKHR swapchain, const VkPresentWai
 		doNormalWait = true;
 	}
 
+	if (inst->isHeadless())
+		doNormalWait = false;
+
 	if (!doNormalWait && surface)
 	{
 		result = surface->waitForPresent(pPresentWait2Info->presentId, pPresentWait2Info->timeout);
 		// We lost connection with server, fall back to normal present wait.
 		if (result == VK_ERROR_SURFACE_LOST_KHR)
-			doNormalWait = true;
+			doNormalWait = !inst->isHeadless();
 	}
 
 	if (doNormalWait)
@@ -1591,8 +1859,10 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 	auto *layer = getDeviceLayer(queue);
 	auto info = *pPresentInfo;
 
+	bool requiresWrap = layer->presentRequiresWrap(queue, &info);
+
 	// If we have no connections associated with this present, just pass it through.
-	if (!layer->presentRequiresWrap(queue, &info))
+	if (!layer->getInstance()->isHeadless() && !requiresWrap)
 		return layer->getTable()->QueuePresentKHR(queue, &info);
 
 	VkResult result;
@@ -1609,6 +1879,21 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 			return result;
 	}
 
+	if (!requiresWrap)
+	{
+		// We're running headless and no place to present to, so just present into the aether.
+		// Handle sync objects as required.
+		const auto *fence = findChain<VkSwapchainPresentFenceInfoKHR>(info.pNext,
+				VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR);
+
+		if (fence)
+			for (uint32_t i = 0; i < fence->swapchainCount; i++)
+				if ((result = layer->getTable()->QueueSubmit(queue, 0, nullptr, fence->pFences[i])) != VK_SUCCESS)
+					return result;
+
+		return VK_ERROR_OUT_OF_DATE_KHR;
+	}
+
 	const auto *id = findChain<VkPresentIdKHR>(info.pNext, VK_STRUCTURE_TYPE_PRESENT_ID_KHR);
 	const auto *id2 = findChain<VkPresentId2KHR>(info.pNext, VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR);
 
@@ -1617,23 +1902,26 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 
 	const void **ppModeSkipPatch = nullptr;
 
-	if (mode && layer->getInstance()->getSyncMode() == SyncMode::Server)
+	if (!layer->getInstance()->isHeadless())
 	{
-		// Patch out the request to modify present mode. Hacky as shit, but w/e.
-		ppModeSkipPatch = &info.pNext;
-
-		auto *sin = static_cast<const VkBaseInStructure *>(info.pNext);
-		while (sin)
+		if (mode && layer->getInstance()->getSyncMode() == SyncMode::Server)
 		{
-			if (sin->sType == mode->sType)
-			{
-				// Skip ahead in the chain.
-				*ppModeSkipPatch = sin->pNext;
-				break;
-			}
+			// Patch out the request to modify present mode. Hacky as shit, but w/e.
+			ppModeSkipPatch = &info.pNext;
 
-			ppModeSkipPatch = (const void **)&sin->pNext;
-			sin = sin->pNext;
+			auto *sin = static_cast<const VkBaseInStructure *>(info.pNext);
+			while (sin)
+			{
+				if (sin->sType == mode->sType)
+				{
+					// Skip ahead in the chain.
+					*ppModeSkipPatch = sin->pNext;
+					break;
+				}
+
+				ppModeSkipPatch = (const void **)&sin->pNext;
+				sin = sin->pNext;
+			}
 		}
 	}
 
@@ -1653,17 +1941,33 @@ QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 			return result;
 	}
 
-	// Resignal the semaphores when we're done blitting so that the normal WSI request goes through.
-	if (info.waitSemaphoreCount)
+	if (layer->getInstance()->isHeadless())
 	{
-		VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-		submit.signalSemaphoreCount = info.waitSemaphoreCount;
-		submit.pSignalSemaphores = info.pWaitSemaphores;
-		if ((result = layer->getTable()->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE)) != VK_SUCCESS)
-			return result;
-	}
+		// Remember to signal present fences since the normal queue present will not do it for us.
+		const auto *fence = findChain<VkSwapchainPresentFenceInfoKHR>(info.pNext,
+				VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR);
 
-	result = layer->getTable()->QueuePresentKHR(queue, &info);
+		if (fence)
+			for (uint32_t i = 0; i < fence->swapchainCount; i++)
+				if ((result = layer->getTable()->QueueSubmit(queue, 0, nullptr, fence->pFences[i])) != VK_SUCCESS)
+					return result;
+
+		result = VK_SUCCESS;
+	}
+	else
+	{
+		// Resignal the semaphores when we're done blitting so that the normal WSI request goes through.
+		if (info.waitSemaphoreCount)
+		{
+			VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+			submit.signalSemaphoreCount = info.waitSemaphoreCount;
+			submit.pSignalSemaphores = info.pWaitSemaphores;
+			if ((result = layer->getTable()->QueueSubmit(queue, 1, &submit, VK_NULL_HANDLE)) != VK_SUCCESS)
+				return result;
+		}
+
+		result = layer->getTable()->QueuePresentKHR(queue, &info);
+	}
 
 	// Restore the pNext link.
 	if (ppModeSkipPatch)
@@ -1678,7 +1982,10 @@ SetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount,
                   const VkHdrMetadataEXT *pMetadata)
 {
 	auto *layer = getDeviceLayer(device);
-	layer->getTable()->SetHdrMetadataEXT(device, swapchainCount, pSwapchains, pMetadata);
+
+	if (!layer->getInstance()->isHeadless())
+		layer->getTable()->SetHdrMetadataEXT(device, swapchainCount, pSwapchains, pMetadata);
+
 	fprintf(stderr, "pyrofling: HDR metadata:\n"
 	                "\tR = (%.4f, %.4f)\n"
 	                "\tG = (%.4f, %.4f)\n"
@@ -1696,6 +2003,184 @@ SetHdrMetadataEXT(VkDevice device, uint32_t swapchainCount,
 	        pMetadata->maxFrameAverageLightLevel, pMetadata->maxContentLightLevel);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL GetSwapchainImagesKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint32_t*                                   pSwapchainImageCount,
+	VkImage*                                    pSwapchainImages)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->getInstance()->isHeadless())
+		return layer->getTable()->GetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);
+
+	auto *inst = layer->getInstance();
+	auto *surface = inst->findActiveSurface(layer, swapchain);
+
+	// Shouldn't happen?
+	if (!surface)
+		return VK_ERROR_UNKNOWN;
+
+	VkResult vr = VK_SUCCESS;
+
+	if (pSwapchainImages)
+	{
+		vr = *pSwapchainImageCount >= surface->image.size() ? VK_SUCCESS : VK_INCOMPLETE;
+		*pSwapchainImageCount = std::min<uint32_t>(*pSwapchainImageCount, surface->image.size());
+		for (uint32_t i = 0; i < *pSwapchainImageCount; i++)
+			pSwapchainImages[i] = surface->image[i].image;
+	}
+	else
+	{
+		*pSwapchainImageCount = uint32_t(surface->image.size());
+	}
+
+	return vr;
+}
+
+static VkResult AcquireNextImage(Device *layer, const VkAcquireNextImageInfoKHR *pAcquireInfo, uint32_t *pImageIndex)
+{
+	auto *inst = layer->getInstance();
+	auto *surface = inst->findActiveSurface(layer, pAcquireInfo->swapchain);
+
+	if (!surface)
+		return VK_ERROR_OUT_OF_DATE_KHR;
+
+	if (!surface->acquire(*pImageIndex))
+		return VK_ERROR_OUT_OF_DATE_KHR;
+
+	auto &img = surface->image[*pImageIndex];
+	img.acquired = false;
+	img.ready = false;
+
+	if (pAcquireInfo->semaphore)
+	{
+		VkImportSemaphoreFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR };
+		importInfo.semaphore = pAcquireInfo->semaphore;
+		importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+
+		if (img.acquireFd)
+		{
+			importInfo.handleType = img.acquireFdHandleType;
+			importInfo.fd = dup(img.acquireFd.get_native_handle());
+		}
+		else
+		{
+			// Forces a signal. This is very handy.
+			importInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+			importInfo.fd = -1;
+		}
+
+		if (layer->getTable()->ImportSemaphoreFdKHR(layer->getDevice(), &importInfo) != VK_SUCCESS)
+		{
+			if (importInfo.fd >= 0)
+				::close(importInfo.fd);
+			return VK_ERROR_SURFACE_LOST_KHR;
+		}
+	}
+
+	if (pAcquireInfo->fence)
+	{
+		VkImportFenceFdInfoKHR importInfo = { VK_STRUCTURE_TYPE_IMPORT_FENCE_FD_INFO_KHR };
+		importInfo.fence = pAcquireInfo->fence;
+		importInfo.flags = VK_FENCE_IMPORT_TEMPORARY_BIT;
+
+		if (img.acquireFd)
+		{
+			// Shouldn't happen since the server will return SYNC_FD unless something really weird happened.
+			if (img.acquireFdHandleType != VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)
+				return VK_ERROR_SURFACE_LOST_KHR;
+
+			importInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+			importInfo.fd = dup(img.acquireFd.get_native_handle());
+		}
+		else
+		{
+			// Forces a signal. This is very handy.
+			importInfo.handleType = VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+			importInfo.fd = -1;
+		}
+
+		if (layer->getTable()->ImportFenceFdKHR(layer->getDevice(), &importInfo) != VK_SUCCESS)
+		{
+			if (importInfo.fd >= 0)
+				::close(importInfo.fd);
+			return VK_ERROR_SURFACE_LOST_KHR;
+		}
+	}
+
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL AcquireNextImageKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint64_t                                    timeout,
+	VkSemaphore                                 semaphore,
+	VkFence                                     fence,
+	uint32_t*                                   pImageIndex)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->getInstance()->isHeadless())
+		return layer->getTable()->AcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+
+	VkAcquireNextImageInfoKHR info = { VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR };
+	info.swapchain = swapchain;
+	info.fence = fence;
+	info.semaphore = semaphore;
+	info.timeout = timeout;
+	info.deviceMask = 0;
+	return AcquireNextImage(layer, &info, pImageIndex);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL AcquireNextImage2KHR(
+	VkDevice                                    device,
+	const VkAcquireNextImageInfoKHR*            pAcquireInfo,
+	uint32_t*                                   pImageIndex)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->getInstance()->isHeadless())
+		return layer->getTable()->AcquireNextImage2KHR(device, pAcquireInfo, pImageIndex);
+	return AcquireNextImage(layer, pAcquireInfo, pImageIndex);
+}
+
+static VkResult ReleaseSwapchainImages(Device *layer, const VkReleaseSwapchainImagesInfoKHR *pReleaseInfo)
+{
+	auto *inst = layer->getInstance();
+	auto *surface = inst->findActiveSurface(layer, pReleaseInfo->swapchain);
+	if (!surface)
+		return VK_ERROR_SURFACE_LOST_KHR;
+
+	for (uint32_t i = 0; i < pReleaseInfo->imageIndexCount; i++)
+	{
+		auto &img = surface->image[pReleaseInfo->pImageIndices[i]];
+		if (img.acquired || img.ready)
+			return VK_ERROR_VALIDATION_FAILED;
+		img.acquired = true;
+		img.ready = true;
+	}
+	return VK_SUCCESS;
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL ReleaseSwapchainImagesKHR(
+	VkDevice                                    device,
+	const VkReleaseSwapchainImagesInfoKHR*      pReleaseInfo)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->getInstance()->isHeadless())
+		return layer->getTable()->ReleaseSwapchainImagesKHR(device, pReleaseInfo);
+	return ReleaseSwapchainImages(layer, pReleaseInfo);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL ReleaseSwapchainImagesEXT(
+	VkDevice                                    device,
+	const VkReleaseSwapchainImagesInfoKHR*      pReleaseInfo)
+{
+	auto *layer = getDeviceLayer(device);
+	if (!layer->getInstance()->isHeadless())
+		return layer->getTable()->ReleaseSwapchainImagesEXT(device, pReleaseInfo);
+	return ReleaseSwapchainImages(layer, pReleaseInfo);
+}
+
 static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 {
 	static const struct
@@ -1707,6 +2192,7 @@ static PFN_vkVoidFunction interceptCoreInstanceCommand(const char *pName)
 		{ "vkDestroyInstance", reinterpret_cast<PFN_vkVoidFunction>(DestroyInstance) },
 		{ "vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(VK_LAYER_PYROFLING_CAPTURE_vkGetInstanceProcAddr) },
 		{ "vkCreateDevice", reinterpret_cast<PFN_vkVoidFunction>(CreateDevice) },
+		{ "vkEnumerateDeviceExtensionProperties", reinterpret_cast<PFN_vkVoidFunction>(EnumerateDeviceExtensionProperties) },
 	};
 
 	for (auto &cmd : coreInstanceCommands)
@@ -1726,6 +2212,7 @@ static PFN_vkVoidFunction interceptExtensionInstanceCommand(const char *pName)
 		{ "vkGetPhysicalDeviceSurfaceFormatsKHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceFormatsKHR) },
 		{ "vkGetPhysicalDeviceSurfaceFormats2KHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceFormats2KHR) },
 		{ "vkGetPhysicalDeviceSurfaceCapabilities2KHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceCapabilities2KHR) },
+		{ "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceSurfaceCapabilitiesKHR) },
 		{ "vkDestroySurfaceKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySurfaceKHR) },
 	};
 
@@ -1750,7 +2237,13 @@ static PFN_vkVoidFunction interceptDeviceCommand(const char *pName)
 		{ "vkWaitForPresent2KHR", reinterpret_cast<PFN_vkVoidFunction>(WaitForPresent2KHR) },
 		{ "vkCreateSwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(CreateSwapchainKHR) },
 		{ "vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(DestroySwapchainKHR) },
+		{ "vkAcquireNextImageKHR", reinterpret_cast<PFN_vkVoidFunction>(AcquireNextImageKHR) },
+		{ "vkAcquireNextImage2KHR", reinterpret_cast<PFN_vkVoidFunction>(AcquireNextImage2KHR) },
+		{ "vkGetSwapchainImagesKHR", reinterpret_cast<PFN_vkVoidFunction>(GetSwapchainImagesKHR) },
+		{ "vkReleaseSwapchainImagesKHR", reinterpret_cast<PFN_vkVoidFunction>(ReleaseSwapchainImagesKHR) },
+		{ "vkReleaseSwapchainImagesEXT", reinterpret_cast<PFN_vkVoidFunction>(ReleaseSwapchainImagesEXT) },
 		{ "vkDestroyDevice", reinterpret_cast<PFN_vkVoidFunction>(DestroyDevice) },
+		// In headless mode there are more entry points that need to be wrapped in theory, but do it as-needed.
 	};
 
 	for (auto &cmd : coreDeviceCommands)

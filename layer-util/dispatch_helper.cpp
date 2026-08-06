@@ -35,6 +35,7 @@ void layerInitDeviceDispatchTable(VkDevice device, VkLayerDispatchTable *table, 
 	F(AcquireNextImageKHR);
 	F(AcquireNextImage2KHR);
 	F(ReleaseSwapchainImagesEXT);
+	F(ReleaseSwapchainImagesKHR);
 	F(QueueSubmit);
 	F(QueueSubmit2);
 	F(QueueSubmit2KHR);

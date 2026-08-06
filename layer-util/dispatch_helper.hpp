@@ -104,6 +104,7 @@ struct VkLayerDispatchTable
 	PFN_vkAcquireNextImageKHR AcquireNextImageKHR;
 	PFN_vkAcquireNextImage2KHR AcquireNextImage2KHR;
 	PFN_vkReleaseSwapchainImagesEXT ReleaseSwapchainImagesEXT;
+	PFN_vkReleaseSwapchainImagesKHR ReleaseSwapchainImagesKHR;
 
 	PFN_vkQueueSubmit QueueSubmit;
 	PFN_vkQueueSubmit2 QueueSubmit2;

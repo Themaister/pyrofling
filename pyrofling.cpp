@@ -384,8 +384,10 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		if (!Vulkan::Context::init_loader(nullptr))
 			throw std::runtime_error("Failed to load Vulkan.");
 
+		const char *surface_ext = VK_KHR_SURFACE_EXTENSION_NAME;
+
 		Vulkan::Context instance_context;
-		if (!instance_context.init_instance(nullptr, 0,
+		if (!instance_context.init_instance(&surface_ext, 1,
 		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
 		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
 		                                    Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
@@ -1565,8 +1567,11 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			gpu.context->context.set_num_thread_indices(group.get_num_threads() + 1);
 			gpu.context->context.set_system_handles(handles);
 
+			const char *surface_ext = VK_KHR_SURFACE_EXTENSION_NAME;
+			const char *swapchain_ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+
 			gpu.context->context.set_instance_factory(this);
-			if (!gpu.context->context.init_instance(nullptr, 0,
+			if (!gpu.context->context.init_instance(&surface_ext, 1,
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
 			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
@@ -1575,7 +1580,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 				return false;
 
 			gpu.context->context.release_instance();
-			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, nullptr, 0,
+			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, &swapchain_ext, 1,
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
 			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
