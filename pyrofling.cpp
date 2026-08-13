@@ -35,6 +35,7 @@
 #include "pyro_server.hpp"
 #include "virtual_gamepad.hpp"
 #include "timeline_trace_file.hpp"
+#include "pyrowave_regression_results.h"
 #include <stdexcept>
 #include <vector>
 #include <thread>
@@ -1869,22 +1870,34 @@ static void print_help()
 	     "\t[--no-audio]\n"
 	     "\t[--immediate-encode]\n"
 	     "\t[--debug-gamepad-to-mouse]\n"
+	     "\t[--pyrowave-auto-quality <psnr-hvs-m-h dB> <H>]\n"
 #ifdef HAVE_PIPEWIRE
 		 "\t[--pipewire]\n"
 #endif
 		 "\turl\n");
 }
 
-static unsigned pyrowave_auto_bitrate(unsigned width, unsigned height, unsigned fps, bool chroma444, bool hdr10)
+static unsigned pyrowave_auto_bitrate(
+	int psnr, unsigned width, unsigned height, pyrowave_height_factor height_factor,
+	unsigned fps, bool chroma444, bool hdr10)
 {
-	double kbits = 125000.0 * std::pow((double(width * height) / (1280.0 * 720.0)), 0.38);
-	kbits *= chroma444 ? 1.15 : 1.0;
-	kbits *= hdr10 ? 1.2 : 1.0;
-	kbits *= fps / 60.0;
-	// Clamp to reasonable bounds.
-	kbits = std::max(kbits, 50000.0);
-	kbits = std::min(kbits, 900000.0);
-	return unsigned(kbits);
+	psnr = std::min<int>(std::max<int>(psnr, PYROWAVE_REGRESSION_MIN_PSNR_HVS_M_H), PYROWAVE_REGRESSION_MAX_PSNR_HVS_M_H);
+	double mbits = pyrowave_psnr_hvs_m_h_estimate_mbits(psnr, width, height, height_factor, chroma444, fps);
+	// Vague estimate for the time being.
+	mbits *= hdr10 ? 1.2 : 1.0;
+	return unsigned(mbits * 1000.0);
+}
+
+static pyrowave_height_factor height_factor_to_enum(double H)
+{
+	int index = int((H - 1.0) * 8.0 + 0.5);
+
+	if (index < 0)
+		return PYROWAVE_HEIGHT_FACTOR_1_00;
+	else if (index >= PYROWAVE_HEIGHT_FACTOR_2_87)
+		return PYROWAVE_HEIGHT_FACTOR_2_87;
+	else
+		return pyrowave_height_factor(index);
 }
 
 static int main_inner(int argc, char **argv)
@@ -1900,6 +1913,9 @@ static int main_inner(int argc, char **argv)
 	opts.width = 1280;
 	opts.height = 720;
 	opts.fps = 60;
+
+	pyrowave_height_factor height_factor = PYROWAVE_HEIGHT_FACTOR_2_00;
+	int psnr = 35;
 
 	Util::CLICallbacks cbs;
 	cbs.add("--fps", [&](Util::CLIParser &parser) { opts.fps = parser.next_uint(); });
@@ -1930,6 +1946,11 @@ static int main_inner(int argc, char **argv)
 	cbs.add("--fec", [&](Util::CLIParser &) { opts.fec = true; });
 	cbs.add("--offline", [&](Util::CLIParser &) { opts.walltime_to_pts = false; });
 	cbs.add("--debug-gamepad-to-mouse", [&](Util::CLIParser &) { debug_gamepad_to_mouse = true; });
+	cbs.add("--pyrowave-auto-quality", [&](Util::CLIParser &parser)
+	{
+		psnr = int(parser.next_uint());
+		height_factor = height_factor_to_enum(parser.next_double());
+	});
 #ifdef HAVE_PIPEWIRE
 	cbs.add("--pipewire", [&](Util::CLIParser &) { opts.pipewire = true; });
 #endif
@@ -1961,9 +1982,9 @@ static int main_inner(int argc, char **argv)
 
 	if (opts.encoder == "pyrowave" && !has_explicit_bitrate)
 	{
-		opts.bitrate_kbits = pyrowave_auto_bitrate(opts.width, opts.height, opts.fps, opts.chroma_444, opts.hdr10);
+		opts.bitrate_kbits = pyrowave_auto_bitrate(psnr, opts.width, opts.height, height_factor, opts.fps, opts.chroma_444, opts.hdr10);
 		opts.max_bitrate_kbits = opts.bitrate_kbits;
-		LOGI("Automatically selected %u kbits for pyrowave based on subjective heuristics.\n", opts.bitrate_kbits);
+		LOGI("Automatically selected %u kbits for pyrowave based on objective heuristics.\n", opts.bitrate_kbits);
 
 		opts.low_latency = true;
 		opts.immediate = true;

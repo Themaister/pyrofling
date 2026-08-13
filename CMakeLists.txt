@@ -97,7 +97,7 @@ if (NOT PYROFLING_LAYER_ONLY)
         add_executable(pyrofling pyrofling.cpp)
         target_compile_options(pyrofling PRIVATE ${PYROFLING_CXX_FLAGS})
         target_link_libraries(pyrofling PRIVATE
-                pyrofling-virtual-gamepad pyro-protocol pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio pyro-server)
+                pyrofling-virtual-gamepad pyro-protocol pyrofling-ipc granite-threading granite-vulkan granite-video granite-audio pyro-server pyrowave-regression-results)
         install(TARGETS pyrofling)
         set_target_properties(pyrofling PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
     endif()
