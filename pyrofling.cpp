@@ -588,7 +588,8 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 
 			color_space = VkColorSpaceKHR(image_create.wire.vk_color_space);
 
-			LOGI("Received image group request: format %d, color space %d\n",
+			LOGI("Received image group request: %u x %u, format %d, color space %d\n",
+			     image_create.wire.width, image_create.wire.height,
 			     image_create.wire.vk_format, image_create.wire.vk_color_space);
 
 			VkImageFormatListCreateInfoKHR format_info = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR };
