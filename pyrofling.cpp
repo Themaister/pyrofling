@@ -1981,11 +1981,14 @@ static int main_inner(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	if (opts.encoder == "pyrowave" && !has_explicit_bitrate)
+	if (opts.encoder == "pyrowave")
 	{
-		opts.bitrate_kbits = pyrowave_auto_bitrate(psnr, opts.width, opts.height, height_factor, opts.fps, opts.chroma_444, opts.hdr10);
-		opts.max_bitrate_kbits = opts.bitrate_kbits;
-		LOGI("Automatically selected %u kbits for pyrowave based on objective heuristics.\n", opts.bitrate_kbits);
+		if (!has_explicit_bitrate)
+		{
+			opts.bitrate_kbits = pyrowave_auto_bitrate(psnr, opts.width, opts.height, height_factor, opts.fps, opts.chroma_444, opts.hdr10);
+			opts.max_bitrate_kbits = opts.bitrate_kbits;
+			LOGI("Automatically selected %u kbits for pyrowave based on objective heuristics.\n", opts.bitrate_kbits);
+		}
 
 		opts.low_latency = true;
 		opts.immediate = true;
