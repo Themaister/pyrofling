@@ -506,6 +506,8 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 			bool had_acquire = false;
 			unsigned target_frames = phase_locked_enable ? 1 : 0;
 
+			auto start_acquire = device.write_calibrated_timestamp();
+
 			// Catch up and then rely on phase locked loop to tune latency.
 			while (decoder.get_num_ready_video_frames() > target_frames)
 			{
@@ -568,6 +570,10 @@ struct VideoPlayerApplication final : Application, EventHandler, DemuxerIOInterf
 				else
 					had_acquire = true;
 			}
+
+			auto end_acquire = device.write_calibrated_timestamp();
+			device.register_time_interval("CPU", std::move(start_acquire), std::move(end_acquire),
+			                              "video-acquire");
 
 			if (frr_adaptive && had_acquire)
 			{
