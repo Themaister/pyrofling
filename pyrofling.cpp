@@ -1572,28 +1572,30 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			const char *surface_ext = VK_KHR_SURFACE_EXTENSION_NAME;
 			const char *swapchain_ext = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
+			constexpr Vulkan::ContextCreationFlags flags =
+					Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
+					Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
+					Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
+					Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
+					Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT |
+					Vulkan::CONTEXT_CREATION_ENABLE_COMPUTE_REALTIME_GLOBAL_PRIORITY_BIT;
+
 			gpu.context->context.set_instance_factory(this);
-			if (!gpu.context->context.init_instance(&surface_ext, 1,
-			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
-			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
-			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
-			                                        Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
-			                                        Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
+			if (!gpu.context->context.init_instance(&surface_ext, 1, flags))
 				return false;
 
 			gpu.context->context.release_instance();
-			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, &swapchain_ext, 1,
-			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H264_BIT |
-			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_H265_BIT |
-			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_AV1_BIT |
-			                                      Vulkan::CONTEXT_CREATION_ENABLE_VIDEO_ENCODE_BIT |
-			                                      Vulkan::CONTEXT_CREATION_ENABLE_PUSH_DESCRIPTOR_BIT))
+			if (!gpu.context->context.init_device(gpu.gpu, VK_NULL_HANDLE, &swapchain_ext, 1, flags))
 			{
 				gpu.context.reset();
 				return false;
 			}
 
 			gpu.context->device.set_context(gpu.context->context);
+
+			LOGI("%s was created with global priority: %u\n",
+			     gpu.context->device.get_gpu_properties().deviceName,
+			     gpu.context->device.get_device_features().global_compute_priority);
 		}
 
 		// Let a "primary" GPU be the composition owner.

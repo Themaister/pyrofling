@@ -187,6 +187,26 @@ Once Proton moves over to Wayland fully, this is less likely to be an issue.
 Especially when encoding HDR, 4:4:4 chroma subsampling seems very important.
 This is currently only supported for PyroWave and non-GPU accelerated codecs in FFmpeg. GPU accelerated H.264 / H.265 is TBD.
 
+#### REALTIME prio GPU queues
+
+By default, pyrofling will try to enable REALTIME global priority to ensure lowest possible encoding latency when using e.g. pyrowave.
+On Linux, this requires either root (really not recommended), or `CAP_SYS_NICE`.
+
+```
+$ sudo setcap cap_sys_nice+eip $(which pyrofling)
+```
+
+If everything is working, the CLI should print:
+
+```
+[INFO]: AMD Radeon RX 9070 XT (RADV GFX1201) was created with global priority: 1024
+```
+
+256 is the default `MEDIUM` and usually points to global priority not working.
+This is generally only meaningful if the GPU is under heavy contention.
+It's better to run a game at a capped frame rate that it can comfortably run rather
+than slamming the GPU 100%. Slamming the GPU at 100% will add extra latency, even locally.
+
 #### Client side
 
 For VRR displays, or where absolute minimal latency (at cost of jitter) is desired:
@@ -306,3 +326,4 @@ There is none at this time. Use at your own risk and do not transmit anything se
 
 MIT for PyroFling code. Note that linking against FFmpeg (GPL-enabled build)
 may affect license of PyroFling if distributed.
+~
