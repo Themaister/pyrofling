@@ -64,7 +64,7 @@ class PipewireStream : public Handler
 {
 public:
 	PipewireStream(Dispatcher &dispatcher, SwapchainServer &server, Vulkan::Device &device);
-	bool init(unsigned width, unsigned height, unsigned fps);
+	bool init(unsigned width, unsigned height, double fps);
 
 	~PipewireStream();
 
@@ -247,7 +247,7 @@ int PipewireStream::get_fd()
 	return pw_loop_get_fd(loop);
 }
 
-bool PipewireStream::init(unsigned width, unsigned height, unsigned fps)
+bool PipewireStream::init(unsigned width, unsigned height, double fps)
 {
 	if (!device.get_device_features().supports_drm_modifiers)
 	{
@@ -320,9 +320,9 @@ bool PipewireStream::init(unsigned width, unsigned height, unsigned fps)
 	spa_rectangle min_size = SPA_RECTANGLE(1, 1);
 	spa_rectangle max_size = SPA_RECTANGLE(65535, 65535);
 
-	spa_fraction default_fps = SPA_FRACTION(fps, 1);
+	spa_fraction default_fps = SPA_FRACTION(uint32_t(std::lround(fps * 1000.0)), 1000);
 	spa_fraction lo_fps = SPA_FRACTION(0, 1);
-	spa_fraction hi_fps = SPA_FRACTION(fps, 1);
+	spa_fraction hi_fps = SPA_FRACTION(uint32_t(std::lround(fps * 1000.0)), 1000);
 
 	spa_pod_builder_add(&b, SPA_FORMAT_VIDEO_size,
 	                    SPA_POD_CHOICE_RANGE_Rectangle(&default_size, &min_size, &max_size), 0);
@@ -1511,7 +1511,7 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 		std::string path;
 		unsigned width = 0;
 		unsigned height = 0;
-		unsigned fps = 0;
+		double fps = 0.0;
 
 		unsigned bitrate_kbits = 6000;
 		unsigned max_bitrate_kbits = 8000;
@@ -1605,8 +1605,18 @@ struct SwapchainServer final : HandlerFactoryInterface, Vulkan::InstanceFactory,
 			Granite::VideoEncoder::Options options = {};
 			options.width = video_encode.width;
 			options.height = video_encode.height;
-			options.frame_timebase.num = 1;
-			options.frame_timebase.den = int(video_encode.fps);
+
+			if (std::trunc(video_encode.fps) == video_encode.fps)
+			{
+				options.frame_timebase.num = 1;
+				options.frame_timebase.den = int(video_encode.fps);
+			}
+			else
+			{
+				options.frame_timebase.num = 1000;
+				options.frame_timebase.den = std::lround(1000.0 * video_encode.fps);
+			}
+
 			options.encoder = video_encode.encoder.c_str();
 			options.walltime_to_pts = video_encode.walltime_to_pts;
 
@@ -1738,8 +1748,8 @@ void PipewireStream::send_encoding(const Vulkan::Image &img)
 
 struct HeartbeatHandler final : Handler
 {
-	HeartbeatHandler(Dispatcher &dispatcher_, SwapchainServer &server_, unsigned fps)
-			: Handler(dispatcher_), server(server_), timebase_ns(1000000000u / fps)
+	HeartbeatHandler(Dispatcher &dispatcher_, SwapchainServer &server_, double fps)
+			: Handler(dispatcher_), server(server_), timebase_ns(uint64_t(1e9 / fps))
 	{
 		// Nudge the timebase by up to 1% in 0.01% increments.
 		timebase_ns_fraction = timebase_ns / 10000;
@@ -1915,13 +1925,13 @@ static int main_inner(int argc, char **argv)
 
 	opts.width = 1280;
 	opts.height = 720;
-	opts.fps = 60;
+	opts.fps = 60.0;
 
 	pyrowave_height_factor height_factor = PYROWAVE_HEIGHT_FACTOR_2_00;
 	int psnr = 35;
 
 	Util::CLICallbacks cbs;
-	cbs.add("--fps", [&](Util::CLIParser &parser) { opts.fps = parser.next_uint(); });
+	cbs.add("--fps", [&](Util::CLIParser &parser) { opts.fps = parser.next_double(); });
 	cbs.add("--client-rate-multiplier", [&](Util::CLIParser &parser) { client_rate_multiplier = parser.next_uint(); });
 	cbs.add("--width", [&](Util::CLIParser &parser) { opts.width = parser.next_uint(); });
 	cbs.add("--height", [&](Util::CLIParser &parser) { opts.height = parser.next_uint(); });
@@ -2003,7 +2013,7 @@ static int main_inner(int argc, char **argv)
 		}
 	}
 
-	LOGI("Encoding: %u x %u @ %u fps (client %u fps) to \"%s\" || rate = %u kb/s || maxrate = %u kb/s || vbvsize = %u kb/s || gop = %f seconds\n",
+	LOGI("Encoding: %u x %u @ %.3f fps (client %.3f fps) to \"%s\" || rate = %u kb/s || maxrate = %u kb/s || vbvsize = %u kb/s || gop = %f seconds\n",
 	     opts.width, opts.height, opts.fps, opts.fps * client_rate_multiplier, opts.path.c_str(),
 	     opts.bitrate_kbits, opts.max_bitrate_kbits, opts.vbv_size_kbits, opts.gop_seconds);
 
