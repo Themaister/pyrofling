@@ -50,6 +50,21 @@ Based on this feedback, we can generate reports which cover:
   On VRR where we're running below refresh rate, this delay should be virtually zero,
   but on fixed refresh rate displays, a large value here can pinpoint FIFO buffering latency.
 
+## Granting access to /dev/uinput
+
+You need to grant your user access to the `/dev/uinput` file. You can do this using udev rules by creating the file:
+
+```
+echo 'KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"' >> /etc/udev/rules.d/99-uinput.rules
+```
+
+Once the file has been created, restart your system (running `udevadm control --reload` and `udevadm trigger` is not enough).
+
+If you have the Steam package installed natively on your system, you probably don’t need to do anything,
+since Steam already handles this in the `/usr/lib/udev/rules.d/60-steam-input.rules` file.
+
+The `uinput` module will probably be loaded automatically when you use the layer. If not, load it with `modprobe uinput`.
+
 ## Enabling the layer
 
 Once the layer is installed, `LATENCY_MEASUREMENT=1` is used to enable the layer.
