@@ -130,7 +130,15 @@ if (NOT PYROFLING_LAYER_ONLY)
 
     add_granite_offline_tool(pyrofling-gamepad pyrofling_gamepad.cpp)
     set_target_properties(pyrofling-gamepad PROPERTIES LINK_FLAGS "${PYROFLING_LINK_FLAGS}")
-    target_link_libraries(pyrofling-gamepad PRIVATE pyro-client SDL3-static granite-input-sdl)
+    target_link_libraries(pyrofling-gamepad PRIVATE pyro-client granite-input-sdl)
+
+    if (GRANITE_SYSTEM_SDL)
+        find_package(SDL3 REQUIRED)
+        target_link_libraries(pyrofling-gamepad PRIVATE SDL3::SDL3-shared)
+    else()
+        target_link_libraries(pyrofling-gamepad PRIVATE SDL3-static)
+    endif()
+
     if (WIN32)
         target_link_libraries(pyrofling-gamepad PRIVATE winmm)
     endif()
